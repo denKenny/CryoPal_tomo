@@ -1,0 +1,28 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+
+# Tool caches
+.pytest_cache/
+.mypy_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Local CryoPal_tomo runtime outputs
+*.cryopal.json
+*.cryopal.settings
+*.cryopal.slurm.json
+*.cryopal.shortcuts.json
+*.cryopal.custom_jobs.json
+.cryopal_slurm/
+cryopal_debug.log
+
+# Temporary local outputs
+tmp/
+temp/

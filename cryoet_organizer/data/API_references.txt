@@ -1,0 +1,1790 @@
+create_settings
+
+WarpTools - a collection of tools for EM data pre-processing
+Version 2.0.0
+
+Showing all available options for command create_settings:
+
+--------------------------------------------------------------------------------
+
+-o, --output           REQUIRED Path to the new settings file
+
+--folder_processing    Processing folder location
+
+--folder_data          REQUIRED Raw data folder location
+
+--recursive            Recursively search for files in sub-folders (only when pr
+                       ocessing and raw data locations are different)
+
+--extension            Import file search term: Use e.g. *.mrc to process all MR
+                       C files, or something more specific like FoilHole1_*.mrc
+
+--angpix               REQUIRED Unbinned pixel size in Angstrom. Alternatively s
+                       pecify the path to an image or MDOC file to read the valu
+                       e from. If a wildcard pattern is specified, the first fil
+                       e will be used
+
+--bin                  2^x pre-binning factor, applied in Fourier space when loa
+                       ding raw data. 0 = no binning, 1 = 2x2 binning, 2 = 4x4 b
+                       inning, supports non-integer values
+
+--bin_angpix           Choose the binning exponent automatically to match this t
+                       arget pixel size in Angstrom
+
+--gain_path            Path to gain file, relative to import folder
+
+--defects_path         Path to defects file, relative to import folder
+
+--gain_flip_x          Flip X axis of the gain image
+
+--gain_flip_y          Flip Y axis of the gain image
+
+--gain_transpose       Transpose gain image (i.e. swap X and Y axes)
+
+--exposure             Default: 1. Overall exposure per Angstrom^2; use negative
+                        value to specify exposure/frame instead
+
+--eer_ngroups          Default: 40. Number of groups to combine raw EER frames i
+                       nto, i.e. number of 'virtual' frames in resulting stack; 
+                       use negative value to specify the number of frames per vi
+                       rtual frame instead
+
+--eer_groupexposure    As an alternative to --eer_ngroups, fractionate the frame
+                       s so that a group will have this exposure in e-/A^2; this
+                        overrides --eer_ngroups
+
+--tomo_dimensions      X, Y, and Z dimensions of the full tomogram in unbinned p
+                       ixels, separated by 'x', e.g. 4096x4096x1000
+move_data
+
+WarpTools - a collection of tools for EM data pre-processing
+Version 2.0.0
+
+Showing all available options for command move_data:
+
+------------------------------Data import settings------------------------------
+
+--settings                REQUIRED Path to Warp's .settings file, typically loca
+                          ted in the processing folder. Default file name is 'pr
+                          evious.settings'.
+
+
+--------------------------------------------------------------------------------
+
+--to                      REQUIRED New directory containing raw data; if raw dat
+                          a are located in sub-folders and require recursive sea
+                          rch, specify the top directory here
+
+--new_settings            REQUIRED Where to save an updated .settings file conta
+                          ining the new raw data location
+
+
+----------------------Advanced data import & flow options-----------------------
+
+--input_data              Overrides the list of input files specified in the .se
+                          ttings file. Accepts a space-separated list of files, 
+                          wildcard patterns, or .txt files with one file name pe
+                          r line.
+
+--input_data_recursive    Enables recursive search for files matching the wildca
+                          rd pattern specified in --input_data. Only applicable 
+                          when processing and directories are separate. All file
+                           names must be unique.
+
+--input_processing        Specifies an alternative directory containing pre-proc
+                          essed results. Overrides the processing directory in t
+                          he .settings file.
+
+--output_processing       Specifies an alternative directory to save processing 
+                          results. Overrides the processing directory in the .se
+                          ttings file.
+
+--input_norawdata         Ignore the existence of raw data and look for XML meta
+                          data in the processing directory instead.
+filter_quality
+
+WarpTools - a collection of tools for EM data pre-processing
+Version 2.0.0
+
+Showing all available options for command filter_quality:
+
+------------------------------Data import settings------------------------------
+
+--settings                REQUIRED Path to Warp's .settings file, typically loca
+                          ted in the processing folder. Default file name is 'pr
+                          evious.settings'.
+
+
+------------------------Output mode (mutually exclusive)------------------------
+
+--histograms              Print a histogram for each quality metric and exit
+
+-o, --output              Path to a .txt file that will contain a list of series
+                           that pass the filter criteria
+
+
+----------------------------------CTF metrics-----------------------------------
+
+--defocus                 Defocus in µm: 1 value = min; 2 values = min & max
+
+--astigmatism             Astigmatism deviation from the dataset's mean, express
+                          ed in standard deviations: 1 value = min; 2 values = m
+                          in & max
+
+--phase                   Phase shift as a fraction of π: 1 value = min; 2 value
+                          s = min & max
+
+--resolution              Resolution estimate based on CTF fit: 1 value = min; 2
+                           values = min & max
+
+
+---------------------------------Motion metrics---------------------------------
+
+--motion                  Average motion in first 1/3 of a frame series in Å: 1 
+                          value = min; 2 values = min & max
+
+
+-----------------------------Image content metrics------------------------------
+
+--crap                    Percentage of masked area in an image (frame series on
+                          ly): 1 value = min; 2 values = min & max
+
+--particles               Number of particles: 1 value = min; 2 values = min & m
+                          ax; requires --particles_star to be set
+
+--particles_star          Path to STAR file(s) with particle information; may co
+                          ntain a wildcard that matches multiple files
+
+
+------------------------------Tilt series metrics-------------------------------
+
+--ntilts                  Number of tilts in a tilt series: 1 value = min; 2 val
+                          ues = min & max
+
+
+----------------------Advanced data import & flow options-----------------------
+
+--input_data              Overrides the list of input files specified in the .se
+                          ttings file. Accepts a space-separated list of files, 
+                          wildcard patterns, or .txt files with one file name pe
+                          r line.
+
+--input_data_recursive    Enables recursive search for files matching the wildca
+                          rd pattern specified in --input_data. Only applicable 
+                          when processing and directories are separate. All file
+                           names must be unique.
+
+--input_processing        Specifies an alternative directory containing pre-proc
+                          essed results. Overrides the processing directory in t
+                          he .settings file.
+
+--output_processing       Specifies an alternative directory to save processing 
+                          results. Overrides the processing directory in the .se
+                          ttings file.
+
+--input_norawdata         Ignore the existence of raw data and look for XML meta
+                          data in the processing directory instead.
+change_selection
+
+WarpTools - a collection of tools for EM data pre-processing
+Version 2.0.0
+
+Showing all available options for command change_selection:
+
+------------------------------Data import settings------------------------------
+
+--settings                REQUIRED Path to Warp's .settings file, typically loca
+                          ted in the processing folder. Default file name is 'pr
+                          evious.settings'.
+
+
+--------------------------------------------------------------------------------
+
+--select                  Change status to selected
+
+--deselect                Change status to deselected
+
+--null                    Change status to null, which is the default status
+
+--invert                  Invert status if it isn't null
+
+
+----------------------Advanced data import & flow options-----------------------
+
+--input_data              Overrides the list of input files specified in the .se
+                          ttings file. Accepts a space-separated list of files, 
+                          wildcard patterns, or .txt files with one file name pe
+                          r line.
+
+--input_data_recursive    Enables recursive search for files matching the wildca
+                          rd pattern specified in --input_data. Only applicable 
+                          when processing and directories are separate. All file
+                           names must be unique.
+
+--input_processing        Specifies an alternative directory containing pre-proc
+                          essed results. Overrides the processing directory in t
+                          he .settings file.
+
+--output_processing       Specifies an alternative directory to save processing 
+                          results. Overrides the processing directory in the .se
+                          ttings file.
+
+--input_norawdata         Ignore the existence of raw data and look for XML meta
+                          data in the processing directory instead.
+threshold_picks
+
+WarpTools - a collection of tools for EM data pre-processing
+Version 2.0.0
+
+Showing all available options for command threshold_picks:
+
+------------------------------Data import settings------------------------------
+
+--settings                REQUIRED Path to Warp's .settings file, typically loca
+                          ted in the processing folder. Default file name is 'pr
+                          evious.settings'.
+
+
+--------------------------------------------------------------------------------
+
+--in_suffix               REQUIRED Suffix for the names of the input STAR files 
+                          (file names will be assumed to match {item name}_{--in
+                          _suffix}.star pattern)
+
+--out_suffix              REQUIRED Suffix for the names of the output STAR files
+                           (file names will be {item name}_{--in_suffix}_{--outs
+                          uffix}.star)
+
+--out_combined            Path to a single STAR file into which all results will
+                           be combined; internal paths will be made relative to 
+                          this location
+
+--minimum                 Remove all particles below this threshold
+
+--maximum                 Remove all particles above this threshold
+
+--top_series              Keep this many top-scoring series
+
+--top_picks               Keep this many top-scoring particles for each series
+
+
+----------------------Advanced data import & flow options-----------------------
+
+--input_data              Overrides the list of input files specified in the .se
+                          ttings file. Accepts a space-separated list of files, 
+                          wildcard patterns, or .txt files with one file name pe
+                          r line.
+
+--input_data_recursive    Enables recursive search for files matching the wildca
+                          rd pattern specified in --input_data. Only applicable 
+                          when processing and directories are separate. All file
+                           names must be unique.
+
+--input_processing        Specifies an alternative directory containing pre-proc
+                          essed results. Overrides the processing directory in t
+                          he .settings file.
+
+--output_processing       Specifies an alternative directory to save processing 
+                          results. Overrides the processing directory in the .se
+                          ttings file.
+
+--input_norawdata         Ignore the existence of raw data and look for XML meta
+                          data in the processing directory instead.
+
+Frame Series
+fs_motion_and_ctf
+
+WarpTools - a collection of tools for EM data pre-processing
+Version 2.0.0
+
+Showing all available options for command fs_motion_and_ctf:
+
+------------------------------Data import settings------------------------------
+
+--settings                REQUIRED Path to Warp's .settings file, typically loca
+                          ted in the processing folder. Default file name is 'pr
+                          evious.settings'.
+
+
+--------------------------------------------------------------------------------
+
+--m_range_min             Default: 500. Minimum resolution in Angstrom to consid
+                          er in fit
+
+--m_range_max             Default: 10. Maximum resolution in Angstrom to conside
+                          r in fit
+
+--m_bfac                  Default: -500. Downweight higher spatial frequencies u
+                          sing a B-factor, in Angstrom^2
+
+--m_grid                  Resolution of the motion model grid in X, Y, and tempo
+                          ral dimensions, separated by 'x': e.g. 5x5x40; empty =
+                           auto
+
+--c_window                Default: 512. Patch size for CTF estimation in binned 
+                          pixels
+
+--c_range_min             Default: 30. Minimum resolution in Angstrom to conside
+                          r in fit
+
+--c_range_max             Default: 4. Maximum resolution in Angstrom to consider
+                           in fit
+
+--c_defocus_min           Default: 0.5. Minimum defocus value in um to explore d
+                          uring fitting
+
+--c_defocus_max           Default: 5. Maximum defocus value in um to explore dur
+                          ing fitting
+
+--c_voltage               Default: 300. Acceleration voltage of the microscope i
+                          n kV
+
+--c_cs                    Default: 2.7. Spherical aberration of the microscope i
+                          n mm
+
+--c_amplitude             Default: 0.07. Amplitude contrast of the sample, usual
+                          ly 0.07-0.10 for cryo
+
+--c_fit_phase             Fit the phase shift of a phase plate
+
+--c_use_sum               Use the movie average spectrum instead of the average 
+                          of individual frames' spectra. Can help in the absence
+                           of an energy filter, or when signal is low.
+
+--c_grid                  Resolution of the defocus model grid in X, Y, and temp
+                          oral dimensions, separated by 'x': e.g. 5x5x40; empty 
+                          = auto; Z > 1 is purely experimental
+
+--out_averages            Export aligned averages
+
+--out_average_halves      Export aligned averages of odd and even frames separat
+                          ely, e.g. for denoiser training
+
+--out_skip_first          Default: 0. Skip first N frames when exporting average
+                          s
+
+--out_skip_last           Default: 0. Skip last N frames when exporting averages
+
+
+-------------------------------Work distribution--------------------------------
+
+--device_list             Space-separated list of GPU IDs to use for processing.
+                           Default: all GPUs in the system
+
+--perdevice               Default: 1. Number of processes per GPU
+
+
+----------------------Advanced data import & flow options-----------------------
+
+--input_data              Overrides the list of input files specified in the .se
+                          ttings file. Accepts a space-separated list of files, 
+                          wildcard patterns, or .txt files with one file name pe
+                          r line.
+
+--input_data_recursive    Enables recursive search for files matching the wildca
+                          rd pattern specified in --input_data. Only applicable 
+                          when processing and directories are separate. All file
+                           names must be unique.
+
+--input_processing        Specifies an alternative directory containing pre-proc
+                          essed results. Overrides the processing directory in t
+                          he .settings file.
+
+--output_processing       Specifies an alternative directory to save processing 
+                          results. Overrides the processing directory in the .se
+                          ttings file.
+
+--input_norawdata         Ignore the existence of raw data and look for XML meta
+                          data in the processing directory instead.
+
+
+-----------------------Advanced remote work distribution------------------------
+
+--workers                 List of remote workers to be used instead of locally s
+                          pawned processes. Formatted as hostname:port, separate
+                          d by spaces
+fs_motion
+
+WarpTools - a collection of tools for EM data pre-processing
+Version 2.0.0
+
+Showing all available options for command fs_motion:
+
+------------------------------Data import settings------------------------------
+
+--settings                REQUIRED Path to Warp's .settings file, typically loca
+                          ted in the processing folder. Default file name is 'pr
+                          evious.settings'.
+
+
+--------------------------------------------------------------------------------
+
+--range_min               Default: 500. Minimum resolution in Angstrom to consid
+                          er in fit
+
+--range_max               Default: 10. Maximum resolution in Angstrom to conside
+                          r in fit
+
+--bfac                    Default: -500. Downweight higher spatial frequencies u
+                          sing a B-factor, in Angstrom^2
+
+--grid                    Resolution of the motion model grid in X, Y, and tempo
+                          ral dimensions, separated by 'x': e.g. 5x5x40; empty =
+                           auto
+
+--averages                Export aligned averages
+
+--average_halves          Export aligned averages of odd and even frames separat
+                          ely, e.g. for denoiser training
+
+--skip_first              Default: 0. Skip first N frames when exporting average
+                          s
+
+--skip_last               Default: 0. Skip last N frames when exporting averages
+
+
+-------------------------------Work distribution--------------------------------
+
+--device_list             Space-separated list of GPU IDs to use for processing.
+                           Default: all GPUs in the system
+
+--perdevice               Default: 1. Number of processes per GPU
+
+
+----------------------Advanced data import & flow options-----------------------
+
+--input_data              Overrides the list of input files specified in the .se
+                          ttings file. Accepts a space-separated list of files, 
+                          wildcard patterns, or .txt files with one file name pe
+                          r line.
+
+--input_data_recursive    Enables recursive search for files matching the wildca
+                          rd pattern specified in --input_data. Only applicable 
+                          when processing and directories are separate. All file
+                           names must be unique.
+
+--input_processing        Specifies an alternative directory containing pre-proc
+                          essed results. Overrides the processing directory in t
+                          he .settings file.
+
+--output_processing       Specifies an alternative directory to save processing 
+                          results. Overrides the processing directory in the .se
+                          ttings file.
+
+--input_norawdata         Ignore the existence of raw data and look for XML meta
+                          data in the processing directory instead.
+
+
+-----------------------Advanced remote work distribution------------------------
+
+--workers                 List of remote workers to be used instead of locally s
+                          pawned processes. Formatted as hostname:port, separate
+                          d by spaces
+fs_ctf
+
+WarpTools - a collection of tools for EM data pre-processing
+Version 2.0.0
+
+Showing all available options for command fs_ctf:
+
+------------------------------Data import settings------------------------------
+
+--settings                REQUIRED Path to Warp's .settings file, typically loca
+                          ted in the processing folder. Default file name is 'pr
+                          evious.settings'.
+
+
+--------------------------------------------------------------------------------
+
+--window                  Default: 512. Patch size for CTF estimation in binned 
+                          pixels
+
+--range_min               Default: 30. Minimum resolution in Angstrom to conside
+                          r in fit
+
+--range_max               Default: 4. Maximum resolution in Angstrom to consider
+                           in fit
+
+--defocus_min             Default: 0.5. Minimum defocus value in um to explore d
+                          uring fitting
+
+--defocus_max             Default: 5. Maximum defocus value in um to explore dur
+                          ing fitting
+
+--voltage                 Default: 300. Acceleration voltage of the microscope i
+                          n kV
+
+--cs                      Default: 2.7. Spherical aberration of the microscope i
+                          n mm
+
+--amplitude               Default: 0.07. Amplitude contrast of the sample, usual
+                          ly 0.07-0.10 for cryo
+
+--fit_phase               Fit the phase shift of a phase plate
+
+--use_sum                 Use the movie average spectrum instead of the average 
+                          of individual frames' spectra. Can help in the absence
+                           of an energy filter, or when signal is low.
+
+--grid                    Resolution of the defocus model grid in X, Y, and temp
+                          oral dimensions, separated by 'x': e.g. 5x5x40; empty 
+                          = auto; Z > 1 is purely experimental
+
+
+-------------------------------Work distribution--------------------------------
+
+--device_list             Space-separated list of GPU IDs to use for processing.
+                           Default: all GPUs in the system
+
+--perdevice               Default: 1. Number of processes per GPU
+
+
+----------------------Advanced data import & flow options-----------------------
+
+--input_data              Overrides the list of input files specified in the .se
+                          ttings file. Accepts a space-separated list of files, 
+                          wildcard patterns, or .txt files with one file name pe
+                          r line.
+
+--input_data_recursive    Enables recursive search for files matching the wildca
+                          rd pattern specified in --input_data. Only applicable 
+                          when processing and directories are separate. All file
+                           names must be unique.
+
+--input_processing        Specifies an alternative directory containing pre-proc
+                          essed results. Overrides the processing directory in t
+                          he .settings file.
+
+--output_processing       Specifies an alternative directory to save processing 
+                          results. Overrides the processing directory in the .se
+                          ttings file.
+
+--input_norawdata         Ignore the existence of raw data and look for XML meta
+                          data in the processing directory instead.
+
+
+-----------------------Advanced remote work distribution------------------------
+
+--workers                 List of remote workers to be used instead of locally s
+                          pawned processes. Formatted as hostname:port, separate
+                          d by spaces
+fs_boxnet_infer
+
+WarpTools - a collection of tools for EM data pre-processing
+Version 2.0.0
+
+Showing all available options for command fs_boxnet_infer:
+
+------------------------------Data import settings------------------------------
+
+--settings                REQUIRED Path to Warp's .settings file, typically loca
+                          ted in the processing folder. Default file name is 'pr
+                          evious.settings'.
+
+
+--------------------------------------------------------------------------------
+
+--model                   REQUIRED Path to the .pt file containing the model wei
+                          ghts
+
+--perprocess              Default: 4. Number of threads per process; the model i
+                          s loaded only once per process and oversubscription ca
+                          n save memory
+
+--diameter                Default: 100. Approximate particle diameter in Angstro
+                          m
+
+--threshold               Default: 0.5. Picking score threshold, between 0.0 and
+                           1.0
+
+--distance                Default: 0. Minimum distance in Angstrom to maintain b
+                          etween picked positions and masked pixels
+
+--negative                Expect negative stain-like contrast (mass = bright)
+
+--suffix_star             Override the suffix added to the particle STAR file; l
+                          eave empty to use model name
+
+--patchsize               Default: 512. Size of the BoxNet input window that the
+                           model was trained with, a multiple of 256; the defaul
+                          t for models shipped with Warp is 512
+
+
+-------------------------------Work distribution--------------------------------
+
+--device_list             Space-separated list of GPU IDs to use for processing.
+                           Default: all GPUs in the system
+
+--perdevice               Default: 1. Number of processes per GPU
+
+
+----------------------Advanced data import & flow options-----------------------
+
+--input_data              Overrides the list of input files specified in the .se
+                          ttings file. Accepts a space-separated list of files, 
+                          wildcard patterns, or .txt files with one file name pe
+                          r line.
+
+--input_data_recursive    Enables recursive search for files matching the wildca
+                          rd pattern specified in --input_data. Only applicable 
+                          when processing and directories are separate. All file
+                           names must be unique.
+
+--input_processing        Specifies an alternative directory containing pre-proc
+                          essed results. Overrides the processing directory in t
+                          he .settings file.
+
+--output_processing       Specifies an alternative directory to save processing 
+                          results. Overrides the processing directory in the .se
+                          ttings file.
+
+--input_norawdata         Ignore the existence of raw data and look for XML meta
+                          data in the processing directory instead.
+
+
+-----------------------Advanced remote work distribution------------------------
+
+--workers                 List of remote workers to be used instead of locally s
+                          pawned processes. Formatted as hostname:port, separate
+                          d by spaces
+fs_boxnet_train
+
+WarpTools - a collection of tools for EM data pre-processing
+Version 2.0.0
+
+Showing all available options for command fs_boxnet_train:
+
+--------------------------------------------------------------------------------
+
+--model_in            Path to the .pt file containing the old model weights; mod
+                      el will be initialized from scratch if this is left empty
+
+--model_out           REQUIRED Path to the .pt file where the new model weights 
+                      will be saved
+
+--examples            REQUIRED Path to a folder containing TIFF files with examp
+                      les prepared with boxnet_examples_frameseries
+
+--examples_general    Path to a folder containing TIFF files with examples used 
+                      to train a more general model, which will be mixed 1:1 wit
+                      h new examples to reduce overfitting
+
+--no_mask             Don't consider mask labels in training; they will be conve
+                      rted to background labels
+
+--patchsize           Default: 512. Size of the BoxNet input window, a multiple 
+                      of 256; remember to use the same window with boxnet_infer_
+                      frameseries
+
+--batchsize           Default: 8. Size of the minibatches used in training; larg
+                      er batches require more GPU memory; must be divisible by n
+                      umber of devices
+
+--lr_start            Default: 5E-05. Learning rate at training start
+
+--lr_end              Default: 1E-05. Learning rate at training end, with linear
+                       interpolation in-between
+
+--epochs              Default: 100. Number of training epochs
+
+--checkpoints         Default: 0. Save checkpoints every N minutes; set to 0 to 
+                      disable
+
+--devices             Space-separated list of GPU IDs to be used for training
+fs_export_micrographs
+
+WarpTools - a collection of tools for EM data pre-processing
+Version 2.0.0
+
+Showing all available options for command fs_export_micrographs:
+
+------------------------------Data import settings------------------------------
+
+--settings                REQUIRED Path to Warp's .settings file, typically loca
+                          ted in the processing folder. Default file name is 'pr
+                          evious.settings'.
+
+
+--------------------------------------------------------------------------------
+
+--averages                Export aligned averages
+
+--average_halves          Export aligned averages of odd and even frames separat
+                          ely, e.g. for denoiser training
+
+--skip_first              Default: 0. Skip first N frames when exporting average
+                          s
+
+--skip_last               Default: 0. Skip last N frames when exporting averages
+
+
+-------------------------------Work distribution--------------------------------
+
+--device_list             Space-separated list of GPU IDs to use for processing.
+                           Default: all GPUs in the system
+
+--perdevice               Default: 1. Number of processes per GPU
+
+
+----------------------Advanced data import & flow options-----------------------
+
+--input_data              Overrides the list of input files specified in the .se
+                          ttings file. Accepts a space-separated list of files, 
+                          wildcard patterns, or .txt files with one file name pe
+                          r line.
+
+--input_data_recursive    Enables recursive search for files matching the wildca
+                          rd pattern specified in --input_data. Only applicable 
+                          when processing and directories are separate. All file
+                           names must be unique.
+
+--input_processing        Specifies an alternative directory containing pre-proc
+                          essed results. Overrides the processing directory in t
+                          he .settings file.
+
+--output_processing       Specifies an alternative directory to save processing 
+                          results. Overrides the processing directory in the .se
+                          ttings file.
+
+--input_norawdata         Ignore the existence of raw data and look for XML meta
+                          data in the processing directory instead.
+
+
+-----------------------Advanced remote work distribution------------------------
+
+--workers                 List of remote workers to be used instead of locally s
+                          pawned processes. Formatted as hostname:port, separate
+                          d by spaces
+fs_export_particles
+
+WarpTools - a collection of tools for EM data pre-processing
+Version 2.0.0
+
+Showing all available options for command fs_export_particles:
+
+------------------------------Data import settings------------------------------
+
+--settings                 REQUIRED Path to Warp's .settings file, typically loc
+                           ated in the processing folder. Default file name is '
+                           previous.settings'.
+
+
+----------------------STAR files with particle coordinates----------------------
+
+-i, --input                REQUIRED Path to folder containing the STAR files; or
+                            path to a single STAR file
+
+--patterns                 Space-separated list of file name search patterns or 
+                           STAR file names when --star is a folder
+
+
+-------------------------------------Output-------------------------------------
+
+-o, --output               REQUIRED Where to write the STAR file containing info
+                           rmation about the exported particles
+
+--suffix_out               Default: . Suffix to add at the end of each stack's n
+                           ame; the full name will be [movie name][--suffix_out]
+                           .mrcs
+
+--angpix_out               Pixel size the extracted particles will be scaled to;
+                            leave out to use binned pixel size from input settin
+                           gs
+
+--box                      REQUIRED Particle box size in pixels
+
+--diameter                 REQUIRED Particle diameter in Angstrom
+
+--relative_output_paths    Make paths in output STAR file relative to the locati
+                           on of the STAR file. They will be relative to the wor
+                           king directory otherwise.
+
+
+-------------------Export type (REQUIRED, mutually exclusive)-------------------
+
+--averages                 Export particle averages; mutually exclusive with oth
+                           er export types
+
+--halves                   Export particle half-averages e.g. for denoising; mut
+                           ually exclusive with other export types
+
+--only_star                Don't export, only write out STAR table; mutually exc
+                           lusive with other export types
+
+
+-------------------------------Coordinate scaling-------------------------------
+
+--angpix_coords            REQUIRED Pixel size for the input coordinates
+
+--angpix_shifts            Pixel size for refined shifts if not given in Angstro
+                           m (when using rlnOriginX instead of rlnOriginXAngst)
+
+
+---------------------------------Expert options---------------------------------
+
+--dont_invert              Don't invert contrast, e.g. for negative stain data
+
+--dont_normalize           Don't normalize background (RELION will complain!)
+
+--dont_center              Don't re-center particles based on refined shifts
+
+--flip_phases              Pre-flip phases in bigger box to avoid signal loss du
+                           e to delocalization
+
+--keep_ctf                 Keep CTF information from STAR inputs
+
+--skip_first_frames        Default: 0. Skip first N frames
+
+--skip_last_frames         Default: 0. Skip last N frames
+
+
+-------------------------------Work distribution--------------------------------
+
+--device_list              Space-separated list of GPU IDs to use for processing
+                           . Default: all GPUs in the system
+
+--perdevice                Default: 1. Number of processes per GPU
+
+
+----------------------Advanced data import & flow options-----------------------
+
+--input_data               Overrides the list of input files specified in the .s
+                           ettings file. Accepts a space-separated list of files
+                           , wildcard patterns, or .txt files with one file name
+                            per line.
+
+--input_data_recursive     Enables recursive search for files matching the wildc
+                           ard pattern specified in --input_data. Only applicabl
+                           e when processing and directories are separate. All f
+                           ile names must be unique.
+
+--input_processing         Specifies an alternative directory containing pre-pro
+                           cessed results. Overrides the processing directory in
+                            the .settings file.
+
+--output_processing        Specifies an alternative directory to save processing
+                            results. Overrides the processing directory in the .
+                           settings file.
+
+--input_norawdata          Ignore the existence of raw data and look for XML met
+                           adata in the processing directory instead.
+
+
+-----------------------Advanced remote work distribution------------------------
+
+--workers                  List of remote workers to be used instead of locally 
+                           spawned processes. Formatted as hostname:port, separa
+                           ted by spaces
+
+Tilt Series
+ts_import
+
+WarpTools - a collection of tools for EM data pre-processing
+Version 2.0.0
+
+Showing all available options for command ts_import:
+
+--------------------------------------------------------------------------------
+
+--mdocs            REQUIRED Path to the folder containing MDOC files
+
+--pattern          Default: *.mdoc. File name pattern to search for in the MDOC 
+                   folder
+
+--frameseries      REQUIRED Path to a folder containing frame series processing 
+                   results and their aligned averages
+
+--tilt_exposure    REQUIRED Per-tilt exposure in e-/A^2
+
+--dont_invert      Don't invert tilt angles compared to IMOD's convention (inver
+                   sion is usually needed to match IMOD's geometric handedness).
+                    This will flip the geometric handedness
+
+--override_axis    Override the tilt axis angle with this value
+
+--auto_zero        Adjust tilt angles so that the tilt with the highest average 
+                   intensity becomes the 0-tilt
+
+--tilt_offset      Subtract this value from all tilt angle values to compensate 
+                   pre-tilt
+
+--max_tilt         Default: 90. Exclude all tilts above this (absolute) tilt ang
+                   le
+
+--min_intensity    Default: 0. Exclude tilts if their average intensity is below
+                    MinIntensity * cos(angle) * 0-tilt intensity; set to 0 to no
+                   t exclude anything
+
+--max_mask         Default: 1. Exclude tilts if more than this fraction of their
+                    pixels is masked; needs frame series with BoxNet masking res
+                   ults
+
+--min_ntilts       Default: 1. Only import tilt series that have at least this m
+                   any tilts after all the other filters have been applied
+
+-o, --output       REQUIRED Path to a folder where the created .tomostar files w
+                   ill be saved
+ts_stack
+
+WarpTools - a collection of tools for EM data pre-processing
+Version 2.0.0
+
+Showing all available options for command ts_stack:
+
+------------------------------Data import settings------------------------------
+
+--settings                REQUIRED Path to Warp's .settings file, typically loca
+                          ted in the processing folder. Default file name is 'pr
+                          evious.settings'.
+
+
+--------------------------------------------------------------------------------
+
+--angpix                  Rescale tilt images to this pixel size; leave out to k
+                          eep the original pixel size
+
+--mask                    Apply mask to each image if available; masked areas wi
+                          ll be filled with Gaussian noise
+
+
+-------------------------------Work distribution--------------------------------
+
+--device_list             Space-separated list of GPU IDs to use for processing.
+                           Default: all GPUs in the system
+
+--perdevice               Default: 1. Number of processes per GPU
+
+
+----------------------Advanced data import & flow options-----------------------
+
+--input_data              Overrides the list of input files specified in the .se
+                          ttings file. Accepts a space-separated list of files, 
+                          wildcard patterns, or .txt files with one file name pe
+                          r line.
+
+--input_data_recursive    Enables recursive search for files matching the wildca
+                          rd pattern specified in --input_data. Only applicable 
+                          when processing and directories are separate. All file
+                           names must be unique.
+
+--input_processing        Specifies an alternative directory containing pre-proc
+                          essed results. Overrides the processing directory in t
+                          he .settings file.
+
+--output_processing       Specifies an alternative directory to save processing 
+                          results. Overrides the processing directory in the .se
+                          ttings file.
+
+--input_norawdata         Ignore the existence of raw data and look for XML meta
+                          data in the processing directory instead.
+
+
+-----------------------Advanced remote work distribution------------------------
+
+--workers                 List of remote workers to be used instead of locally s
+                          pawned processes. Formatted as hostname:port, separate
+                          d by spaces
+ts_aretomo
+
+WarpTools - a collection of tools for EM data pre-processing
+Version 2.0.0
+
+Showing all available options for command ts_aretomo:
+
+------------------------------Data import settings------------------------------
+
+--settings                REQUIRED Path to Warp's .settings file, typically loca
+                          ted in the processing folder. Default file name is 'pr
+                          evious.settings'.
+
+
+--------------------------------------------------------------------------------
+
+--angpix                  Rescale tilt images to this pixel size; normally 10–15
+                           for cryo data; leave out to keep the original pixel s
+                          ize
+
+--mask                    Apply mask to each image if available; masked areas wi
+                          ll be filled with Gaussian noise
+
+--alignz                  REQUIRED Value for AreTomo's AlignZ parameter in Angst
+                          rom (will be auto-converted to binned pixels), i.e. th
+                          e thickness of the reconstructed tomogram used for ali
+                          gnments
+
+--axis_iter               Default: 0. Number of tilt axis angle refinement itera
+                          tions; each iteration will be started with median valu
+                          e from previous iteration, final iteration will use fi
+                          xed angle
+
+--axis_batch              Default: 0. Use only this many tilt series for the til
+                          t axis angle search; only relevant if --axis_iter isn'
+                          t 0
+
+--min_fov                 Default: 0. Disable tilts that contain less than this 
+                          fraction of the tomogram's field of view due to excess
+                          ive shifts
+
+--axis                    Override tilt axis angle with this value
+
+--patches                 Number of patches for local alignments in X, Y, separa
+                          ted by 'x': e.g. 6x4. Increases processing time.
+
+--delete_intermediate     Delete tilt series stacks generated for AreTomo
+
+--exe                     Default: AreTomo2. Name of the AreTomo2 executable; mu
+                          st be in $PATH
+
+
+-------------------------------Work distribution--------------------------------
+
+--device_list             Space-separated list of GPU IDs to use for processing.
+                           Default: all GPUs in the system
+
+--perdevice               Default: 1. Number of processes per GPU
+
+
+----------------------Advanced data import & flow options-----------------------
+
+--input_data              Overrides the list of input files specified in the .se
+                          ttings file. Accepts a space-separated list of files, 
+                          wildcard patterns, or .txt files with one file name pe
+                          r line.
+
+--input_data_recursive    Enables recursive search for files matching the wildca
+                          rd pattern specified in --input_data. Only applicable 
+                          when processing and directories are separate. All file
+                           names must be unique.
+
+--input_processing        Specifies an alternative directory containing pre-proc
+                          essed results. Overrides the processing directory in t
+                          he .settings file.
+
+--output_processing       Specifies an alternative directory to save processing 
+                          results. Overrides the processing directory in the .se
+                          ttings file.
+
+--input_norawdata         Ignore the existence of raw data and look for XML meta
+                          data in the processing directory instead.
+
+
+-----------------------Advanced remote work distribution------------------------
+
+--workers                 List of remote workers to be used instead of locally s
+                          pawned processes. Formatted as hostname:port, separate
+                          d by spaces
+ts_etomo_fiducials
+
+WarpTools - a collection of tools for EM data pre-processing
+Version 2.0.0
+
+Showing all available options for command ts_etomo_fiducials:
+
+------------------------------Data import settings------------------------------
+
+--settings                REQUIRED Path to Warp's .settings file, typically loca
+                          ted in the processing folder. Default file name is 'pr
+                          evious.settings'.
+
+
+--------------------------------------------------------------------------------
+
+--angpix                  Rescale tilt images to this pixel size; normally 10–15
+                           for cryo data; leave out to keep the original pixel s
+                          ize
+
+--mask                    Apply mask to each image if available; masked areas wi
+                          ll be filled with Gaussian noise
+
+--min_fov                 Default: 0. Disable tilts that contain less than this 
+                          fraction of the tomogram's field of view due to excess
+                          ive shifts
+
+--initial_axis            Override initial tilt axis angle with this value
+
+--do_axis_search          Fit a new tilt axis angle for the whole dataset
+
+--fiducial_size           size of gold fiducials in nanometers
+
+--n_beads_target          Default: 50. target number of beads to find in IMOD
+
+--delete_intermediate     Delete tilt series stacks generated for ETomo
+
+
+-------------------------------Work distribution--------------------------------
+
+--device_list             Space-separated list of GPU IDs to use for processing.
+                           Default: all GPUs in the system
+
+--perdevice               Default: 1. Number of processes per GPU
+
+
+----------------------Advanced data import & flow options-----------------------
+
+--input_data              Overrides the list of input files specified in the .se
+                          ttings file. Accepts a space-separated list of files, 
+                          wildcard patterns, or .txt files with one file name pe
+                          r line.
+
+--input_data_recursive    Enables recursive search for files matching the wildca
+                          rd pattern specified in --input_data. Only applicable 
+                          when processing and directories are separate. All file
+                           names must be unique.
+
+--input_processing        Specifies an alternative directory containing pre-proc
+                          essed results. Overrides the processing directory in t
+                          he .settings file.
+
+--output_processing       Specifies an alternative directory to save processing 
+                          results. Overrides the processing directory in the .se
+                          ttings file.
+
+--input_norawdata         Ignore the existence of raw data and look for XML meta
+                          data in the processing directory instead.
+
+
+-----------------------Advanced remote work distribution------------------------
+
+--workers                 List of remote workers to be used instead of locally s
+                          pawned processes. Formatted as hostname:port, separate
+                          d by spaces
+ts_etomo_patches
+
+WarpTools - a collection of tools for EM data pre-processing
+Version 2.0.0
+
+Showing all available options for command ts_etomo_patches:
+
+------------------------------Data import settings------------------------------
+
+--settings                REQUIRED Path to Warp's .settings file, typically loca
+                          ted in the processing folder. Default file name is 'pr
+                          evious.settings'.
+
+
+--------------------------------------------------------------------------------
+
+--angpix                  Rescale tilt images to this pixel size; normally 10–15
+                           for cryo data; leave out to keep the original pixel s
+                          ize
+
+--mask                    Apply mask to each image if available; masked areas wi
+                          ll be filled with Gaussian noise
+
+--min_fov                 Default: 0. Disable tilts that contain less than this 
+                          fraction of the tomogram's field of view due to excess
+                          ive shifts
+
+--initial_axis            Override initial tilt axis angle with this value
+
+--do_axis_search          Fit a new tilt axis angle for the whole dataset
+
+--patch_size              Default: 500. patch size for patch tracking in Angstro
+                          ms
+
+--delete_intermediate     Delete tilt series stacks generated for Etomo
+
+
+-------------------------------Work distribution--------------------------------
+
+--device_list             Space-separated list of GPU IDs to use for processing.
+                           Default: all GPUs in the system
+
+--perdevice               Default: 1. Number of processes per GPU
+
+
+----------------------Advanced data import & flow options-----------------------
+
+--input_data              Overrides the list of input files specified in the .se
+                          ttings file. Accepts a space-separated list of files, 
+                          wildcard patterns, or .txt files with one file name pe
+                          r line.
+
+--input_data_recursive    Enables recursive search for files matching the wildca
+                          rd pattern specified in --input_data. Only applicable 
+                          when processing and directories are separate. All file
+                           names must be unique.
+
+--input_processing        Specifies an alternative directory containing pre-proc
+                          essed results. Overrides the processing directory in t
+                          he .settings file.
+
+--output_processing       Specifies an alternative directory to save processing 
+                          results. Overrides the processing directory in the .se
+                          ttings file.
+
+--input_norawdata         Ignore the existence of raw data and look for XML meta
+                          data in the processing directory instead.
+
+
+-----------------------Advanced remote work distribution------------------------
+
+--workers                 List of remote workers to be used instead of locally s
+                          pawned processes. Formatted as hostname:port, separate
+                          d by spaces
+ts_import_alignments
+
+WarpTools - a collection of tools for EM data pre-processing
+Version 2.0.0
+
+Showing all available options for command ts_import_alignments:
+
+------------------------------Data import settings------------------------------
+
+--settings                REQUIRED Path to Warp's .settings file, typically loca
+                          ted in the processing folder. Default file name is 'pr
+                          evious.settings'.
+
+
+--------------------------------------------------------------------------------
+
+--alignments              REQUIRED Path to a folder containing one sub-folder pe
+                          r tilt series with alignment results from IMOD or AreT
+                          omo
+
+--alignment_angpix        REQUIRED Pixel size (in Angstrom) of the images used t
+                          o create the alignments (used to convert the alignment
+                           shifts from pixels to Angstrom)
+
+--min_fov                 Default: 0. Disable tilts that contain less than this 
+                          fraction of the tomogram's field of view due to excess
+                          ive shifts
+
+
+----------------------Advanced data import & flow options-----------------------
+
+--input_data              Overrides the list of input files specified in the .se
+                          ttings file. Accepts a space-separated list of files, 
+                          wildcard patterns, or .txt files with one file name pe
+                          r line.
+
+--input_data_recursive    Enables recursive search for files matching the wildca
+                          rd pattern specified in --input_data. Only applicable 
+                          when processing and directories are separate. All file
+                           names must be unique.
+
+--input_processing        Specifies an alternative directory containing pre-proc
+                          essed results. Overrides the processing directory in t
+                          he .settings file.
+
+--output_processing       Specifies an alternative directory to save processing 
+                          results. Overrides the processing directory in the .se
+                          ttings file.
+
+--input_norawdata         Ignore the existence of raw data and look for XML meta
+                          data in the processing directory instead.
+ts_defocus_hand
+
+WarpTools - a collection of tools for EM data pre-processing
+Version 2.0.0
+
+Showing all available options for command ts_defocus_hand:
+
+------------------------------Data import settings------------------------------
+
+--settings                REQUIRED Path to Warp's .settings file, typically loca
+                          ted in the processing folder. Default file name is 'pr
+                          evious.settings'.
+
+
+--------------------------------------------------------------------------------
+
+--check                   Only check the defocus handedness, but don't set anyth
+                          ing
+
+--set_auto                Check the defocus handedness and set the determined va
+                          lue for all tilt series
+
+--set_flip                Set handedness to 'flip' for all tilt series
+
+--set_noflip              Set handedness to 'no flip' for all tilt series
+
+--set_switch              Switch whatever handedness value each tilt series has 
+                          to the opposite value
+
+
+----------------------Advanced data import & flow options-----------------------
+
+--input_data              Overrides the list of input files specified in the .se
+                          ttings file. Accepts a space-separated list of files, 
+                          wildcard patterns, or .txt files with one file name pe
+                          r line.
+
+--input_data_recursive    Enables recursive search for files matching the wildca
+                          rd pattern specified in --input_data. Only applicable 
+                          when processing and directories are separate. All file
+                           names must be unique.
+
+--input_processing        Specifies an alternative directory containing pre-proc
+                          essed results. Overrides the processing directory in t
+                          he .settings file.
+
+--output_processing       Specifies an alternative directory to save processing 
+                          results. Overrides the processing directory in the .se
+                          ttings file.
+
+--input_norawdata         Ignore the existence of raw data and look for XML meta
+                          data in the processing directory instead.
+ts_ctf
+
+WarpTools - a collection of tools for EM data pre-processing
+Version 2.0.0
+
+Showing all available options for command ts_ctf:
+
+------------------------------Data import settings------------------------------
+
+--settings                REQUIRED Path to Warp's .settings file, typically loca
+                          ted in the processing folder. Default file name is 'pr
+                          evious.settings'.
+
+
+--------------------------------------------------------------------------------
+
+--window                  Default: 512. Patch size for CTF estimation in binned 
+                          pixels
+
+--range_low               Default: 30. Lowest (worst) resolution in Angstrom to 
+                          consider in fit
+
+--range_high              Default: 4. Highest (best) resolution in Angstrom to c
+                          onsider in fit
+
+--defocus_min             Default: 0.5. Minimum defocus value in um to explore d
+                          uring fitting (positive = underfocus)
+
+--defocus_max             Default: 5. Maximum defocus value in um to explore dur
+                          ing fitting (positive = underfocus)
+
+--voltage                 Default: 300. Acceleration voltage of the microscope i
+                          n kV
+
+--cs                      Default: 2.7. Spherical aberration of the microscope i
+                          n mm
+
+--amplitude               Default: 0.07. Amplitude contrast of the sample, usual
+                          ly 0.07-0.10 for cryo
+
+--fit_phase               Fit the phase shift of a phase plate
+
+--auto_hand               Run defocus handedness estimation based on this many t
+                          ilt series (e.g. 10), then estimate CTF with the corre
+                          ct handedness
+
+
+-------------------------------Work distribution--------------------------------
+
+--device_list             Space-separated list of GPU IDs to use for processing.
+                           Default: all GPUs in the system
+
+--perdevice               Default: 1. Number of processes per GPU
+
+
+----------------------Advanced data import & flow options-----------------------
+
+--input_data              Overrides the list of input files specified in the .se
+                          ttings file. Accepts a space-separated list of files, 
+                          wildcard patterns, or .txt files with one file name pe
+                          r line.
+
+--input_data_recursive    Enables recursive search for files matching the wildca
+                          rd pattern specified in --input_data. Only applicable 
+                          when processing and directories are separate. All file
+                           names must be unique.
+
+--input_processing        Specifies an alternative directory containing pre-proc
+                          essed results. Overrides the processing directory in t
+                          he .settings file.
+
+--output_processing       Specifies an alternative directory to save processing 
+                          results. Overrides the processing directory in the .se
+                          ttings file.
+
+--input_norawdata         Ignore the existence of raw data and look for XML meta
+                          data in the processing directory instead.
+
+
+-----------------------Advanced remote work distribution------------------------
+
+--workers                 List of remote workers to be used instead of locally s
+                          pawned processes. Formatted as hostname:port, separate
+                          d by spaces
+ts_reconstruct
+
+WarpTools - a collection of tools for EM data pre-processing
+Version 2.0.0
+
+Showing all available options for command ts_reconstruct:
+
+------------------------------Data import settings------------------------------
+
+--settings                REQUIRED Path to Warp's .settings file, typically loca
+                          ted in the processing folder. Default file name is 'pr
+                          evious.settings'.
+
+
+--------------------------------------------------------------------------------
+
+--angpix                  REQUIRED Pixel size of the reconstructed tomograms in 
+                          Angstrom
+
+--halfmap_frames          Also produce two half-tomograms, each reconstructed fr
+                          om half of the frames (requires running align_frameser
+                          ies with --average_halves previously)
+
+--halfmap_tilts           Also produce two half-tomograms, each reconstructed fr
+                          om half of the tilts (doesn't work quite as well as --
+                          halfmap_frames)
+
+--deconv                  Also produce a deconvolved version; all half-tomograms
+                          , if requested, will also be deconvolved
+
+--deconv_strength         Default: 1. Strength of the deconvolution filter, if r
+                          equested
+
+--deconv_falloff          Default: 1. Fall-off of the deconvolution filter, if r
+                          equested
+
+--deconv_highpass         Default: 300. High-pass value (in Angstrom) of the dec
+                          onvolution filter, if requested
+
+--keep_full_voxels        Mask out voxels that aren't contained in some of the t
+                          ilt images (due to excessive sample shifts); don't use
+                           if you intend to run template matching
+
+--dont_invert             Don't invert the contrast; contrast inversion is neede
+                          d for template matching on cryo data, i.e. when the de
+                          nsity is dark in original images
+
+--dont_normalize          Don't normalize the tilt images
+
+--dont_mask               Don't apply a mask to each tilt image if available; ot
+                          herwise, masked areas will be filled with Gaussian noi
+                          se
+
+--dont_overwrite          Don't overwrite existing tomograms in output directory
+
+--subvolume_size          Default: 64. Reconstruction is performed locally using
+                           sub-volumes of this size in pixel
+
+--subvolume_padding       Default: 3. Padding factor for the reconstruction sub-
+                          volumes (helps with aliasing effects at sub-volume bor
+                          ders)
+
+
+-------------------------------Work distribution--------------------------------
+
+--device_list             Space-separated list of GPU IDs to use for processing.
+                           Default: all GPUs in the system
+
+--perdevice               Default: 1. Number of processes per GPU
+
+
+----------------------Advanced data import & flow options-----------------------
+
+--input_data              Overrides the list of input files specified in the .se
+                          ttings file. Accepts a space-separated list of files, 
+                          wildcard patterns, or .txt files with one file name pe
+                          r line.
+
+--input_data_recursive    Enables recursive search for files matching the wildca
+                          rd pattern specified in --input_data. Only applicable 
+                          when processing and directories are separate. All file
+                           names must be unique.
+
+--input_processing        Specifies an alternative directory containing pre-proc
+                          essed results. Overrides the processing directory in t
+                          he .settings file.
+
+--output_processing       Specifies an alternative directory to save processing 
+                          results. Overrides the processing directory in the .se
+                          ttings file.
+
+--input_norawdata         Ignore the existence of raw data and look for XML meta
+                          data in the processing directory instead.
+
+
+-----------------------Advanced remote work distribution------------------------
+
+--workers                 List of remote workers to be used instead of locally s
+                          pawned processes. Formatted as hostname:port, separate
+                          d by spaces
+ts_template_match
+
+WarpTools - a collection of tools for EM data pre-processing
+Version 2.0.0
+
+Showing all available options for command ts_template_match:
+
+------------------------------Data import settings------------------------------
+
+--settings                REQUIRED Path to Warp's .settings file, typically loca
+                          ted in the processing folder. Default file name is 'pr
+                          evious.settings'.
+
+
+--------------------------------------------------------------------------------
+
+--tomo_angpix             REQUIRED Pixel size of the reconstructed tomograms in 
+                          Angstrom
+
+--template_path           Path to the template file
+
+--template_emdb           Instead of providing a local map, download the EMDB en
+                          try with this ID and use its main map
+
+--template_angpix         Pixel size of the template; leave empty to use value f
+                          rom map header
+
+--template_diameter       REQUIRED Template diameter in Angstrom
+
+--template_flip           Mirror the template along the X axis to flip the hande
+                          dness; '_flipx' will be added to the template's name
+
+--symmetry                Default: C1. Symmetry of the template, e.g. C1, D7, O
+
+--subdivisions            Default: 3. Number of subdivisions defining the angula
+                          r search step: 2 = 15° step, 3 = 7.5°, 4 = 3.75° and s
+                          o on
+
+--tilt_range              Limit the range of angles between the reference's Z ax
+                          is and the tomogram's XY plane to plus/minus this valu
+                          e, in °; useful for matching filaments lying flat in t
+                          he XY plane
+
+--batch_angles            Default: 32. How many orientations to evaluate at once
+                          ; memory consumption scales linearly with this; higher
+                           than 32 probably won't lead to speed-ups
+
+--peak_distance           Minimum distance (in Angstrom) between peaks; leave em
+                          pty to use template diameter
+
+--npeaks                  Default: 2000. Maximum number of peak positions to sav
+                          e
+
+--dont_normalize          Don't set score distribution to median = 0, stddev = 1
+
+--whiten                  Perform spectral whitening to give higher-resolution i
+                          nformation more weight; this can help when the alignme
+                          nts are already good and you need more selective match
+                          ing
+
+--lowpass                 Default: 1. Gaussian low-pass filter to be applied to 
+                          template and tomogram, in fractions of Nyquist; 1.0 = 
+                          no low-pass, <1.0 = low-pass
+
+--lowpass_sigma           Default: 0.1. Sigma (i.e. fall-off) of the Gaussian lo
+                          w-pass filter, in fractions of Nyquist; larger value =
+                           slower fall-off
+
+--reuse_results           Reuse correlation volumes from a previous run if avail
+                          able, only extract peak positions
+
+--check_hand              Default: 0. Also try a flipped version of the template
+                           on this many tomograms to see what geometric hand the
+                          y have
+
+--subvolume_size          Default: 192. Matching is performed locally using sub-
+                          volumes of this size in pixel
+
+
+-------------------------------Work distribution--------------------------------
+
+--device_list             Space-separated list of GPU IDs to use for processing.
+                           Default: all GPUs in the system
+
+--perdevice               Default: 1. Number of processes per GPU
+
+
+----------------------Advanced data import & flow options-----------------------
+
+--input_data              Overrides the list of input files specified in the .se
+                          ttings file. Accepts a space-separated list of files, 
+                          wildcard patterns, or .txt files with one file name pe
+                          r line.
+
+--input_data_recursive    Enables recursive search for files matching the wildca
+                          rd pattern specified in --input_data. Only applicable 
+                          when processing and directories are separate. All file
+                           names must be unique.
+
+--input_processing        Specifies an alternative directory containing pre-proc
+                          essed results. Overrides the processing directory in t
+                          he .settings file.
+
+--output_processing       Specifies an alternative directory to save processing 
+                          results. Overrides the processing directory in the .se
+                          ttings file.
+
+--input_norawdata         Ignore the existence of raw data and look for XML meta
+                          data in the processing directory instead.
+
+
+-----------------------Advanced remote work distribution------------------------
+
+--workers                 List of remote workers to be used instead of locally s
+                          pawned processes. Formatted as hostname:port, separate
+                          d by spaces
+ts_export_particles
+
+WarpTools - a collection of tools for EM data pre-processing
+Version 2.0.0
+
+Showing all available options for command ts_export_particles:
+
+------------------------------Data import settings------------------------------
+
+--settings                 REQUIRED Path to Warp's .settings file, typically loc
+                           ated in the processing folder. Default file name is '
+                           previous.settings'.
+
+
+----------------------STAR files with particle coordinates----------------------
+
+--input_star               Single STAR file containing particle poses to be expo
+                           rted
+
+--input_directory          Directory containing multiple STAR files each with pa
+                           rticle poses to be exported
+
+--input_pattern            Default: *.star. Wildcard pattern to search for from 
+                           the input directory
+
+
+-------------------------------Coordinate scaling-------------------------------
+
+--coords_angpix            Pixel size for particles coordinates in input star fi
+                           le(s)
+
+--normalized_coords        Are coordinates normalised to the range [0, 1] (e.g. 
+                           from Warp's template matching)
+
+
+-------------------------------------Output-------------------------------------
+
+--output_star              REQUIRED STAR file for exported particles
+
+--output_angpix            REQUIRED Pixel size at which to export particles
+
+--box                      REQUIRED Output has this many pixels/voxels on each s
+                           ide
+
+--diameter                 REQUIRED Particle diameter in angstroms
+
+--relative_output_paths    Make paths in output STAR file relative to the locati
+                           on of the STAR file. They will be relative to the wor
+                           king directory otherwise.
+
+
+-------------------Export type (REQUIRED, mutually exclusive)-------------------
+
+--2d                       Output particles as 2d image series centered on the p
+                           article (particle series)
+
+--3d                       Output particles as 3d images (subtomograms)
+
+
+---------------------------------Expert options---------------------------------
+
+--dont_normalize_input     Don't normalize the entire field of view in input 2D 
+                           images after high-pass filtering
+
+--dont_normalize_3d        Don't normalize output particle volumes (only works w
+                           ith --3d)
+
+--n_tilts                  Number of tilt images to include in the output, image
+                           s with the lowest overall exposure will be included f
+                           irst
+
+
+-------------------------------Work distribution--------------------------------
+
+--device_list              Space-separated list of GPU IDs to use for processing
+                           . Default: all GPUs in the system
+
+--perdevice                Default: 1. Number of processes per GPU
+
+
+----------------------Advanced data import & flow options-----------------------
+
+--input_data               Overrides the list of input files specified in the .s
+                           ettings file. Accepts a space-separated list of files
+                           , wildcard patterns, or .txt files with one file name
+                            per line.
+
+--input_data_recursive     Enables recursive search for files matching the wildc
+                           ard pattern specified in --input_data. Only applicabl
+                           e when processing and directories are separate. All f
+                           ile names must be unique.
+
+--input_processing         Specifies an alternative directory containing pre-pro
+                           cessed results. Overrides the processing directory in
+                            the .settings file.
+
+--output_processing        Specifies an alternative directory to save processing
+                            results. Overrides the processing directory in the .
+                           settings file.
+
+--input_norawdata          Ignore the existence of raw data and look for XML met
+                           adata in the processing directory instead.
+
+
+-----------------------Advanced remote work distribution------------------------
+
+--workers                  List of remote workers to be used instead of locally 
+                           spawned processes. Formatted as hostname:port, separa
+                           ted by spaces
+ts_eval_model
+
+WarpTools - a collection of tools for EM data pre-processing
+Version 2.0.0
+
+Showing all available options for command ts_eval_model:
+
+------------------------------Data import settings------------------------------
+
+--settings                REQUIRED Path to Warp's .settings file, typically loca
+                          ted in the processing folder. Default file name is 'pr
+                          evious.settings'.
+
+
+--------------------------------------------------------------------------------
+
+--input_star              Path to a STAR file containing custom positions specif
+                          ied using tomoCenteredCoordinate(X/Y/Z)Angst labels. L
+                          eave empty to use a regular grid of positions instead.
+
+--grid_extent             Instead of custom positions in --input_star, calculate
+                           an evenly spaced grid with this extent in Angstrom, s
+                          pecified as 'XxYxZ', e.g. 6000x4000x1000.
+
+--grid_dims               When calculating an evenly spaced grid, it will have t
+                          his many points in each dimension, specified as 'XxYxZ
+                          ', e.g. 30x20x5. The grid spacing will be grid_extent 
+                          / (grid_dims - 1).
+
+--output                  Output location for the per-tilt series STAR files
+
+
+----------------------Advanced data import & flow options-----------------------
+
+--input_data              Overrides the list of input files specified in the .se
+                          ttings file. Accepts a space-separated list of files, 
+                          wildcard patterns, or .txt files with one file name pe
+                          r line.
+
+--input_data_recursive    Enables recursive search for files matching the wildca
+                          rd pattern specified in --input_data. Only applicable 
+                          when processing and directories are separate. All file
+                           names must be unique.
+
+--input_processing        Specifies an alternative directory containing pre-proc
+                          essed results. Overrides the processing directory in t
+                          he .settings file.
+
+--output_processing       Specifies an alternative directory to save processing 
+                          results. Overrides the processing directory in the .se
+                          ttings file.
+
+--input_norawdata         Ignore the existence of raw data and look for XML meta
+                          data in the processing directory instead.
