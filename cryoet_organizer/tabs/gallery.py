@@ -19,6 +19,8 @@ from cryoet_organizer.project import (
 from cryoet_organizer.ts_metadata import collect_ts_metadata, ts_metadata_sections
 from cryoet_organizer.tabs.base import SidebarTab
 
+GALLERY_PAGE_SIZE = 200
+
 
 class GalleryTab(SidebarTab):
     tab_id = "gallery"
@@ -47,6 +49,9 @@ class GalleryTab(SidebarTab):
         self._pending_render_after: str | None = None
         self._last_render_column_count: int | None = None
         self._loaded_project_id: int | None = None
+        self._needs_render_when_shown = False
+        self._current_page = 0
+        self._current_page_count = 0
 
         self.selected_dataset_var = tk.StringVar(value="-")
         self.selected_ts_var = tk.StringVar(value="-")
@@ -79,7 +84,7 @@ class GalleryTab(SidebarTab):
             width=8,
         )
         self.rating_filter_combo.grid(row=1, column=1, sticky="ew", padx=(0, 12))
-        self.rating_filter_combo.bind("<<ComboboxSelected>>", lambda _event: self._request_gallery_render())
+        self.rating_filter_combo.bind("<<ComboboxSelected>>", self._on_gallery_filter_changed)
 
         ttk.Label(controls, text="Thumbnail size").grid(row=0, column=3, sticky="w", pady=(0, 4))
         zoom_controls = ttk.Frame(controls)
@@ -130,7 +135,7 @@ class GalleryTab(SidebarTab):
             width=14,
         )
         self.include_mode_combo.grid(row=0, column=1, sticky="e")
-        self.include_mode_combo.bind("<<ComboboxSelected>>", lambda _event: self._request_gallery_render())
+        self.include_mode_combo.bind("<<ComboboxSelected>>", self._on_gallery_filter_changed)
 
         exclude_header = ttk.Frame(tag_filters)
         exclude_header.grid(row=0, column=1, sticky="ew", padx=(8, 0), pady=(0, 6))
@@ -145,7 +150,7 @@ class GalleryTab(SidebarTab):
         include_scroll = ttk.Scrollbar(include_box, orient="vertical", command=self.include_tags_listbox.yview)
         include_scroll.grid(row=0, column=1, sticky="ns")
         self.include_tags_listbox.configure(yscrollcommand=include_scroll.set)
-        self.include_tags_listbox.bind("<<ListboxSelect>>", lambda _event: self._request_gallery_render())
+        self.include_tags_listbox.bind("<<ListboxSelect>>", self._on_gallery_filter_changed)
 
         exclude_box = ttk.Frame(tag_filters)
         exclude_box.grid(row=1, column=1, sticky="nsew", padx=(8, 0))
@@ -156,10 +161,20 @@ class GalleryTab(SidebarTab):
         exclude_scroll = ttk.Scrollbar(exclude_box, orient="vertical", command=self.exclude_tags_listbox.yview)
         exclude_scroll.grid(row=0, column=1, sticky="ns")
         self.exclude_tags_listbox.configure(yscrollcommand=exclude_scroll.set)
-        self.exclude_tags_listbox.bind("<<ListboxSelect>>", lambda _event: self._request_gallery_render())
+        self.exclude_tags_listbox.bind("<<ListboxSelect>>", self._on_gallery_filter_changed)
 
         self.summary_label = ttk.Label(self.frame, text="", wraplength=900, justify="left")
         self.summary_label.grid(row=1, column=0, sticky="nw", pady=(12, 8))
+
+        self.pager_row = ttk.Frame(controls)
+        self.pager_row.grid(row=1, column=2, sticky="ew", padx=(0, 12))
+        self.pager_status_var = tk.StringVar(value="")
+        self.prev_page_button = ttk.Button(self.pager_row, text="Previous", command=lambda: self._change_page(-1))
+        self.prev_page_button.grid(row=0, column=0, padx=(0, 6))
+        ttk.Label(self.pager_row, textvariable=self.pager_status_var).grid(row=0, column=1, padx=4)
+        self.next_page_button = ttk.Button(self.pager_row, text="Next", command=lambda: self._change_page(1))
+        self.next_page_button.grid(row=0, column=2, padx=(6, 0))
+        self.pager_row.grid_remove()
 
         gallery_container = ttk.Frame(self.frame)
         gallery_container.grid(row=2, column=0, sticky="nsew")
@@ -273,6 +288,10 @@ class GalleryTab(SidebarTab):
         column_count = self._column_count_for_width(event.width)
         if column_count != self._last_render_column_count:
             self._request_gallery_render()
+
+    def _on_gallery_filter_changed(self, _event=None) -> None:
+        self._reset_gallery_page()
+        self._request_gallery_render()
 
     def _dataset_options(self, project: ProjectData) -> list[str]:
         if not project.datasets:
@@ -432,9 +451,62 @@ class GalleryTab(SidebarTab):
         return max(1, available_width // max(self.thumbnail_size + 36, 120))
 
     def _request_gallery_render(self, delay_ms: int = 0) -> None:
+        if self.app.active_tab_id != self.tab_id or not self.frame.winfo_ismapped():
+            self._needs_render_when_shown = True
+            return
         if self._pending_render_after is not None:
             self.frame.after_cancel(self._pending_render_after)
         self._pending_render_after = self.frame.after(delay_ms, self._render_gallery)
+
+    def _change_page(self, delta: int) -> None:
+        if self._current_page_count <= 1:
+            return
+        next_page = max(0, min(self._current_page + delta, self._current_page_count - 1))
+        if next_page == self._current_page:
+            return
+        self._current_page = next_page
+        self.gallery_canvas.yview_moveto(0)
+        self._request_gallery_render()
+
+    def _reset_gallery_page(self) -> None:
+        self._current_page = 0
+
+    def _paged_items(
+        self, items: list[tuple[DatasetRecord, ThumbnailRecord]]
+    ) -> tuple[list[tuple[DatasetRecord, ThumbnailRecord]], int, int, int]:
+        total = len(items)
+        if total == 0:
+            self._current_page = 0
+            self._current_page_count = 0
+            return [], 0, 0, 0
+        page_count = max(1, (total + GALLERY_PAGE_SIZE - 1) // GALLERY_PAGE_SIZE)
+        if self._current_page >= page_count:
+            self._current_page = page_count - 1
+        start = self._current_page * GALLERY_PAGE_SIZE
+        end = min(start + GALLERY_PAGE_SIZE, total)
+        self._current_page_count = page_count
+        return items[start:end], start, end, total
+
+    def _update_pager_controls(self, start: int, end: int, total: int) -> None:
+        if total <= GALLERY_PAGE_SIZE:
+            self.pager_status_var.set("")
+            self.pager_row.grid_remove()
+            self.prev_page_button.configure(state="disabled")
+            self.next_page_button.configure(state="disabled")
+            return
+        self.pager_status_var.set(f"{start + 1}-{end} of {total} | Page {self._current_page + 1}/{self._current_page_count}")
+        self.prev_page_button.configure(state="normal" if self._current_page > 0 else "disabled")
+        self.next_page_button.configure(
+            state="normal" if self._current_page < self._current_page_count - 1 else "disabled"
+        )
+        self.pager_row.grid()
+
+    def _prune_thumbnail_cache(self, items: list[tuple[DatasetRecord, ThumbnailRecord]]) -> None:
+        visible_paths = {thumbnail.image_path for _dataset, thumbnail in items}
+        keep_keys = {(path, self.thumbnail_size) for path in visible_paths}
+        stale_keys = [key for key in self.thumbnail_images if key not in keep_keys]
+        for key in stale_keys:
+            self.thumbnail_images.pop(key, None)
 
     def _thumbnail_image(self, image_path: str) -> tk.PhotoImage | None:
         key = (image_path, self.thumbnail_size)
@@ -1282,6 +1354,7 @@ class GalleryTab(SidebarTab):
 
     def _render_gallery(self, _event=None) -> None:
         self._pending_render_after = None
+        self._needs_render_when_shown = False
         for child in self.gallery_frame.winfo_children():
             child.destroy()
         self.selection_vars.clear()
@@ -1301,20 +1374,30 @@ class GalleryTab(SidebarTab):
             self.summary_label.config(
                 text="No thumbnails matched the current selection or filters."
             )
+            self._update_pager_controls(0, 0, 0)
             self._update_details_for_current_selection()
             return
 
+        page_items, start, end, total_items = self._paged_items(items)
+        self._prune_thumbnail_cache(page_items)
         columns = self._column_count_for_width()
         self._last_render_column_count = columns
         for column in range(columns):
             self.gallery_frame.columnconfigure(column, weight=1)
 
-        self.summary_label.config(text=f"Showing {len(items)} thumbnails.")
+        self.summary_label.config(
+            text=(
+                f"Showing {start + 1}-{end} of {total_items} thumbnails."
+                if total_items > GALLERY_PAGE_SIZE
+                else f"Showing {total_items} thumbnails."
+            )
+        )
+        self._update_pager_controls(start, end, total_items)
         if self.multi_selection_var.get():
-            visible_keys = {(dataset.dataset_name, thumbnail.image_path) for dataset, thumbnail in items}
+            visible_keys = {(dataset.dataset_name, thumbnail.image_path) for dataset, thumbnail in page_items}
             self.multi_selected_keys.intersection_update(visible_keys)
 
-        for index, (dataset, thumbnail) in enumerate(items):
+        for index, (dataset, thumbnail) in enumerate(page_items):
             image = self._thumbnail_image(thumbnail.image_path)
             if image is None:
                 continue
@@ -1418,8 +1501,8 @@ class GalleryTab(SidebarTab):
         if self.multi_selection_var.get():
             self._apply_selection_styles()
             self._update_details_for_current_selection()
-        elif self.selected_thumbnail_key is None and items:
-            self._select_thumbnail(items[0][0].dataset_name, items[0][1].image_path)
+        elif self.selected_thumbnail_key is None and page_items:
+            self._select_thumbnail(page_items[0][0].dataset_name, page_items[0][1].image_path)
         else:
             self._apply_selection_styles()
             self._update_details_for_current_selection()
@@ -1440,6 +1523,7 @@ class GalleryTab(SidebarTab):
             self.dataset_match_cache.pop((dataset.dataset_name, folder), None)
             imported += len(self._scan_thumbnails_for_dataset(dataset))
 
+        self._reset_gallery_page()
         self._update_tag_suggestions()
         self._request_gallery_render()
         self.app.status_var.set(f"Thumbnail folder set to: {folder} ({imported} matches)")
@@ -1449,11 +1533,13 @@ class GalleryTab(SidebarTab):
         new_size = int(round(self.thumbnail_size * factor))
         self.thumbnail_size = max(80, min(420, new_size))
         self.thumbnail_size_var.set(self.thumbnail_size)
+        self.thumbnail_images.clear()
         self._request_gallery_render()
 
     def _on_dataset_selected(self, _event=None) -> None:
         self.selected_thumbnail_key = None
         self.multi_selected_keys.clear()
+        self._reset_gallery_page()
         self._request_gallery_render()
 
     def on_project_loaded(self, project: ProjectData) -> None:
@@ -1461,20 +1547,28 @@ class GalleryTab(SidebarTab):
             self.dataset_match_cache.clear()
             self.thumbnail_images.clear()
             self._loaded_project_id = id(project)
+            self._reset_gallery_page()
         options = self._dataset_options(project)
         self.dataset_combo.configure(values=options)
         if not options:
             self.dataset_var.set("")
             self.import_button.config(text="Import thumbnails")
             self.summary_label.config(text="No datasets available yet.")
+            self._update_pager_controls(0, 0, 0)
             return
 
         if self.dataset_var.get() not in options:
             self.dataset_var.set("All datasets")
 
         self._update_tag_suggestions()
-        self._request_gallery_render()
+        if self.app.active_tab_id == self.tab_id and self.frame.winfo_ismapped():
+            self._request_gallery_render()
+        else:
+            self._needs_render_when_shown = True
 
     def preload_view(self) -> None:
-        self._request_gallery_render()
-        self.frame.update_idletasks()
+        self._needs_render_when_shown = True
+
+    def on_tab_shown(self) -> None:
+        if self._needs_render_when_shown:
+            self._request_gallery_render()

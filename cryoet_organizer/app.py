@@ -470,6 +470,10 @@ class CryoETOrganizerApp:
         self.tabs[tab_id].frame.grid()
         self.nav_buttons[tab_id].configure(style="ActiveSidebar.TButton")
         self.active_tab_id = tab_id
+        try:
+            self.tabs[tab_id].on_tab_shown()
+        except Exception:
+            pass
         self.status_var.set(f"Active tab: {self.tabs[tab_id].title}")
 
     def _build_refresh_domain_map(self) -> None:

@@ -28,6 +28,9 @@ class SidebarTab:
     def on_project_saved(self, project: ProjectData) -> None:
         pass
 
+    def on_tab_shown(self) -> None:
+        pass
+
 
 class LabeledEntry(ttk.Frame):
     def __init__(self, parent: tk.Misc, label: str) -> None:
