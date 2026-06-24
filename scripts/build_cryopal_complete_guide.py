@@ -13,7 +13,7 @@ from docx.shared import Inches, Pt, RGBColor
 
 ROOT = Path(__file__).resolve().parents[1]
 WALKTHROUGH_MEDIA = Path("/tmp/cryopal_walkthrough_extract/word/media")
-OUTPUT_DOCX = ROOT / "docs" / "CryoPal_tomo_Complete_Guide.docx"
+OUTPUT_DOCX = ROOT / "docs" / "CryoPal_tomo_user_guide_v0p1p0.docx"
 LOGO_PATH = ROOT / "cryoet_organizer" / "assets" / "CryoPal_tomo_logo.png"
 
 
@@ -115,7 +115,7 @@ def add_header_footer(document: Document) -> None:
         header_para = header.paragraphs[0]
         header_para.alignment = WD_ALIGN_PARAGRAPH.LEFT
         if not header_para.text:
-            run = header_para.add_run("CryoPal_tomo Complete Guide")
+            run = header_para.add_run("CryoPal_tomo User Guide")
             set_run_font(run, size=9, color=MUTED)
 
         footer = section.footer
@@ -137,7 +137,7 @@ def add_cover(document: Document) -> None:
     title.alignment = WD_ALIGN_PARAGRAPH.CENTER
     title.paragraph_format.space_before = Pt(18)
     title.paragraph_format.space_after = Pt(6)
-    run = title.add_run("CryoPal_tomo")
+    run = title.add_run("CryoPal_tomo v0.1.0")
     set_run_font(run, size=24, bold=True, color=HEADING_DARK)
 
     subtitle = document.add_paragraph()
@@ -150,11 +150,16 @@ def add_cover(document: Document) -> None:
     meta.alignment = WD_ALIGN_PARAGRAPH.CENTER
     for line in (
         "Comprehensive user documentation",
-        "Organized as abstract, conceptual reference, and screenshot-based walkthrough",
-        "Prepared on 22 June 2026",
+        "Prepared on 23 June 2026",
     ):
         run = meta.add_run(line + "\n")
         set_run_font(run, size=11, color=MUTED)
+
+    doi = document.add_paragraph()
+    doi.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    doi.paragraph_format.space_after = Pt(18)
+    run = doi.add_run("https://doi.org/10.5281/zenodo.20812076")
+    set_run_font(run, size=11, color=MUTED)
 
     document.add_page_break()
 
@@ -204,13 +209,6 @@ def add_part_heading(document: Document, title: str, subtitle: str | None = None
 def add_table_of_contents(document: Document) -> None:
     document.add_page_break()
     document.add_heading("Contents", level=1)
-    note = document.add_paragraph()
-    note.paragraph_format.space_after = Pt(8)
-    run = note.add_run(
-        "If the table of contents does not populate automatically in Word, click inside it and update the field."
-    )
-    set_run_font(run, size=10, italic=True, color=MUTED)
-
     paragraph = document.add_paragraph()
     run = paragraph.add_run()
     fld_char_begin = OxmlElement("w:fldChar")
@@ -618,11 +616,13 @@ def walkthrough_sections() -> tuple[WalkthroughSection, ...]:
                 "Use Show details to inspect missing files at the dataset level or at the individual tilt-series level.",
                 "Open File > Export job history if you need a CSV-based record of the executed or submitted processing actions.",
                 "Open File > Export file paths if another software tool needs a clean list of files that CryoPal_tomo already knows about.",
+                "Open File > Export TS annotations if you want a compact CSV summary of Tomogram Gallery curation together with key TS-level metadata such as pixel size, CTF estimate, defocus, dose, rating, and tags.",
                 "Use Settings > Export .cryopal.settings-file when you want to share selected defaults, environments, custom jobs, or viewer settings with another user or another project.",
                 "Use the corresponding import dialog when you want to adopt only certain settings categories without replacing the whole project file.",
             ),
             checks=(
                 "A project file stores the working state of one project. A .cryopal.settings file is better suited for sharing reusable configuration patterns across projects.",
+                "Use Export TS annotations when you want a lightweight, human-readable curation summary rather than a full path inventory or processing-history export.",
             ),
             image_count=7,
             captions=(
@@ -636,6 +636,7 @@ def walkthrough_sections() -> tuple[WalkthroughSection, ...]:
             ),
             tips=(
                 "Check paths is especially helpful after moving data, renaming directories, importing legacy datasets, or changing file-registry rules.",
+                "Export TS annotations is especially useful after rating and tagging tomograms, because it gives you a clean snapshot of curation decisions together with the most relevant TS metadata.",
                 "Settings bundles are ideal for sharing lab conventions. Project files are better reserved for the state of a specific scientific project.",
             ),
         ),

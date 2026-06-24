@@ -2,8 +2,6 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import shlex
-import subprocess
-import threading
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
@@ -52,6 +50,7 @@ class ProcessingMTab(SidebarTab):
         self.creator_visible = False
         self.create_directory_var = tk.StringVar()
         self.create_name_var = tk.StringVar()
+        self.create_environment_var = tk.StringVar(value="None")
 
         self.execution_mode_var = tk.StringVar(value="Run locally")
         self.environment_var = tk.StringVar(value="None")
@@ -127,16 +126,25 @@ class ProcessingMTab(SidebarTab):
         )
         ttk.Label(self.creator_box, text="Population name").grid(row=1, column=0, sticky="w", pady=(0, 4))
         ttk.Entry(self.creator_box, textvariable=self.create_name_var).grid(row=1, column=1, sticky="ew", pady=(0, 8))
+        ttk.Label(self.creator_box, text="Select environment").grid(row=2, column=0, sticky="w", pady=(0, 4))
+        self.create_environment_combo = ttk.Combobox(
+            self.creator_box,
+            textvariable=self.create_environment_var,
+            state="readonly",
+            values=environment_titles(self.app.project),
+            width=22,
+        )
+        self.create_environment_combo.grid(row=2, column=1, sticky="w", pady=(0, 8))
 
         command_box = ttk.LabelFrame(self.creator_box, text="Command preview", padding=12)
-        command_box.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(4, 0))
+        command_box.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(4, 0))
         command_box.columnconfigure(0, weight=1)
         self.create_command_text = tk.Text(command_box, height=3, wrap="word", font="TkDefaultFont")
         self.create_command_text.grid(row=0, column=0, sticky="ew")
         self.create_command_text.configure(state="disabled")
 
         creator_actions = ttk.Frame(self.creator_box)
-        creator_actions.grid(row=3, column=0, columnspan=2, sticky="e", pady=(12, 0))
+        creator_actions.grid(row=4, column=0, columnspan=2, sticky="e", pady=(12, 0))
         ttk.Button(creator_actions, text="Cancel", command=self._hide_creator).grid(row=0, column=0, padx=(0, 8))
         self.create_population_button = ttk.Button(creator_actions, text="Create", command=self._create_population)
         self.create_population_button.grid(row=0, column=1)
@@ -371,6 +379,8 @@ class ProcessingMTab(SidebarTab):
         if self.creator_visible:
             self._hide_creator()
             return
+        self._refresh_creator_environments()
+        self.create_environment_var.set(self._create_population_environment_default())
         self.creator_box.grid()
         self.creator_visible = True
         self._update_create_command_preview()
@@ -380,6 +390,7 @@ class ProcessingMTab(SidebarTab):
         self.creator_visible = False
         self.create_directory_var.set("")
         self.create_name_var.set("")
+        self.create_environment_var.set(self._create_population_environment_default())
         self._update_create_command_preview()
 
     def _browse_create_directory(self) -> None:
@@ -403,6 +414,17 @@ class ProcessingMTab(SidebarTab):
         self.create_command_text.delete("1.0", "end")
         self.create_command_text.insert("1.0", command)
         self.create_command_text.configure(state="disabled")
+
+    def _create_population_environment_default(self) -> str:
+        available = set(environment_titles(self.app.project))
+        current = self.create_environment_var.get().strip() or "None"
+        return current if current in available else "None"
+
+    def _refresh_creator_environments(self) -> None:
+        values = environment_titles(self.app.project)
+        self.create_environment_combo.configure(values=values)
+        if self.create_environment_var.get() not in set(values):
+            self.create_environment_var.set("None")
 
     def _selected_population(self) -> MPopulationRecord | None:
         selected_name = self.population_var.get().strip()
@@ -587,32 +609,29 @@ class ProcessingMTab(SidebarTab):
             return
 
         command = self._create_population_command()
+        environment_title = self._create_population_environment_default()
+        activation_command = self.app.resolve_environment_activation(environment_title)
+        working_directory = str(Path(directory).expanduser().resolve().parent)
         self.create_population_button.config(state="disabled")
         self.app.status_var.set(f"Creating M population: {name}")
-
-        def worker() -> None:
-            try:
-                result = subprocess.run(
-                    shlex.split(command),
-                    text=True,
-                    capture_output=True,
-                    cwd=str(Path(directory).expanduser().resolve().parent),
-                )
-            except Exception as exc:
-                self.app.root.after(
-                    0,
-                    lambda: self._finish_create_population(name, directory, command, False, str(exc)),
-                )
-                return
-
-            success = result.returncode == 0
-            output = (result.stdout or "") + ("\n" + result.stderr if result.stderr else "")
-            self.app.root.after(
-                0,
-                lambda: self._finish_create_population(name, directory, command, success, output.strip()),
+        try:
+            self.app.run_managed_process_with_log(
+                command,
+                cwd=working_directory,
+                title="Output: create_population",
+                activation_command=activation_command,
+                on_finished=lambda return_code, population_name=name, population_directory=directory, current_command=command, current_environment=environment_title: self._finish_create_population(
+                    population_name,
+                    population_directory,
+                    current_command,
+                    current_environment,
+                    return_code == 0,
+                ),
             )
-
-        threading.Thread(target=worker, daemon=True).start()
+        except Exception as exc:
+            self.create_population_button.config(state="normal")
+            messagebox.showerror("Create new M population failed", str(exc))
+            self.app.status_var.set("Creating M population failed")
 
     def _import_population(self) -> None:
         path = filedialog.askopenfilename(
@@ -665,14 +684,14 @@ class ProcessingMTab(SidebarTab):
         name: str,
         directory: str,
         command: str,
+        environment_title: str,
         success: bool,
-        output: str,
     ) -> None:
         self.create_population_button.config(state="normal")
         if not success:
             messagebox.showerror(
                 "Create new M population failed",
-                output or "MTools create_population returned a non-zero exit code.",
+                "MTools create_population returned a non-zero exit code. Please check the output window for details.",
             )
             self.app.status_var.set("Creating M population failed")
             return
@@ -698,12 +717,18 @@ class ProcessingMTab(SidebarTab):
                 command=command,
                 processing_tab="Processing: M",
                 dataset_name=name,
+                environment_title=environment_title if environment_title != "None" else "",
                 parameters={
                     "directory": directory,
                     "name": name,
                     "population_file": str(population_path),
                     "species_count": str(len(population.species)),
                     "source_count": str(len(population.sources)),
+                    **(
+                        {"execution_environment": environment_title}
+                        if environment_title and environment_title != "None"
+                        else {}
+                    ),
                 },
             )
         )
@@ -806,6 +831,11 @@ class ProcessingMTab(SidebarTab):
         if entry.job_name == "create_population":
             self.create_directory_var.set(entry.parameters.get("directory", ""))
             self.create_name_var.set(entry.parameters.get("name", ""))
+            self._refresh_creator_environments()
+            self.create_environment_var.set(
+                entry.environment_title
+                or entry.parameters.get("execution_environment", self._create_population_environment_default())
+            )
             self.creator_box.grid()
             self.creator_visible = True
             self._update_create_command_preview()
@@ -929,6 +959,7 @@ class ProcessingMTab(SidebarTab):
         self.environment_combo.configure(values=environment_titles(self.app.project))
         if self.environment_var.get() not in set(environment_titles(self.app.project)):
             self.environment_var.set("None")
+        self._refresh_creator_environments()
         self._toggle_slurm_controls()
 
     def _current_slurm_overrides(self) -> dict[str, str]:
@@ -1601,3 +1632,4 @@ class ProcessingMTab(SidebarTab):
         self._refresh_slurm_profiles()
         self._refresh_processing_selection()
         self._update_population_ui()
+        self.create_environment_var.set(self._create_population_environment_default())

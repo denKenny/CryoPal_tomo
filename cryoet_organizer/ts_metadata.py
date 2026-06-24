@@ -57,6 +57,7 @@ class TsMetadata:
     tilt_max: float | None = None
     total_dose: float | None = None
     dose_per_tilt: float | None = None
+    defocus_value: float | None = None
     defocus_min: float | None = None
     defocus_max: float | None = None
     acquisition_start: str = ""
@@ -172,14 +173,44 @@ def parse_tiltseries_xml(path: str | Path) -> dict[str, Any]:
             return []
         return [line.strip() for line in node.text.splitlines() if line.strip()]
 
+    def scalar_text(tag: str) -> str:
+        values = list_text(tag)
+        return values[0] if values else ""
+
+    def param_map(section: ET.Element | None) -> dict[str, str]:
+        if section is None:
+            return {}
+        result: dict[str, str] = {}
+        for item in section.findall("./Param"):
+            name = item.attrib.get("Name", "").strip()
+            if name:
+                result[name] = item.attrib.get("Value", "").strip()
+        return result
+
     movie_paths = [_resolve_relative(file_path, item) for item in list_text("MoviePath")]
+    root_params = param_map(root)
+    ctf_params = param_map(root.find("CTF"))
+    options_ctf_params = param_map(root.find("OptionsCTF"))
     return {
-        "attributes": dict(root.attrib),
+        "attributes": {**dict(root.attrib), **root_params},
+        "root_params": root_params,
+        "ctf_params": ctf_params,
+        "options_ctf_params": options_ctf_params,
         "angles": list_text("Angles"),
         "dose": list_text("Dose"),
         "use_tilt": list_text("UseTilt"),
         "axis_angle": list_text("AxisAngle"),
         "movie_paths": movie_paths,
+        "defocus": (
+            ctf_params.get("Defocus", "")
+            or root_params.get("Defocus", "")
+            or scalar_text("Defocus")
+        ),
+        "ctf_resolution_estimate": (
+            ctf_params.get("CTFResolutionEstimate", "")
+            or root_params.get("CTFResolutionEstimate", "")
+            or scalar_text("CTFResolutionEstimate")
+        ),
     }
 
 
@@ -346,6 +377,14 @@ def collect_ts_metadata(
         else:
             metadata.total_dose = sum(doses)
             metadata.dose_per_tilt = mean(doses)
+    if xml_payload:
+        attrs = xml_payload.get("attributes", {})
+        metadata.defocus_value = (
+            _safe_float(attrs.get("Defocus"))
+            or _safe_float(xml_payload.get("defocus"))
+        )
+    if not defocus_values and metadata.defocus_value is not None:
+        defocus_values = [metadata.defocus_value]
     metadata.defocus_min = min(defocus_values) if defocus_values else None
     metadata.defocus_max = max(defocus_values) if defocus_values else None
     metadata.acquisition_start = min(dates).isoformat(sep=" ", timespec="seconds") if dates else ""
@@ -377,7 +416,10 @@ def collect_ts_metadata(
 
     if xml_payload:
         attrs = xml_payload.get("attributes", {})
-        metadata.ctf_resolution_estimate = _safe_float(attrs.get("CTFResolutionEstimate"))
+        metadata.ctf_resolution_estimate = (
+            _safe_float(attrs.get("CTFResolutionEstimate"))
+            or _safe_float(xml_payload.get("ctf_resolution_estimate"))
+        )
         metadata.are_angles_inverted = _safe_bool(attrs.get("AreAnglesInverted"))
         metadata.plane_normal = attrs.get("PlaneNormal", "")
 
@@ -499,6 +541,7 @@ def ts_metadata_sections(metadata: TsMetadata) -> list[tuple[str, list[tuple[str
                 ("Selected tilt angles", metadata.selected_tilt_angles_text or "-"),
                 ("Excluded tilt angles", metadata.excluded_tilt_angles_text or "-"),
                 ("Axis angle", fmt_float(metadata.axis_angle, 3)),
+                ("Defocus value", fmt_float(metadata.defocus_value, 2)),
                 ("Defocus range", f"{fmt_float(metadata.defocus_min)} to {fmt_float(metadata.defocus_max)}"),
                 ("Acquisition start", metadata.acquisition_start or "-"),
                 ("Acquisition end", metadata.acquisition_end or "-"),

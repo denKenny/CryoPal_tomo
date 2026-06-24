@@ -684,7 +684,29 @@ This is useful when you want:
 - an input table for downstream software
 - a quick audit of what CryoPal currently resolves
 
-### 20.3 Export and import settings bundles
+### 20.3 Export TS annotations
+
+Use `File > Export TS annotations...` to export Tomogram Gallery annotations and key TS-level metadata to CSV.
+
+The exported table contains:
+
+- TS name
+- dataset
+- sample information
+- pixel size
+- CTF resolution estimate
+- defocus value
+- total dose
+- rating
+- tags
+
+This is useful when you want:
+
+- a compact curation table for downstream review
+- a shareable summary of rated and tagged tomograms
+- a CSV-based handoff into external analysis or tracking tools
+
+### 20.4 Export and import settings bundles
 
 Use:
 

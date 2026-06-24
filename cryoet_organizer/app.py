@@ -28,7 +28,14 @@ from cryoet_organizer.environments_dialog import EnvironmentsDialog
 from cryoet_organizer.export_paths_dialog import ExportFilePathsDialog
 from cryoet_organizer.job_execution import is_scheduled_history_entry
 from cryoet_organizer.log_window import ProcessLogWindow, ShortcutLaunchWindow
-from cryoet_organizer.project import JobHistoryEntry, PROJECT_SUFFIX, SETTINGS_SUFFIX, ProjectData, load_project, save_project
+from cryoet_organizer.project import (
+    JobHistoryEntry,
+    PROJECT_SUFFIX,
+    SETTINGS_SUFFIX,
+    ProjectData,
+    load_project,
+    save_project,
+)
 from cryoet_organizer.preferences_dialog import PreferencesDialog
 from cryoet_organizer.recent_projects import add_recent_project, load_recent_projects
 from cryoet_organizer.custom_jobs_dialog import CustomJobsDialog
@@ -55,7 +62,7 @@ from cryoet_organizer.slurm import (
 )
 from cryoet_organizer.slurm_dialog import SlurmProfilesDialog
 from cryoet_organizer.tabs import SidebarTab, get_tab_classes
-from cryoet_organizer.ts_metadata import clear_ts_metadata_cache
+from cryoet_organizer.ts_metadata import clear_ts_metadata_cache, collect_ts_metadata
 from cryoet_organizer.viewer_defaults import resolve_viewer_command
 from cryoet_organizer.viewer_defaults_dialog import ViewerDefaultsDialog
 
@@ -272,6 +279,7 @@ class CryoETOrganizerApp:
         file_menu.add_separator()
         file_menu.add_command(label="Export job history...", command=self.export_job_history)
         file_menu.add_command(label="Export file paths...", command=self.export_file_paths)
+        file_menu.add_command(label="Export TS annotations...", command=self.export_ts_annotations)
         file_menu.add_separator()
         file_menu.add_command(label="Exit", command=self.close_app)
         file_menu.configure(postcommand=self._update_recent_menu)
@@ -742,6 +750,30 @@ class CryoETOrganizerApp:
             messagebox.showerror("Export failed", str(exc))
             return
         self.status_var.set(f"File paths exported: {Path(path).name}")
+
+    def export_ts_annotations(self) -> None:
+        self._sync_tabs_to_project()
+        has_annotations = any(dataset.thumbnails for dataset in self.project.datasets)
+        if not has_annotations:
+            messagebox.showinfo(
+                "Export TS annotations",
+                "No TS annotations were found in this project.",
+            )
+            return
+
+        path = filedialog.asksaveasfilename(
+            title="Export TS annotations",
+            defaultextension=".csv",
+            filetypes=[("CSV", "*.csv"), ("All files", "*")],
+        )
+        if not path:
+            return
+        try:
+            _export_ts_annotations_csv(path, self.project)
+        except Exception as exc:
+            messagebox.showerror("Export failed", str(exc))
+            return
+        self.status_var.set(f"TS annotations exported: {Path(path).name}")
 
     def run_managed_process_with_log(
         self,
@@ -1723,6 +1755,59 @@ def _export_file_paths_csv(path: str, entries: list[PathCheckEntry]) -> None:
             ),
         )
     ]
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def _export_ts_annotations_csv(path: str, project: ProjectData) -> None:
+    fieldnames = [
+        "TS Name",
+        "Dataset",
+        "Sample information",
+        "Pixel size",
+        "CTF resolution estimate",
+        "Defocus value",
+        "Total dose",
+        "Rating",
+        "Tags",
+    ]
+    rows: list[dict[str, str]] = []
+    for dataset in sorted(project.datasets, key=lambda item: item.dataset_name.casefold()):
+        thumbnails = sorted(
+            dataset.thumbnails,
+            key=lambda item: (item.ts_name.casefold(), Path(item.image_path).name.casefold()),
+        )
+        for thumbnail in thumbnails:
+            metadata = collect_ts_metadata(
+                project,
+                dataset,
+                thumbnail.ts_name,
+                thumbnail_path=thumbnail.image_path,
+                mrc_path=thumbnail.mrc_path,
+            )
+            rows.append(
+                {
+                    "TS Name": thumbnail.ts_name,
+                    "Dataset": dataset.dataset_name,
+                    "Sample information": dataset.sample,
+                    "Pixel size": f"{metadata.pixel_size:.4f}" if metadata.pixel_size else "",
+                    "CTF resolution estimate": (
+                        f"{metadata.ctf_resolution_estimate:.2f}"
+                        if metadata.ctf_resolution_estimate is not None
+                        else ""
+                    ),
+                    "Defocus value": (
+                        f"{metadata.defocus_value:.2f}"
+                        if metadata.defocus_value is not None
+                        else ""
+                    ),
+                    "Total dose": f"{metadata.total_dose:.2f}" if metadata.total_dose is not None else "",
+                    "Rating": str(thumbnail.rating or ""),
+                    "Tags": ", ".join(thumbnail.tags),
+                }
+            )
     with open(path, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
