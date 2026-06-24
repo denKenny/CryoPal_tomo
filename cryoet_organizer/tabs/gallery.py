@@ -99,12 +99,20 @@ class GalleryTab(SidebarTab):
             row=0, column=2
         )
 
+        action_buttons = ttk.Frame(controls)
+        action_buttons.grid(row=1, column=4, sticky="ew")
+        action_buttons.columnconfigure(1, weight=1)
+        ttk.Button(
+            action_buttons,
+            text="Reset filters",
+            command=self._reset_gallery_filters,
+        ).grid(row=0, column=0, sticky="w", padx=(0, 8))
         self.import_button = ttk.Button(
-            controls,
+            action_buttons,
             text="Import thumbnails",
             command=self._import_thumbnails,
         )
-        self.import_button.grid(row=1, column=4, sticky="e")
+        self.import_button.grid(row=0, column=1, sticky="e")
         ttk.Button(
             controls,
             text="Multi selection",
@@ -117,7 +125,6 @@ class GalleryTab(SidebarTab):
         )
         self.select_all_button.grid(row=1, column=6, sticky="e", padx=(8, 0))
         self.select_all_button.grid_remove()
-
         tag_filters = ttk.LabelFrame(controls, text="Tag filters", padding=10)
         tag_filters.grid(row=2, column=0, columnspan=7, sticky="ew", pady=(12, 0))
         tag_filters.columnconfigure(0, weight=1)
@@ -291,6 +298,7 @@ class GalleryTab(SidebarTab):
 
     def _on_gallery_filter_changed(self, _event=None) -> None:
         self._reset_gallery_page()
+        self.multi_selected_keys.clear()
         self._request_gallery_render()
 
     def _dataset_options(self, project: ProjectData) -> list[str]:
@@ -413,6 +421,25 @@ class GalleryTab(SidebarTab):
             if tag in selected:
                 listbox.selection_set(index)
 
+    def _clear_filter_tag_selections(self) -> None:
+        self.include_tags_listbox.selection_clear(0, "end")
+        self.exclude_tags_listbox.selection_clear(0, "end")
+
+    def _reset_gallery_filters(self) -> None:
+        options = self._dataset_options(self.app.project)
+        if options:
+            self.dataset_var.set("All datasets")
+        else:
+            self.dataset_var.set("")
+        self.min_rating_var.set("Any")
+        self.tag_include_mode_var.set("All selected")
+        self._clear_filter_tag_selections()
+        self.multi_selected_keys.clear()
+        self.selected_thumbnail_key = None
+        self._reset_gallery_page()
+        self._update_details_for_current_selection()
+        self._request_gallery_render()
+
     def _selected_filter_tags(self, listbox: tk.Listbox) -> list[str]:
         return [str(listbox.get(index)) for index in listbox.curselection()]
 
@@ -430,15 +457,17 @@ class GalleryTab(SidebarTab):
         return [(dataset.dataset_name, thumbnail.image_path) for dataset, thumbnail in self._filtered_items()]
 
     def _selected_records(self) -> list[tuple[DatasetRecord, ThumbnailRecord]]:
+        record_lookup = {
+            (dataset.dataset_name, thumbnail.image_path): (dataset, thumbnail)
+            for dataset in self.app.project.datasets
+            for thumbnail in dataset.thumbnails
+        }
         records: list[tuple[DatasetRecord, ThumbnailRecord]] = []
         for dataset_name, image_path in self.multi_selected_keys:
-            dataset = next((d for d in self.app.project.datasets if d.dataset_name == dataset_name), None)
-            if dataset is None:
+            record = record_lookup.get((dataset_name, image_path))
+            if record is None:
                 continue
-            thumbnail = next((t for t in dataset.thumbnails if t.image_path == image_path), None)
-            if thumbnail is None:
-                continue
-            records.append((dataset, thumbnail))
+            records.append(record)
         return sorted(records, key=lambda item: (item[0].dataset_name.casefold(), item[1].ts_name.casefold()))
 
     def _update_import_button_label(self) -> None:
@@ -741,11 +770,14 @@ class GalleryTab(SidebarTab):
         if self.selected_thumbnail_key is None:
             return None, None
         dataset_name, image_path = self.selected_thumbnail_key
-        dataset = next((d for d in self.app.project.datasets if d.dataset_name == dataset_name), None)
-        if dataset is None:
-            return None, None
-        thumbnail = next((t for t in dataset.thumbnails if t.image_path == image_path), None)
-        return dataset, thumbnail
+        for dataset in self.app.project.datasets:
+            if dataset.dataset_name != dataset_name:
+                continue
+            for thumbnail in dataset.thumbnails:
+                if thumbnail.image_path == image_path:
+                    return dataset, thumbnail
+            return dataset, None
+        return None, None
 
     def _queue_thumbnail_single_click(self, dataset_name: str, image_path: str) -> None:
         if self.multi_selection_var.get():
@@ -1117,11 +1149,16 @@ class GalleryTab(SidebarTab):
     def _select_all_visible(self) -> None:
         if not self.multi_selection_var.get():
             return
-        self.multi_selected_keys = set(self._filtered_item_keys())
+        items = self._filtered_items()
+        page_items, _start, _end, _total = self._paged_items(items)
+        self.multi_selected_keys = {
+            (dataset.dataset_name, thumbnail.image_path)
+            for dataset, thumbnail in page_items
+        }
         for key, variable in self.selection_vars.items():
             variable.set(key in self.multi_selected_keys)
         self._update_details_for_current_selection()
-        self._request_gallery_render()
+        self._apply_selection_styles()
 
     def _run_ts_delete(
         self,
@@ -1372,7 +1409,7 @@ class GalleryTab(SidebarTab):
 
         if not items:
             self.summary_label.config(
-                text="No thumbnails matched the current selection or filters."
+                text="No thumbnails matched the current selection or filters. Use 'Reset filters' to show all available TS."
             )
             self._update_pager_controls(0, 0, 0)
             self._update_details_for_current_selection()
@@ -1433,10 +1470,7 @@ class GalleryTab(SidebarTab):
                 ttk.Checkbutton(
                     card,
                     variable=variable,
-                    command=lambda d=dataset.dataset_name, p=thumbnail.image_path: (
-                        self._select_thumbnail(d, p),
-                        self._request_gallery_render(),
-                    ),
+                    command=lambda d=dataset.dataset_name, p=thumbnail.image_path: self._select_thumbnail(d, p),
                 ).grid(row=0, column=0, sticky="nw")
 
             canvas = tk.Canvas(
@@ -1547,6 +1581,16 @@ class GalleryTab(SidebarTab):
             self.dataset_match_cache.clear()
             self.thumbnail_images.clear()
             self._loaded_project_id = id(project)
+            self.dataset_var.set("All datasets")
+            self.min_rating_var.set("Any")
+            self.tag_include_mode_var.set("All selected")
+            self._clear_filter_tag_selections()
+            self.multi_selection_var.set(False)
+            self.multi_selected_keys.clear()
+            self.selection_vars.clear()
+            self.selected_thumbnail_key = None
+            self.select_all_button.grid_remove()
+            self._clear_selected_thumbnail_details()
             self._reset_gallery_page()
         options = self._dataset_options(project)
         self.dataset_combo.configure(values=options)
