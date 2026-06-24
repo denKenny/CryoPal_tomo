@@ -8,6 +8,7 @@ from xml.etree import ElementTree as ET
 
 from cryoet_organizer.dialogs import show_detail_dialog
 from cryoet_organizer.job_defaults import resolve_job_default
+from cryoet_organizer.preferences import project_preference, project_preference_enabled, project_preference_int
 from cryoet_organizer.project import (
     DatasetRecord,
     JobHistoryEntry,
@@ -16,8 +17,8 @@ from cryoet_organizer.project import (
     dataset_ts_names,
     filtered_mdoc_paths,
     prepare_unified_mdocs_directory,
-    _sanitize_dataset_folder_name,
 )
+from cryoet_organizer.thumbnail_cache import effective_thumbnail_source_folder, resolve_thumbnail_cache_dir
 from cryoet_organizer.tabs.base import LabeledEntry, LabeledPathEntry, SidebarTab
 from cryoet_organizer.warp_settings import WarpSettingsSummary, parse_warp_settings
 
@@ -888,6 +889,12 @@ class ProjectOverviewTab(SidebarTab):
         dataset.tilt_series_processing_folder = str(base / "warp_tiltseries")
         dataset.tilt_series_data_folder = str(base / "tomostar")
 
+    def _effective_thumbnail_source_folder(self, dataset: DatasetRecord) -> str:
+        return effective_thumbnail_source_folder(dataset)
+
+    def _thumbnail_cache_folder(self, dataset: DatasetRecord) -> str:
+        return str(resolve_thumbnail_cache_dir(self.app.project, dataset))
+
     def _count_tomostar_files(self, dataset: DatasetRecord) -> int:
         folder_value = dataset.tilt_series_data_folder.strip()
         if not folder_value:
@@ -968,6 +975,17 @@ class ProjectOverviewTab(SidebarTab):
         if dataset is None:
             return
 
+        cache_enabled = project_preference_enabled(self.app.project, "use_downscaled_thumbnails", default=True)
+        cache_size = project_preference_int(
+            self.app.project,
+            "thumbnail_cache_size",
+            default=256,
+            minimum=32,
+            maximum=4096,
+        )
+        effective_thumbnail_source = self._effective_thumbnail_source_folder(dataset)
+        thumbnail_cache_folder = self._thumbnail_cache_folder(dataset)
+
         sections = [
             (
                 "General",
@@ -1006,7 +1024,11 @@ class ProjectOverviewTab(SidebarTab):
                     ("Frameseries processing folder", dataset.frame_series_processing_folder or "-"),
                     ("Tiltseries processing folder", dataset.tilt_series_processing_folder or "-"),
                     ("Tomostar folder", dataset.tilt_series_data_folder or "-"),
-                    ("Thumbnail folder", dataset.thumbnail_folder or "-"),
+                    ("Stored thumbnail folder", dataset.thumbnail_folder or "-"),
+                    ("Effective thumbnail source", effective_thumbnail_source or "-"),
+                    ("Thumbnail cache enabled", "Yes" if cache_enabled else "No"),
+                    ("Thumbnail cache folder", thumbnail_cache_folder if cache_enabled else "(disabled)"),
+                    ("Thumbnail cache size", f"{cache_size} x {cache_size}" if cache_enabled else "-"),
                 ],
             ),
             (

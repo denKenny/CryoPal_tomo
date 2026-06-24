@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import os
+import tempfile
 import threading
 import tkinter as tk
 from queue import Empty, Queue
@@ -9,6 +12,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from cryoet_organizer.dialogs import bind_scrollable_canvas
 from cryoet_organizer.file_resolver import file_role_order, resolve_dataset_file, role_title
+from cryoet_organizer.preferences import project_preference, project_preference_enabled, project_preference_int
 from cryoet_organizer.project import (
     DatasetRecord,
     ProjectData,
@@ -16,10 +20,61 @@ from cryoet_organizer.project import (
     best_matching_ts_name,
     dataset_ts_names,
 )
+from cryoet_organizer.thumbnail_cache import effective_thumbnail_source_folder, resolve_thumbnail_cache_dir, thumbnail_cache_location
 from cryoet_organizer.ts_metadata import collect_ts_metadata, ts_metadata_sections
 from cryoet_organizer.tabs.base import SidebarTab
 
-GALLERY_PAGE_SIZE = 200
+GALLERY_PAGE_SIZE = 50
+THUMBNAIL_CACHE_MANIFEST = "index.json"
+
+
+class _GalleryBusyDialog:
+    def __init__(self, parent: tk.Misc, title: str, message: str) -> None:
+        self.message_var = tk.StringVar(value=message)
+        self.window = tk.Toplevel(parent)
+        self.window.title(title)
+        self.window.transient(parent.winfo_toplevel())
+        self.window.resizable(False, False)
+        self.window.protocol("WM_DELETE_WINDOW", lambda: None)
+        self.window.columnconfigure(0, weight=1)
+        self.window.rowconfigure(0, weight=1)
+
+        body = ttk.Frame(self.window, padding=16)
+        body.grid(row=0, column=0, sticky="nsew")
+        body.columnconfigure(0, weight=1)
+        ttk.Label(
+            body,
+            textvariable=self.message_var,
+            wraplength=420,
+            justify="left",
+        ).grid(row=0, column=0, sticky="w")
+        self.progress = ttk.Progressbar(body, orient="horizontal", mode="indeterminate", length=320)
+        self.progress.grid(row=1, column=0, sticky="ew", pady=(12, 0))
+        self.progress.start(10)
+        self.window.update_idletasks()
+        self.window.grab_set()
+        self.window.focus_set()
+
+    def set_message(self, message: str) -> None:
+        self.message_var.set(message)
+        try:
+            self.window.update()
+        except tk.TclError:
+            pass
+
+    def close(self) -> None:
+        try:
+            self.progress.stop()
+        except tk.TclError:
+            pass
+        try:
+            self.window.grab_release()
+        except tk.TclError:
+            pass
+        try:
+            self.window.destroy()
+        except tk.TclError:
+            pass
 
 
 class GalleryTab(SidebarTab):
@@ -46,7 +101,11 @@ class GalleryTab(SidebarTab):
         self.card_widgets: dict[tuple[str, str], dict[str, tk.Widget]] = {}
         self.thumbnail_images: dict[tuple[str, int], tk.PhotoImage] = {}
         self.dataset_match_cache: dict[tuple[str, str], list[ThumbnailRecord]] = {}
+        self.thumbnail_display_paths: dict[tuple[str, str], str] = {}
+        self.thumbnail_cache_state: dict[str, tuple[object, ...]] = {}
+        self.thumbnail_record_index: dict[tuple[str, str], tuple[DatasetRecord, ThumbnailRecord]] = {}
         self._pending_render_after: str | None = None
+        self._pending_multi_details_after: str | None = None
         self._last_render_column_count: int | None = None
         self._loaded_project_id: int | None = None
         self._needs_render_when_shown = False
@@ -120,7 +179,7 @@ class GalleryTab(SidebarTab):
         ).grid(row=1, column=5, sticky="e", padx=(8, 0))
         self.select_all_button = ttk.Button(
             controls,
-            text="Select all",
+            text="Select all filtered",
             command=self._select_all_visible,
         )
         self.select_all_button.grid(row=1, column=6, sticky="e", padx=(8, 0))
@@ -307,9 +366,11 @@ class GalleryTab(SidebarTab):
         return ["All datasets"] + [dataset.dataset_name for dataset in project.datasets]
 
     def _datasets_for_selection(self) -> list[DatasetRecord]:
-        if self.dataset_var.get() == "All datasets":
+        selected = self.dataset_var.get().strip()
+        if not selected or selected == "All datasets":
             return list(self.app.project.datasets)
-        return [d for d in self.app.project.datasets if d.dataset_name == self.dataset_var.get()]
+        matches = [d for d in self.app.project.datasets if d.dataset_name == selected]
+        return matches if matches else list(self.app.project.datasets)
 
     def _supported_image_files(self, folder: str) -> list[Path]:
         path = Path(folder)
@@ -321,26 +382,7 @@ class GalleryTab(SidebarTab):
         )
 
     def _effective_thumbnail_folder(self, dataset: DatasetRecord) -> str:
-        if dataset.thumbnail_folder:
-            return dataset.thumbnail_folder
-        base_processing_folder = dataset.tilt_series_processing_folder or str(
-            Path(dataset.processing_folder) / "warp_tiltseries"
-        )
-        base_path = Path(base_processing_folder)
-        candidates = [
-            base_path / "reconstructions",
-            base_path / "reconstruction",
-        ]
-        image_suffixes = {".png", ".jpg", ".jpeg"}
-        for candidate in candidates:
-            if candidate.exists() and any(
-                item.is_file() and item.suffix.lower() in image_suffixes for item in candidate.iterdir()
-            ):
-                return str(candidate)
-        for candidate in candidates:
-            if candidate.exists():
-                return str(candidate)
-        return str(candidates[0])
+        return effective_thumbnail_source_folder(dataset)
 
     def _matching_mrc_path(self, dataset: DatasetRecord, ts_name: str) -> str:
         resolved = resolve_dataset_file(self.app.project, dataset, ts_name, "tomogram")
@@ -387,6 +429,7 @@ class GalleryTab(SidebarTab):
         )
         dataset.thumbnails = matched
         self.dataset_match_cache[(dataset.dataset_name, folder)] = matched
+        self._reindex_dataset_records(dataset, matched)
         return matched
 
     def _dataset_thumbnail_records(self, dataset: DatasetRecord) -> list[ThumbnailRecord]:
@@ -397,8 +440,268 @@ class GalleryTab(SidebarTab):
             known_paths = {record.image_path for record in cached}
             current_paths = {str(path) for path in self._supported_image_files(folder)}
             if known_paths == current_paths:
+                self._reindex_dataset_records(dataset, cached)
                 return cached
         return self._scan_thumbnails_for_dataset(dataset)
+
+    def _reindex_dataset_records(self, dataset: DatasetRecord, records: list[ThumbnailRecord]) -> None:
+        stale_keys = [key for key in self.thumbnail_record_index if key[0] == dataset.dataset_name]
+        for key in stale_keys:
+            self.thumbnail_record_index.pop(key, None)
+        for record in records:
+            self.thumbnail_record_index[(dataset.dataset_name, record.image_path)] = (dataset, record)
+
+    def _downscaled_thumbnails_enabled(self) -> bool:
+        return project_preference_enabled(self.app.project, "use_downscaled_thumbnails", default=True)
+
+    def _downscaled_thumbnail_size(self) -> int:
+        return project_preference_int(
+            self.app.project,
+            "thumbnail_cache_size",
+            default=256,
+            minimum=32,
+            maximum=4096,
+        )
+
+    def _thumbnail_cache_location(self) -> str:
+        return thumbnail_cache_location(self.app.project)
+
+    def _resolve_thumbnail_cache_dir(self, dataset: DatasetRecord) -> Path:
+        return resolve_thumbnail_cache_dir(self.app.project, dataset)
+
+    def _thumbnail_cache_manifest_path(self, cache_dir: Path) -> Path:
+        return cache_dir / THUMBNAIL_CACHE_MANIFEST
+
+    def _thumbnail_cache_target_stem(self, source_path: Path) -> str:
+        digest = hashlib.sha1(str(source_path).encode("utf-8")).hexdigest()[:10]
+        safe_stem = "".join(char if char.isalnum() or char in {"-", "_"} else "_" for char in source_path.stem)
+        safe_stem = safe_stem[:80] or "thumbnail"
+        return f"{safe_stem}_{digest}"
+
+    def _thumbnail_cache_target_path(self, cache_dir: Path, source_path: Path, suffix: str = ".png") -> Path:
+        return cache_dir / f"{self._thumbnail_cache_target_stem(source_path)}{suffix}"
+
+    def _thumbnail_source_signature(self, source_path: Path) -> tuple[int, int]:
+        try:
+            stat = source_path.stat()
+        except OSError:
+            return (0, 0)
+        return (int(getattr(stat, "st_mtime_ns", int(stat.st_mtime * 1_000_000_000))), int(stat.st_size))
+
+    def _load_thumbnail_cache_manifest(self, cache_dir: Path) -> dict:
+        manifest_path = self._thumbnail_cache_manifest_path(cache_dir)
+        try:
+            payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    def _save_thumbnail_cache_manifest(self, cache_dir: Path, payload: dict) -> None:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        manifest_path = self._thumbnail_cache_manifest_path(cache_dir)
+        fd, tmp_name = tempfile.mkstemp(dir=cache_dir, suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle, indent=2, ensure_ascii=False)
+            os.replace(tmp_name, manifest_path)
+        except Exception:
+            try:
+                os.unlink(tmp_name)
+            except OSError:
+                pass
+            raise
+
+    def _generate_cached_thumbnail(self, source_path: Path, cache_dir: Path, target_size: int) -> Path:
+        image = tk.PhotoImage(file=str(source_path))
+        width = max(image.width(), 1)
+        height = max(image.height(), 1)
+        scale = max(width / target_size, height / target_size, 1)
+        subsample = max(1, int(scale))
+        if subsample > 1:
+            image = image.subsample(subsample, subsample)
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        errors: list[str] = []
+        for image_format, suffix in (("png", ".png"), ("gif", ".gif"), ("ppm", ".ppm")):
+            target_path = self._thumbnail_cache_target_path(cache_dir, source_path, suffix)
+            try:
+                image.write(str(target_path), format=image_format)
+                return target_path
+            except Exception as exc:
+                errors.append(f"{image_format.upper()}: {exc}")
+                try:
+                    target_path.unlink()
+                except OSError:
+                    pass
+        raise OSError(
+            "Could not write a cached thumbnail for "
+            f"{source_path.name}. Tried PNG, GIF, and PPM.\n" + "\n".join(errors)
+        )
+
+    def _display_thumbnail_path(self, dataset: DatasetRecord, thumbnail: ThumbnailRecord) -> str:
+        return self.thumbnail_display_paths.get((dataset.dataset_name, thumbnail.image_path), thumbnail.image_path)
+
+    def _prepare_thumbnail_cache(self, datasets: list[DatasetRecord]) -> dict[str, list[ThumbnailRecord]]:
+        records_by_dataset: dict[str, list[ThumbnailRecord]] = {}
+        enabled = self._downscaled_thumbnails_enabled()
+        size = self._downscaled_thumbnail_size()
+        location = self._thumbnail_cache_location()
+        plans: list[dict[str, object]] = []
+        total_to_generate = 0
+
+        for dataset in datasets:
+            records = self._dataset_thumbnail_records(dataset)
+            records_by_dataset[dataset.dataset_name] = records
+            source_paths = [Path(record.image_path) for record in records if record.image_path]
+            signature = tuple(
+                (str(path), *self._thumbnail_source_signature(path))
+                for path in source_paths
+            )
+            state_key: tuple[object, ...] = (enabled, size, location, signature)
+            if self.thumbnail_cache_state.get(dataset.dataset_name) == state_key:
+                if not enabled:
+                    continue
+                missing_display_file = any(
+                    not Path(
+                        self.thumbnail_display_paths.get((dataset.dataset_name, record.image_path), record.image_path)
+                    ).is_file()
+                    for record in records
+                )
+                if not missing_display_file:
+                    continue
+
+            if not enabled:
+                for record in records:
+                    self.thumbnail_display_paths[(dataset.dataset_name, record.image_path)] = record.image_path
+                self.thumbnail_cache_state[dataset.dataset_name] = state_key
+                continue
+
+            cache_dir = self._resolve_thumbnail_cache_dir(dataset)
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            manifest = self._load_thumbnail_cache_manifest(cache_dir)
+            manifest_entries = manifest.get("entries", {}) if isinstance(manifest.get("entries"), dict) else {}
+            cached_size = int(manifest.get("thumbnail_size", 0) or 0)
+            display_map: dict[str, str] = {}
+            generation_tasks: list[tuple[Path, tuple[int, int]]] = []
+            updated_entries: dict[str, dict[str, object]] = {}
+
+            for path in source_paths:
+                signature_pair = self._thumbnail_source_signature(path)
+                entry = manifest_entries.get(str(path), {}) if cached_size == size else {}
+                cache_file = str(entry.get("cache_file", "")).strip() if isinstance(entry, dict) else ""
+                target_path = self._thumbnail_cache_target_path(cache_dir, path)
+                if cache_file:
+                    target_path = cache_dir / cache_file
+                entry_mtime = int(entry.get("source_mtime_ns", -1)) if isinstance(entry, dict) else -1
+                entry_size = int(entry.get("source_size", -1)) if isinstance(entry, dict) else -1
+                if (
+                    cached_size == size
+                    and cache_file
+                    and target_path.is_file()
+                    and entry_mtime == signature_pair[0]
+                    and entry_size == signature_pair[1]
+                ):
+                    display_map[str(path)] = str(target_path)
+                    updated_entries[str(path)] = {
+                        "cache_file": target_path.name,
+                        "source_mtime_ns": signature_pair[0],
+                        "source_size": signature_pair[1],
+                    }
+                else:
+                    generation_tasks.append((path, signature_pair))
+
+            plans.append(
+                {
+                    "dataset": dataset,
+                    "records": records,
+                    "state_key": state_key,
+                    "cache_dir": cache_dir,
+                    "display_map": display_map,
+                    "entries": updated_entries,
+                    "tasks": generation_tasks,
+                    "size": size,
+                }
+            )
+            total_to_generate += len(generation_tasks)
+
+        if total_to_generate:
+            busy = _GalleryBusyDialog(
+                self.frame,
+                "Preparing thumbnails",
+                "Generating downscaled gallery thumbnails. Please wait.",
+            )
+            cache_failures: list[str] = []
+            try:
+                completed = 0
+                for plan in plans:
+                    tasks = plan["tasks"]
+                    if not isinstance(tasks, list) or not tasks:
+                        continue
+                    dataset = plan["dataset"]
+                    cache_dir = plan["cache_dir"]
+                    if not isinstance(dataset, DatasetRecord) or not isinstance(cache_dir, Path):
+                        continue
+                    entries = plan["entries"]
+                    display_map = plan["display_map"]
+                    target_size = int(plan["size"])
+                    for source_path, signature_pair in tasks:
+                        completed += 1
+                        busy.set_message(
+                            "Generating downscaled gallery thumbnails. Please wait.\n\n"
+                            f"[{completed}/{total_to_generate}] {dataset.dataset_name}: {source_path.name}"
+                        )
+                        try:
+                            target_path = self._generate_cached_thumbnail(source_path, cache_dir, target_size)
+                            display_map[str(source_path)] = str(target_path)
+                            entries[str(source_path)] = {
+                                "cache_file": target_path.name,
+                                "source_mtime_ns": signature_pair[0],
+                                "source_size": signature_pair[1],
+                            }
+                        except Exception as exc:
+                            display_map[str(source_path)] = str(source_path)
+                            cache_failures.append(f"{dataset.dataset_name} / {source_path.name}: {exc}")
+                    try:
+                        self._save_thumbnail_cache_manifest(
+                            cache_dir,
+                            {
+                                "version": 1,
+                                "thumbnail_size": target_size,
+                                "entries": entries,
+                            },
+                        )
+                    except OSError as exc:
+                        messagebox.showerror(
+                            "Thumbnail cache",
+                            f"Could not update the thumbnail cache for {dataset.dataset_name}.\n\n{exc}",
+                            parent=self.frame.winfo_toplevel(),
+                        )
+            finally:
+                busy.close()
+            if cache_failures:
+                preview = "\n".join(cache_failures[:8])
+                if len(cache_failures) > 8:
+                    preview += f"\n... and {len(cache_failures) - 8} more"
+                messagebox.showwarning(
+                    "Thumbnail cache",
+                    "Some downscaled thumbnails could not be written, so CryoPal fell back to the original "
+                    f"thumbnail files.\n\n{preview}",
+                    parent=self.frame.winfo_toplevel(),
+                )
+
+        for plan in plans:
+            dataset = plan["dataset"]
+            records = plan["records"]
+            state_key = plan["state_key"]
+            display_map = plan["display_map"]
+            if not isinstance(dataset, DatasetRecord) or not isinstance(records, list):
+                continue
+            for record in records:
+                self.thumbnail_display_paths[(dataset.dataset_name, record.image_path)] = display_map.get(
+                    record.image_path,
+                    record.image_path,
+                )
+            self.thumbnail_cache_state[dataset.dataset_name] = state_key
+        return records_by_dataset
 
     def _all_known_tags(self) -> list[str]:
         tags = set()
@@ -457,23 +760,38 @@ class GalleryTab(SidebarTab):
         return [(dataset.dataset_name, thumbnail.image_path) for dataset, thumbnail in self._filtered_items()]
 
     def _selected_records(self) -> list[tuple[DatasetRecord, ThumbnailRecord]]:
-        record_lookup = {
-            (dataset.dataset_name, thumbnail.image_path): (dataset, thumbnail)
-            for dataset in self.app.project.datasets
-            for thumbnail in dataset.thumbnails
-        }
         records: list[tuple[DatasetRecord, ThumbnailRecord]] = []
-        for dataset_name, image_path in self.multi_selected_keys:
-            record = record_lookup.get((dataset_name, image_path))
-            if record is None:
-                continue
-            records.append(record)
-        return sorted(records, key=lambda item: (item[0].dataset_name.casefold(), item[1].ts_name.casefold()))
+        selected_keys = self.multi_selected_keys
+        if not selected_keys:
+            return records
+        for key in selected_keys:
+            record = self.thumbnail_record_index.get(key)
+            if record is not None:
+                records.append(record)
+        return records
+
+    def _format_summary_preview(self, values: list[str], *, empty: str = "-", limit: int = 3) -> str:
+        cleaned = [value for value in values if value]
+        if not cleaned:
+            return empty
+        preview = ", ".join(cleaned[:limit])
+        if len(cleaned) > limit:
+            preview += f", +{len(cleaned) - limit} more"
+        return preview
 
     def _update_import_button_label(self) -> None:
         self.import_button.config(
             text="Update thumbnails" if self._selection_has_thumbnails() else "Import thumbnails"
         )
+
+    def _clear_dataset_thumbnail_runtime_cache(self, dataset_name: str) -> None:
+        keys_to_remove = [key for key in self.thumbnail_display_paths if key[0] == dataset_name]
+        for key in keys_to_remove:
+            self.thumbnail_display_paths.pop(key, None)
+        index_keys = [key for key in self.thumbnail_record_index if key[0] == dataset_name]
+        for key in index_keys:
+            self.thumbnail_record_index.pop(key, None)
+        self.thumbnail_cache_state.pop(dataset_name, None)
 
     def _column_count_for_width(self, width: int | None = None) -> int:
         available_width = max(width or self.gallery_canvas.winfo_width(), 640)
@@ -531,7 +849,7 @@ class GalleryTab(SidebarTab):
         self.pager_row.grid()
 
     def _prune_thumbnail_cache(self, items: list[tuple[DatasetRecord, ThumbnailRecord]]) -> None:
-        visible_paths = {thumbnail.image_path for _dataset, thumbnail in items}
+        visible_paths = {self._display_thumbnail_path(dataset, thumbnail) for dataset, thumbnail in items}
         keep_keys = {(path, self.thumbnail_size) for path in visible_paths}
         stale_keys = [key for key in self.thumbnail_images if key not in keep_keys]
         for key in stale_keys:
@@ -555,7 +873,10 @@ class GalleryTab(SidebarTab):
         self.thumbnail_images[key] = image
         return image
 
-    def _filtered_items(self) -> list[tuple[DatasetRecord, ThumbnailRecord]]:
+    def _filtered_items(
+        self,
+        records_by_dataset: dict[str, list[ThumbnailRecord]] | None = None,
+    ) -> list[tuple[DatasetRecord, ThumbnailRecord]]:
         items: list[tuple[DatasetRecord, ThumbnailRecord]] = []
         min_rating = 0 if self.min_rating_var.get() == "Any" else int(self.min_rating_var.get())
         include_tags = self._selected_filter_tags(self.include_tags_listbox)
@@ -563,7 +884,12 @@ class GalleryTab(SidebarTab):
         include_mode = self.tag_include_mode_var.get().strip() or "All selected"
 
         for dataset in self._datasets_for_selection():
-            for thumbnail in self._dataset_thumbnail_records(dataset):
+            dataset_records = (
+                records_by_dataset.get(dataset.dataset_name, [])
+                if records_by_dataset is not None
+                else self._dataset_thumbnail_records(dataset)
+            )
+            for thumbnail in dataset_records:
                 if thumbnail.rating < min_rating:
                     continue
                 thumbnail_tags = {tag.casefold() for tag in thumbnail.tags if tag}
@@ -590,8 +916,8 @@ class GalleryTab(SidebarTab):
             variable = self.selection_vars.get(key)
             if variable is not None:
                 variable.set(key in self.multi_selected_keys)
-            self._apply_selection_styles()
-            self._update_details_for_current_selection()
+            self._apply_selection_style_for_key(key)
+            self._schedule_multi_selection_details_update()
             return
 
         self.selected_thumbnail_key = (dataset_name, image_path)
@@ -658,6 +984,42 @@ class GalleryTab(SidebarTab):
             if isinstance(subtitle, tk.Label):
                 subtitle.configure(bg=card_background, fg=text_foreground)
 
+    def _apply_selection_style_for_key(self, key: tuple[str, str]) -> None:
+        widgets = self.card_widgets.get(key)
+        if not widgets:
+            return
+        selected_sidebar_background = self.app._current_appearance.sidebar_background
+        main_background = self.app._current_appearance.main_background
+        text_foreground = self.app._current_appearance.main_foreground
+        is_selected = (
+            key in self.multi_selected_keys
+            if self.multi_selection_var.get()
+            else self.selected_thumbnail_key == key
+        )
+        card_background = selected_sidebar_background if is_selected else main_background
+        border_width = 2 if is_selected else 1
+        card = widgets.get("card")
+        if isinstance(card, tk.Frame):
+            card.configure(background=card_background, bd=border_width)
+        title = widgets.get("title")
+        if isinstance(title, tk.Label):
+            title.configure(bg=card_background, fg=text_foreground)
+        subtitle = widgets.get("subtitle")
+        if isinstance(subtitle, tk.Label):
+            subtitle.configure(bg=card_background, fg=text_foreground)
+
+    def _schedule_multi_selection_details_update(self) -> None:
+        if self._pending_multi_details_after is not None:
+            try:
+                self.frame.after_cancel(self._pending_multi_details_after)
+            except tk.TclError:
+                pass
+        self._pending_multi_details_after = self.frame.after_idle(self._run_multi_selection_details_update)
+
+    def _run_multi_selection_details_update(self) -> None:
+        self._pending_multi_details_after = None
+        self._update_details_for_current_selection()
+
     def _update_details_for_current_selection(self) -> None:
         if self.multi_selection_var.get():
             records = self._selected_records()
@@ -677,7 +1039,9 @@ class GalleryTab(SidebarTab):
             tags = sorted({tag for _dataset, thumbnail in records for tag in thumbnail.tags}, key=str.casefold)
             mrc_count = sum(1 for _dataset, thumbnail in records if thumbnail.mrc_path)
             self.selected_dataset_var.set(f"{len(records)} TS selected")
-            self.selected_ts_var.set(f"{len(datasets)} dataset(s): {', '.join(datasets)}")
+            self.selected_ts_var.set(
+                f"{len(datasets)} dataset(s): {self._format_summary_preview(datasets, empty='-')}"
+            )
             self.selected_pixelsize_var.set(
                 (
                     f"Ratings: {min(ratings)}-{max(ratings)}"
@@ -685,14 +1049,14 @@ class GalleryTab(SidebarTab):
                     else "Ratings: none"
                 )
             )
-            self.selected_tags_var.set(", ".join(tags) if tags else "-")
+            self.selected_tags_var.set(self._format_summary_preview(tags))
             self.selected_mrc_var.set(f"MRC available for {mrc_count}/{len(records)}")
             self.open_mrc_button.config(state="normal" if mrc_count else "disabled")
             self.link_mrc_button.config(text="Update .mrc file", state="disabled")
             self.add_to_ts_list_button.config(state="normal")
             self.selected_rating_var.set(0)
             self.tag_listbox.delete(0, "end")
-            for tag in tags:
+            for tag in tags[:200]:
                 self.tag_listbox.insert("end", tag)
             return
 
@@ -1105,26 +1469,48 @@ class GalleryTab(SidebarTab):
 
     def _toggle_multi_selection(self) -> None:
         enabled = not self.multi_selection_var.get()
-        self.multi_selection_var.set(enabled)
-        self.multi_selected_keys.clear()
-        self.selection_vars.clear()
-        if enabled:
-            self.selected_thumbnail_key = None
-            self.select_all_button.grid()
-        else:
-            self.select_all_button.grid_remove()
-        self._update_details_for_current_selection()
-        self._request_gallery_render()
+        busy = _GalleryBusyDialog(
+            self.frame,
+            "Updating gallery",
+            "Switching multi-selection mode. Please wait.",
+        )
+        try:
+            self.multi_selection_var.set(enabled)
+            self.multi_selected_keys.clear()
+            self.selection_vars.clear()
+            if enabled:
+                self.selected_thumbnail_key = None
+                self.select_all_button.grid()
+            else:
+                self.select_all_button.grid_remove()
+            self._update_details_for_current_selection()
+            if self.app.active_tab_id == self.tab_id and self.frame.winfo_ismapped():
+                self._render_gallery()
+            else:
+                self._request_gallery_render()
+        finally:
+            busy.close()
 
     def prepare_multi_selection(self) -> None:
-        if not self.multi_selection_var.get():
-            self.multi_selection_var.set(True)
-            self.select_all_button.grid()
-        self.multi_selected_keys.clear()
-        self.selection_vars.clear()
-        self.selected_thumbnail_key = None
-        self._update_details_for_current_selection()
-        self._request_gallery_render()
+        busy = _GalleryBusyDialog(
+            self.frame,
+            "Updating gallery",
+            "Preparing multi-selection mode. Please wait.",
+        )
+        try:
+            if not self.multi_selection_var.get():
+                self.multi_selection_var.set(True)
+                self.select_all_button.grid()
+            self.multi_selected_keys.clear()
+            self.selection_vars.clear()
+            self.selected_thumbnail_key = None
+            self._update_details_for_current_selection()
+            if self.app.active_tab_id == self.tab_id and self.frame.winfo_ismapped():
+                self._render_gallery()
+            else:
+                self._request_gallery_render()
+        finally:
+            busy.close()
 
     def _records_for_ts_transfer(self) -> list[tuple[DatasetRecord, ThumbnailRecord]]:
         if self.multi_selection_var.get():
@@ -1149,11 +1535,12 @@ class GalleryTab(SidebarTab):
     def _select_all_visible(self) -> None:
         if not self.multi_selection_var.get():
             return
-        items = self._filtered_items()
-        page_items, _start, _end, _total = self._paged_items(items)
+        datasets = self._datasets_for_selection()
+        records_by_dataset = self._prepare_thumbnail_cache(datasets)
+        items = self._filtered_items(records_by_dataset)
         self.multi_selected_keys = {
             (dataset.dataset_name, thumbnail.image_path)
-            for dataset, thumbnail in page_items
+            for dataset, thumbnail in items
         }
         for key, variable in self.selection_vars.items():
             variable.set(key in self.multi_selected_keys)
@@ -1301,6 +1688,7 @@ class GalleryTab(SidebarTab):
                                 ]
                                 folder = self._effective_thumbnail_folder(dataset)
                                 self.dataset_match_cache.pop((dataset.dataset_name, folder), None)
+                                self._clear_dataset_thumbnail_runtime_cache(dataset.dataset_name)
                             if self.selected_thumbnail_key in deleted_keys:
                                 self._clear_selected_thumbnail_details()
                             self.multi_selected_keys.difference_update(deleted_keys)
@@ -1403,7 +1791,8 @@ class GalleryTab(SidebarTab):
             self._update_import_button_label()
             return
 
-        items = self._filtered_items()
+        records_by_dataset = self._prepare_thumbnail_cache(datasets)
+        items = self._filtered_items(records_by_dataset)
         self._update_import_button_label()
         self._update_tag_suggestions()
 
@@ -1431,11 +1820,11 @@ class GalleryTab(SidebarTab):
         )
         self._update_pager_controls(start, end, total_items)
         if self.multi_selection_var.get():
-            visible_keys = {(dataset.dataset_name, thumbnail.image_path) for dataset, thumbnail in page_items}
-            self.multi_selected_keys.intersection_update(visible_keys)
+            filtered_keys = {(dataset.dataset_name, thumbnail.image_path) for dataset, thumbnail in items}
+            self.multi_selected_keys.intersection_update(filtered_keys)
 
         for index, (dataset, thumbnail) in enumerate(page_items):
-            image = self._thumbnail_image(thumbnail.image_path)
+            image = self._thumbnail_image(self._display_thumbnail_path(dataset, thumbnail))
             if image is None:
                 continue
 
@@ -1555,6 +1944,7 @@ class GalleryTab(SidebarTab):
         for dataset in datasets:
             dataset.thumbnail_folder = folder
             self.dataset_match_cache.pop((dataset.dataset_name, folder), None)
+            self._clear_dataset_thumbnail_runtime_cache(dataset.dataset_name)
             imported += len(self._scan_thumbnails_for_dataset(dataset))
 
         self._reset_gallery_page()
@@ -1580,6 +1970,9 @@ class GalleryTab(SidebarTab):
         if self._loaded_project_id != id(project):
             self.dataset_match_cache.clear()
             self.thumbnail_images.clear()
+            self.thumbnail_display_paths.clear()
+            self.thumbnail_cache_state.clear()
+            self.thumbnail_record_index.clear()
             self._loaded_project_id = id(project)
             self.dataset_var.set("All datasets")
             self.min_rating_var.set("Any")
@@ -1614,5 +2007,10 @@ class GalleryTab(SidebarTab):
         self._needs_render_when_shown = True
 
     def on_tab_shown(self) -> None:
+        if self.app.project.datasets and not self.dataset_var.get().strip():
+            self.dataset_var.set("All datasets")
+        if self.app.project.datasets:
+            self._request_gallery_render()
+            return
         if self._needs_render_when_shown:
             self._request_gallery_render()

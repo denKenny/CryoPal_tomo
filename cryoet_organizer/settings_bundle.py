@@ -107,7 +107,7 @@ def _job_default_groups(project: ProjectData) -> SettingsSelectionGroup:
 
 def exportable_settings_groups(project: ProjectData) -> list[SettingsSelectionGroup]:
     groups: list[SettingsSelectionGroup] = [
-        _singular_item("preferences", "Save particle plots"),
+        _singular_item("preferences", "General preferences"),
         _singular_item("viewer_defaults", "Viewer defaults"),
         _job_default_groups(project),
         SettingsSelectionGroup(
@@ -258,7 +258,7 @@ def importable_settings_groups(payload: dict[str, Any]) -> list[SettingsSelectio
         return []
     groups_by_key: dict[str, SettingsSelectionGroup] = {}
     if isinstance(categories.get("preferences"), dict):
-        groups_by_key["preferences"] = _singular_item("preferences", "Save particle plots")
+        groups_by_key["preferences"] = _singular_item("preferences", "General preferences")
     if isinstance(categories.get("viewer_defaults"), dict):
         groups_by_key["viewer_defaults"] = _singular_item("viewer_defaults", "Viewer defaults")
     if isinstance(categories.get("default_parameters"), dict):
