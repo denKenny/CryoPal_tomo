@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import shutil
 import tkinter as tk
 from datetime import datetime, timezone
 from pathlib import Path
@@ -13,8 +12,11 @@ from cryoet_organizer.project import (
     DatasetRecord,
     JobHistoryEntry,
     ProjectData,
+    assert_unique_dataset_names,
     dataset_ts_names,
     filtered_mdoc_paths,
+    prepare_unified_mdocs_directory,
+    _sanitize_dataset_folder_name,
 )
 from cryoet_organizer.tabs.base import LabeledEntry, LabeledPathEntry, SidebarTab
 from cryoet_organizer.warp_settings import WarpSettingsSummary, parse_warp_settings
@@ -873,12 +875,8 @@ class ProjectOverviewTab(SidebarTab):
         self._refresh_table(self.app.project)
         self.app.status_var.set(f"Sorted datasets by {column}")
 
-    def _sanitize_dataset_folder_name(self, dataset_name: str) -> str:
-        cleaned = dataset_name.strip().replace("/", "_").replace("\\", "_")
-        return cleaned or "dataset"
-
     def _build_dataset_processing_folder(self, base_folder: str, dataset_name: str) -> str:
-        dataset_folder = Path(base_folder) / self._sanitize_dataset_folder_name(dataset_name)
+        dataset_folder = Path(base_folder) / _sanitize_dataset_folder_name(dataset_name)
         dataset_folder.mkdir(parents=True, exist_ok=True)
         return str(dataset_folder)
 
@@ -926,27 +924,31 @@ class ProjectOverviewTab(SidebarTab):
         return filtered_mdoc_paths(dataset)
 
     def _prepare_mdocs_folder(self, dataset: DatasetRecord) -> tuple[str, int, dict[str, str]]:
-        source_dir = Path(dataset.mdocs_source_folder)
-        target_dir = Path(dataset.processing_folder) / "new_mdoc"
-        target_dir.mkdir(parents=True, exist_ok=True)
+        return prepare_unified_mdocs_directory(dataset)
 
-        for existing in target_dir.glob("*.mdoc"):
-            existing.unlink(missing_ok=True)
-
-        mdoc_files = self._filtered_mdoc_files(dataset)
-        if not mdoc_files:
-            raise ValueError("No .mdoc files remained after applying the selected ignore filters.")
-
-        width = max(3, len(str(len(mdoc_files))))
-        base_name = self._sanitize_dataset_folder_name(dataset.dataset_name)
-        prepared_map: dict[str, str] = {}
-        for index, source_path in enumerate(mdoc_files, start=1):
-            target_name = f"{base_name}_TS_{index:0{width}d}.mdoc"
-            target_path = target_dir / target_name
-            shutil.copy2(source_path, target_path)
-            prepared_map[source_path.stem] = str(target_path)
-
-        return str(target_dir), len(mdoc_files), prepared_map
+    def _ensure_unique_dataset_name(self, dataset_name: str, *, parent: tk.Misc | None = None) -> bool:
+        candidate = dataset_name.strip()
+        try:
+            assert_unique_dataset_names(
+                [
+                    *self.app.project.datasets,
+                    DatasetRecord(
+                        dataset_name=candidate,
+                        sample="",
+                        pixel_size=0.0,
+                        exposure=0.0,
+                        tomogram_x=0,
+                        tomogram_y=0,
+                        tomogram_z=0,
+                        raw_frames_folder="",
+                        mdocs_folder="",
+                    ),
+                ]
+            )
+        except ValueError as exc:
+            messagebox.showerror("Duplicate dataset name", str(exc), parent=parent or self.frame)
+            return False
+        return True
 
     def _selected_dataset_from_table(self) -> DatasetRecord | None:
         selection = self.dataset_table.selection()
@@ -1107,6 +1109,8 @@ class ProjectOverviewTab(SidebarTab):
                 "Please fill the following fields:\n- " + "\n- ".join(missing_labels),
             )
             return
+        if not self._ensure_unique_dataset_name(dataset.dataset_name):
+            return
 
         try:
             dataset.processing_folder = self._build_dataset_processing_folder(
@@ -1233,6 +1237,8 @@ class ProjectOverviewTab(SidebarTab):
                 "Missing values",
                 "Please fill the following fields:\n- " + "\n- ".join(missing_labels),
             )
+            return
+        if not self._ensure_unique_dataset_name(dataset.dataset_name):
             return
 
         dataset.job_history.append(self._import_history_entry(dataset))

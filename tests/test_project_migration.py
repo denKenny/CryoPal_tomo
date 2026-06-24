@@ -56,6 +56,39 @@ class ProjectMigrationTests(unittest.TestCase):
         self.assertEqual(project.state.slurm_profiles[0]["name"], "GPU")
         self.assertIn("Particles/Group/job", project.state.job_default_overrides)
 
+    def test_duplicate_dataset_names_are_rejected_on_load(self) -> None:
+        payload = {
+            "name": "Broken",
+            "schema_version": PROJECT_SCHEMA_VERSION,
+            "datasets": [
+                {
+                    "dataset_name": "DatasetA",
+                    "sample": "S1",
+                    "pixel_size": 1.0,
+                    "exposure": 1.0,
+                    "tomogram_x": 1,
+                    "tomogram_y": 1,
+                    "tomogram_z": 1,
+                    "raw_frames_folder": "/tmp/raw-a",
+                    "mdocs_folder": "/tmp/mdoc-a",
+                },
+                {
+                    "dataset_name": "dataseta",
+                    "sample": "S2",
+                    "pixel_size": 1.0,
+                    "exposure": 1.0,
+                    "tomogram_x": 1,
+                    "tomogram_y": 1,
+                    "tomogram_z": 1,
+                    "raw_frames_folder": "/tmp/raw-b",
+                    "mdocs_folder": "/tmp/mdoc-b",
+                },
+            ],
+        }
+
+        with self.assertRaisesRegex(ValueError, "Duplicate dataset names are not supported"):
+            ProjectData.from_dict(payload)
+
 
 if __name__ == "__main__":
     unittest.main()

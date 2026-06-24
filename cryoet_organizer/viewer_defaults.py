@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -105,13 +107,20 @@ def load_global_viewer_defaults() -> ViewerDefaultsConfig:
 
 
 def save_global_viewer_defaults(config: ViewerDefaultsConfig) -> None:
+    _GLOBAL_VIEWER_DEFAULTS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(dir=_GLOBAL_VIEWER_DEFAULTS_PATH.parent, suffix=".tmp")
     try:
-        _GLOBAL_VIEWER_DEFAULTS_PATH.write_text(
-            json.dumps(config.to_dict(), indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
-    except Exception:
-        pass
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(config.to_dict(), indent=2, ensure_ascii=False))
+        os.replace(tmp_name, _GLOBAL_VIEWER_DEFAULTS_PATH)
+    except Exception as exc:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise OSError(
+            f"Failed to save the global viewer defaults file at {_GLOBAL_VIEWER_DEFAULTS_PATH}"
+        ) from exc
 
 
 def get_project_viewer_defaults(project: ProjectData) -> ViewerDefaultsConfig | None:

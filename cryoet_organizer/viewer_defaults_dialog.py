@@ -156,7 +156,15 @@ class ViewerDefaultsDialog:
             messagebox.showerror("Viewer defaults", str(exc), parent=self.window)
             return False
 
-        save_global_viewer_defaults(config)
+        try:
+            save_global_viewer_defaults(config)
+        except OSError as exc:
+            messagebox.showerror(
+                "Viewer defaults",
+                f"{exc}\n\nThe project defaults were left unchanged.",
+                parent=self.window,
+            )
+            return False
         set_project_viewer_defaults(self.app.project, config)
         self.saved_config = config
         self.app._modified = True

@@ -242,6 +242,9 @@ class CryoETOrganizerApp:
         self._scheduled_batch_polling: set[str] = set()
         self._running_history_entry_ids: set[str] = set()
         self._waiting_history_entry_ids: set[str] = set()
+        self._pending_tab_refreshes: set[str] = set()
+        self._queued_refresh_targets: set[str] = set()
+        self._queued_refresh_after_id: str | None = None
 
         self._show_logo_splash(
             "Waking up CryoPal",
@@ -470,6 +473,7 @@ class CryoETOrganizerApp:
         self.tabs[tab_id].frame.grid()
         self.nav_buttons[tab_id].configure(style="ActiveSidebar.TButton")
         self.active_tab_id = tab_id
+        self._refresh_tab_if_pending(tab_id)
         try:
             self.tabs[tab_id].on_tab_shown()
         except Exception:
@@ -504,9 +508,46 @@ class CryoETOrganizerApp:
     def _apply_project_to_tabs(self, targets: tuple[str, ...] | None = None) -> None:
         self.apply_appearance_config(get_project_appearance(self.project))
         selected_ids = set(self._resolve_refresh_targets(targets))
+        self._pending_tab_refreshes.difference_update(selected_ids)
         for tab_id, tab in self.tabs.items():
             if tab_id in selected_ids:
                 tab.on_project_loaded(self.project)
+
+    def _refresh_tab_if_pending(self, tab_id: str) -> None:
+        if tab_id not in self._pending_tab_refreshes:
+            return
+        self._pending_tab_refreshes.discard(tab_id)
+        self.tabs[tab_id].on_project_loaded(self.project)
+
+    def _cancel_queued_project_refresh(self) -> None:
+        if self._queued_refresh_after_id is not None:
+            try:
+                self.root.after_cancel(self._queued_refresh_after_id)
+            except tk.TclError:
+                pass
+        self._queued_refresh_after_id = None
+        self._queued_refresh_targets.clear()
+
+    def _flush_queued_project_refresh(self) -> None:
+        self._queued_refresh_after_id = None
+        selected_ids = set(self._queued_refresh_targets)
+        self._queued_refresh_targets.clear()
+        if not selected_ids:
+            return
+        self.apply_appearance_config(get_project_appearance(self.project))
+        active_id = self.active_tab_id
+        visible_targets: set[str] = set()
+        if active_id and active_id in selected_ids:
+            visible_targets.add(active_id)
+        self._pending_tab_refreshes.update(selected_ids - visible_targets)
+        for tab_id in visible_targets:
+            self.tabs[tab_id].on_project_loaded(self.project)
+
+    def _queue_project_refresh(self, targets: tuple[str, ...] | None = None) -> None:
+        self.apply_appearance_config(get_project_appearance(self.project))
+        self._queued_refresh_targets.update(self._resolve_refresh_targets(targets))
+        if self._queued_refresh_after_id is None:
+            self._queued_refresh_after_id = self.root.after_idle(self._flush_queued_project_refresh)
 
     def _preload_tab_views(self) -> None:
         previous_active = self.active_tab_id
@@ -528,6 +569,8 @@ class CryoETOrganizerApp:
     def _finish_loaded_project(self, *, status_message: str) -> None:
         self._modified = False
         clear_ts_metadata_cache()
+        self._cancel_queued_project_refresh()
+        self._pending_tab_refreshes.clear()
         busy = _BusyDialog(self.root, "Loading project", "Preparing project views. Please wait.")
         try:
             self._apply_project_to_tabs()
@@ -559,7 +602,7 @@ class CryoETOrganizerApp:
         self._modified = True
         if not domains or {"datasets", "file_registry", "ts_metadata"} & set(domains):
             clear_ts_metadata_cache()
-        self._apply_project_to_tabs(tuple(domains) if domains else None)
+        self._queue_project_refresh(tuple(domains) if domains else None)
         self._update_title()
         self.status_var.set(status_message)
         if self.debug_mode.enabled:
@@ -583,6 +626,8 @@ class CryoETOrganizerApp:
         self.project_path = None
         self._modified = False
         clear_ts_metadata_cache()
+        self._cancel_queued_project_refresh()
+        self._pending_tab_refreshes.clear()
         self._apply_project_to_tabs()
         self._update_title()
         self.status_var.set("Started a new project")

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import tempfile
 import uuid
 from copy import deepcopy
@@ -299,6 +300,10 @@ class ProjectData:
     @classmethod
     def from_dict(cls, payload: dict) -> "ProjectData":
         migrated = migrate_project_payload(payload)
+        datasets = [
+            DatasetRecord.from_dict(item) for item in migrated.get("datasets", [])
+        ]
+        assert_unique_dataset_names(datasets)
         return cls(
             name=migrated.get("name", "Untitled Project"),
             schema_version=int(migrated.get("schema_version", PROJECT_SCHEMA_VERSION) or PROJECT_SCHEMA_VERSION),
@@ -309,9 +314,7 @@ class ProjectData:
                 else "created_at",
             ),
             dataset_sort_descending=bool(migrated.get("dataset_sort_descending", False)),
-            datasets=[
-                DatasetRecord.from_dict(item) for item in migrated.get("datasets", [])
-            ],
+            datasets=datasets,
             m_populations=[
                 MPopulationRecord.from_dict(item) for item in migrated.get("m_populations", [])
             ],
@@ -358,6 +361,35 @@ def _sanitize_dataset_folder_name(dataset_name: str) -> str:
     return cleaned or "dataset"
 
 
+def normalize_dataset_name(dataset_name: str) -> str:
+    return str(dataset_name).strip().casefold()
+
+
+def duplicate_dataset_names(datasets: list[DatasetRecord]) -> list[str]:
+    counts: dict[str, int] = {}
+    display_names: dict[str, str] = {}
+    duplicates: list[str] = []
+    for dataset in datasets:
+        key = normalize_dataset_name(dataset.dataset_name)
+        if not key:
+            continue
+        counts[key] = counts.get(key, 0) + 1
+        display_names.setdefault(key, dataset.dataset_name.strip() or dataset.dataset_name)
+        if counts[key] == 2:
+            duplicates.append(display_names[key])
+    return sorted(duplicates, key=str.casefold)
+
+
+def assert_unique_dataset_names(datasets: list[DatasetRecord]) -> None:
+    duplicates = duplicate_dataset_names(datasets)
+    if duplicates:
+        quoted = ", ".join(duplicates)
+        raise ValueError(
+            "Duplicate dataset names are not supported because CryoPal_tomo uses dataset names "
+            f"as stable identifiers across the project. Please rename these datasets: {quoted}"
+        )
+
+
 def prepared_mdoc_map(dataset: DatasetRecord) -> dict[str, str]:
     if dataset.prepared_mdoc_map:
         return {
@@ -391,6 +423,49 @@ def prepared_mdoc_path_for_ts(dataset: DatasetRecord, ts_name: str) -> str:
     if matched_key:
         return mapping.get(matched_key, "")
     return ""
+
+
+def prepare_unified_mdocs_directory(dataset: DatasetRecord) -> tuple[str, int, dict[str, str]]:
+    processing_dir = Path(dataset.processing_folder)
+    processing_dir.mkdir(parents=True, exist_ok=True)
+    target_dir = processing_dir / "new_mdoc"
+    mdoc_files = filtered_mdoc_paths(dataset)
+    if not mdoc_files:
+        raise ValueError("No .mdoc files remained after applying the selected ignore filters.")
+
+    stage_dir = Path(tempfile.mkdtemp(prefix=".new_mdoc_stage_", dir=processing_dir))
+    backup_dir: Path | None = None
+    try:
+        width = max(3, len(str(len(mdoc_files))))
+        base_name = _sanitize_dataset_folder_name(dataset.dataset_name)
+        prepared_map: dict[str, str] = {}
+        for index, source_path in enumerate(mdoc_files, start=1):
+            target_name = f"{base_name}_TS_{index:0{width}d}.mdoc"
+            staged_target = stage_dir / target_name
+            shutil.copy2(source_path, staged_target)
+            prepared_map[source_path.stem] = str(target_dir / target_name)
+
+        if target_dir.exists():
+            backup_dir = processing_dir / f".new_mdoc_backup_{uuid.uuid4().hex}"
+            if backup_dir.exists():
+                shutil.rmtree(backup_dir, ignore_errors=True)
+            target_dir.rename(backup_dir)
+
+        try:
+            stage_dir.rename(target_dir)
+        except Exception:
+            if backup_dir is not None and backup_dir.exists() and not target_dir.exists():
+                backup_dir.rename(target_dir)
+            raise
+
+        if backup_dir is not None and backup_dir.exists():
+            shutil.rmtree(backup_dir, ignore_errors=True)
+
+        return str(target_dir), len(mdoc_files), prepared_map
+    except Exception:
+        if stage_dir.exists():
+            shutil.rmtree(stage_dir, ignore_errors=True)
+        raise
 
 
 def dataset_ts_names(dataset: DatasetRecord) -> list[str]:
