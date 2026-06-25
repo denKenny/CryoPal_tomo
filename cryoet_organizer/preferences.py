@@ -8,6 +8,7 @@ DEFAULT_PREFERENCES: dict[str, str] = {
     "use_downscaled_thumbnails": "true",
     "thumbnail_cache_location": "dataset/thumbnail-cache",
     "thumbnail_cache_size": "256",
+    "gallery_page_size": "50",
 }
 
 

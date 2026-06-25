@@ -20,6 +20,7 @@ class PreferencesTests(unittest.TestCase):
         self.assertEqual(project_preference(project, "thumbnail_cache_location"), "dataset/thumbnail-cache")
         self.assertTrue(project_preference_enabled(project, "use_downscaled_thumbnails", default=False))
         self.assertEqual(project_preference_int(project, "thumbnail_cache_size", default=0), 256)
+        self.assertEqual(project_preference_int(project, "gallery_page_size", default=0), 50)
 
     def test_integer_preference_is_clamped_and_falls_back_when_invalid(self) -> None:
         project = ProjectData()
@@ -33,6 +34,18 @@ class PreferencesTests(unittest.TestCase):
         self.assertEqual(
             project_preference_int(project, "thumbnail_cache_size", default=256, minimum=32, maximum=4096),
             256,
+        )
+
+        project.state.preferences["gallery_page_size"] = "2"
+        self.assertEqual(
+            project_preference_int(project, "gallery_page_size", default=50, minimum=8, maximum=500),
+            8,
+        )
+
+        project.state.preferences["gallery_page_size"] = "not-a-number"
+        self.assertEqual(
+            project_preference_int(project, "gallery_page_size", default=50, minimum=8, maximum=500),
+            50,
         )
 
     def test_thumbnail_cache_dir_uses_tilt_series_processing_parent_for_imported_projects(self) -> None:

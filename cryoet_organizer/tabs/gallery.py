@@ -80,7 +80,7 @@ class _GalleryBusyDialog:
 class GalleryTab(SidebarTab):
     tab_id = "gallery"
     title = "Tomogram Gallery"
-    refresh_domains = ("gallery", "datasets", "file_registry", "ts_metadata")
+    refresh_domains = ("gallery", "datasets", "file_registry", "ts_metadata", "preferences")
 
     def build(self) -> None:
         self.frame.columnconfigure(0, weight=1)
@@ -99,18 +99,23 @@ class GalleryTab(SidebarTab):
         self.multi_selected_keys: set[tuple[str, str]] = set()
         self.selection_vars: dict[tuple[str, str], tk.BooleanVar] = {}
         self.card_widgets: dict[tuple[str, str], dict[str, tk.Widget]] = {}
+        self.gallery_card_pool: list[dict[str, object]] = []
         self.thumbnail_images: dict[tuple[str, int], tk.PhotoImage] = {}
         self.dataset_match_cache: dict[tuple[str, str], list[ThumbnailRecord]] = {}
         self.thumbnail_display_paths: dict[tuple[str, str], str] = {}
         self.thumbnail_cache_state: dict[str, tuple[object, ...]] = {}
         self.thumbnail_record_index: dict[tuple[str, str], tuple[DatasetRecord, ThumbnailRecord]] = {}
         self._pending_render_after: str | None = None
+        self._pending_render_batch_after: str | None = None
         self._pending_multi_details_after: str | None = None
+        self._pending_auto_select_after: str | None = None
+        self._reuse_prepared_records_once = False
         self._last_render_column_count: int | None = None
         self._loaded_project_id: int | None = None
         self._needs_render_when_shown = False
         self._current_page = 0
         self._current_page_count = 0
+        self._render_generation = 0
 
         self.selected_dataset_var = tk.StringVar(value="-")
         self.selected_ts_var = tk.StringVar(value="-")
@@ -358,7 +363,7 @@ class GalleryTab(SidebarTab):
     def _on_gallery_filter_changed(self, _event=None) -> None:
         self._reset_gallery_page()
         self.multi_selected_keys.clear()
-        self._request_gallery_render()
+        self._request_gallery_render(reuse_prepared_records=True)
 
     def _dataset_options(self, project: ProjectData) -> list[str]:
         if not project.datasets:
@@ -427,6 +432,16 @@ class GalleryTab(SidebarTab):
             matched_by_ts.values(),
             key=lambda record: (record.ts_name.casefold(), Path(record.image_path).name.casefold()),
         )
+        if not matched and dataset.thumbnails:
+            existing_records = [
+                record for record in dataset.thumbnails
+                if record.image_path and Path(record.image_path).is_file()
+            ]
+            if existing_records:
+                matched = sorted(
+                    existing_records,
+                    key=lambda record: (record.ts_name.casefold(), Path(record.image_path).name.casefold()),
+                )
         dataset.thumbnails = matched
         self.dataset_match_cache[(dataset.dataset_name, folder)] = matched
         self._reindex_dataset_records(dataset, matched)
@@ -437,11 +452,22 @@ class GalleryTab(SidebarTab):
         cache_key = (dataset.dataset_name, folder)
         if cache_key in self.dataset_match_cache:
             cached = self.dataset_match_cache[cache_key]
-            known_paths = {record.image_path for record in cached}
-            current_paths = {str(path) for path in self._supported_image_files(folder)}
-            if known_paths == current_paths:
+            if all(Path(record.image_path).is_file() for record in cached if record.image_path):
                 self._reindex_dataset_records(dataset, cached)
                 return cached
+        elif dataset.thumbnails:
+            existing_records = [
+                record for record in dataset.thumbnails
+                if record.image_path and Path(record.image_path).is_file()
+            ]
+            if existing_records:
+                matched = sorted(
+                    existing_records,
+                    key=lambda record: (record.ts_name.casefold(), Path(record.image_path).name.casefold()),
+                )
+                self.dataset_match_cache[cache_key] = matched
+                self._reindex_dataset_records(dataset, matched)
+                return matched
         return self._scan_thumbnails_for_dataset(dataset)
 
     def _reindex_dataset_records(self, dataset: DatasetRecord, records: list[ThumbnailRecord]) -> None:
@@ -461,6 +487,15 @@ class GalleryTab(SidebarTab):
             default=256,
             minimum=32,
             maximum=4096,
+        )
+
+    def _gallery_page_size(self) -> int:
+        return project_preference_int(
+            self.app.project,
+            "gallery_page_size",
+            default=GALLERY_PAGE_SIZE,
+            minimum=8,
+            maximum=500,
         )
 
     def _thumbnail_cache_location(self) -> str:
@@ -487,6 +522,15 @@ class GalleryTab(SidebarTab):
         except OSError:
             return (0, 0)
         return (int(getattr(stat, "st_mtime_ns", int(stat.st_mtime * 1_000_000_000))), int(stat.st_size))
+
+    def _directory_signature(self, folder: str) -> int:
+        if not folder:
+            return 0
+        try:
+            stat = Path(folder).stat()
+        except OSError:
+            return 0
+        return int(getattr(stat, "st_mtime_ns", int(stat.st_mtime * 1_000_000_000)))
 
     def _load_thumbnail_cache_manifest(self, cache_dir: Path) -> dict:
         manifest_path = self._thumbnail_cache_manifest_path(cache_dir)
@@ -552,11 +596,9 @@ class GalleryTab(SidebarTab):
             records = self._dataset_thumbnail_records(dataset)
             records_by_dataset[dataset.dataset_name] = records
             source_paths = [Path(record.image_path) for record in records if record.image_path]
-            signature = tuple(
-                (str(path), *self._thumbnail_source_signature(path))
-                for path in source_paths
-            )
-            state_key: tuple[object, ...] = (enabled, size, location, signature)
+            source_key = tuple(str(path) for path in source_paths)
+            folder_signature = self._directory_signature(self._effective_thumbnail_folder(dataset))
+            state_key: tuple[object, ...] = (enabled, size, location, folder_signature, source_key)
             if self.thumbnail_cache_state.get(dataset.dataset_name) == state_key:
                 if not enabled:
                     continue
@@ -741,7 +783,7 @@ class GalleryTab(SidebarTab):
         self.selected_thumbnail_key = None
         self._reset_gallery_page()
         self._update_details_for_current_selection()
-        self._request_gallery_render()
+        self._request_gallery_render(reuse_prepared_records=True)
 
     def _selected_filter_tags(self, listbox: tk.Listbox) -> list[str]:
         return [str(listbox.get(index)) for index in listbox.curselection()]
@@ -791,19 +833,66 @@ class GalleryTab(SidebarTab):
         index_keys = [key for key in self.thumbnail_record_index if key[0] == dataset_name]
         for key in index_keys:
             self.thumbnail_record_index.pop(key, None)
+        match_keys = [key for key in self.dataset_match_cache if key[0] == dataset_name]
+        for key in match_keys:
+            self.dataset_match_cache.pop(key, None)
         self.thumbnail_cache_state.pop(dataset_name, None)
+        self._reuse_prepared_records_once = False
 
     def _column_count_for_width(self, width: int | None = None) -> int:
         available_width = max(width or self.gallery_canvas.winfo_width(), 640)
         return max(1, available_width // max(self.thumbnail_size + 36, 120))
 
-    def _request_gallery_render(self, delay_ms: int = 0) -> None:
+    def _request_gallery_render(self, delay_ms: int = 0, *, reuse_prepared_records: bool = False) -> None:
+        if reuse_prepared_records:
+            self._reuse_prepared_records_once = True
         if self.app.active_tab_id != self.tab_id or not self.frame.winfo_ismapped():
             self._needs_render_when_shown = True
             return
         if self._pending_render_after is not None:
             self.frame.after_cancel(self._pending_render_after)
         self._pending_render_after = self.frame.after(delay_ms, self._render_gallery)
+
+    def _cancel_pending_render_batch(self) -> None:
+        if self._pending_render_batch_after is not None:
+            try:
+                self.frame.after_cancel(self._pending_render_batch_after)
+            except tk.TclError:
+                pass
+        self._pending_render_batch_after = None
+
+    def _existing_records_by_dataset(self, datasets: list[DatasetRecord]) -> dict[str, list[ThumbnailRecord]]:
+        records_by_dataset: dict[str, list[ThumbnailRecord]] = {}
+        for dataset in datasets:
+            records = list(dataset.thumbnails)
+            records_by_dataset[dataset.dataset_name] = records
+            self._reindex_dataset_records(dataset, records)
+            for record in records:
+                self.thumbnail_display_paths.setdefault((dataset.dataset_name, record.image_path), record.image_path)
+        return records_by_dataset
+
+    def _cancel_pending_auto_select(self) -> None:
+        if self._pending_auto_select_after is not None:
+            try:
+                self.frame.after_cancel(self._pending_auto_select_after)
+            except tk.TclError:
+                pass
+        self._pending_auto_select_after = None
+
+    def _schedule_auto_select_thumbnail(self, dataset_name: str, image_path: str) -> None:
+        self._cancel_pending_auto_select()
+
+        def run() -> None:
+            self._pending_auto_select_after = None
+            if self.multi_selection_var.get():
+                return
+            if self.selected_thumbnail_key is not None:
+                return
+            if (dataset_name, image_path) not in self.card_widgets:
+                return
+            self._select_thumbnail(dataset_name, image_path)
+
+        self._pending_auto_select_after = self.frame.after_idle(run)
 
     def _change_page(self, delta: int) -> None:
         if self._current_page_count <= 1:
@@ -813,7 +902,7 @@ class GalleryTab(SidebarTab):
             return
         self._current_page = next_page
         self.gallery_canvas.yview_moveto(0)
-        self._request_gallery_render()
+        self._request_gallery_render(reuse_prepared_records=True)
 
     def _reset_gallery_page(self) -> None:
         self._current_page = 0
@@ -822,20 +911,21 @@ class GalleryTab(SidebarTab):
         self, items: list[tuple[DatasetRecord, ThumbnailRecord]]
     ) -> tuple[list[tuple[DatasetRecord, ThumbnailRecord]], int, int, int]:
         total = len(items)
+        page_size = self._gallery_page_size()
         if total == 0:
             self._current_page = 0
             self._current_page_count = 0
             return [], 0, 0, 0
-        page_count = max(1, (total + GALLERY_PAGE_SIZE - 1) // GALLERY_PAGE_SIZE)
+        page_count = max(1, (total + page_size - 1) // page_size)
         if self._current_page >= page_count:
             self._current_page = page_count - 1
-        start = self._current_page * GALLERY_PAGE_SIZE
-        end = min(start + GALLERY_PAGE_SIZE, total)
+        start = self._current_page * page_size
+        end = min(start + page_size, total)
         self._current_page_count = page_count
         return items[start:end], start, end, total
 
     def _update_pager_controls(self, start: int, end: int, total: int) -> None:
-        if total <= GALLERY_PAGE_SIZE:
+        if total <= self._gallery_page_size():
             self.pager_status_var.set("")
             self.pager_row.grid_remove()
             self.prev_page_button.configure(state="disabled")
@@ -855,6 +945,220 @@ class GalleryTab(SidebarTab):
         for key in stale_keys:
             self.thumbnail_images.pop(key, None)
 
+    def _ensure_gallery_card_pool(self, count: int) -> None:
+        while len(self.gallery_card_pool) < count:
+            slot: dict[str, object] = {
+                "current_key": None,
+                "dataset": None,
+                "thumbnail": None,
+            }
+            card = tk.Frame(
+                self.gallery_frame,
+                bd=1,
+                relief="solid",
+                background=self.app._current_appearance.main_background,
+                padx=8,
+                pady=8,
+            )
+            variable = tk.BooleanVar(value=False)
+            checkbutton = ttk.Checkbutton(
+                card,
+                variable=variable,
+                command=lambda current_slot=slot: self._select_card_slot(current_slot),
+            )
+            checkbutton.grid(row=0, column=0, sticky="nw")
+            checkbutton.grid_remove()
+            image_canvas = tk.Canvas(
+                card,
+                width=self.thumbnail_size,
+                height=self.thumbnail_size,
+                highlightthickness=0,
+                background=self.app._current_appearance.main_background,
+            )
+            image_canvas.grid(row=1, column=0)
+            title = tk.Label(
+                card,
+                wraplength=self.thumbnail_size,
+                justify="center",
+                bg=card["background"],
+                fg=self.app._current_appearance.main_foreground,
+            )
+            title.grid(row=2, column=0, sticky="ew", pady=(6, 0))
+            subtitle = tk.Label(
+                card,
+                wraplength=self.thumbnail_size,
+                justify="center",
+                bg=card["background"],
+                fg=self.app._current_appearance.main_foreground,
+            )
+            subtitle.grid(row=3, column=0, sticky="ew", pady=(2, 0))
+            slot.update(
+                {
+                    "card": card,
+                    "checkbutton": checkbutton,
+                    "image_canvas": image_canvas,
+                    "title": title,
+                    "subtitle": subtitle,
+                    "variable": variable,
+                }
+            )
+            for widget in (card, image_canvas, title, subtitle):
+                widget.bind(
+                    "<Button-1>",
+                    lambda _event, current_slot=slot: self._queue_card_slot_single_click(current_slot),
+                )
+                widget.bind(
+                    "<Double-Button-1>",
+                    lambda _event, current_slot=slot: self._queue_card_slot_double_click(current_slot),
+                )
+            self.gallery_card_pool.append(slot)
+
+    def _hide_unused_gallery_cards(self, used_count: int) -> None:
+        for slot in self.gallery_card_pool[used_count:]:
+            card = slot.get("card")
+            if isinstance(card, tk.Frame):
+                card.grid_remove()
+            image_canvas = slot.get("image_canvas")
+            if isinstance(image_canvas, tk.Canvas):
+                image_canvas.delete("all")
+            variable = slot.get("variable")
+            if isinstance(variable, tk.BooleanVar):
+                variable.set(False)
+            slot["current_key"] = None
+            slot["dataset"] = None
+            slot["thumbnail"] = None
+
+    def _select_card_slot(self, slot: dict[str, object]) -> None:
+        key = slot.get("current_key")
+        if not isinstance(key, tuple) or len(key) != 2:
+            return
+        dataset_name, image_path = key
+        if not isinstance(dataset_name, str) or not isinstance(image_path, str):
+            return
+        self._select_thumbnail(dataset_name, image_path)
+
+    def _queue_card_slot_single_click(self, slot: dict[str, object]) -> None:
+        key = slot.get("current_key")
+        if not isinstance(key, tuple) or len(key) != 2:
+            return
+        dataset_name, image_path = key
+        if not isinstance(dataset_name, str) or not isinstance(image_path, str):
+            return
+        self._queue_thumbnail_single_click(dataset_name, image_path)
+
+    def _queue_card_slot_double_click(self, slot: dict[str, object]) -> None:
+        key = slot.get("current_key")
+        dataset = slot.get("dataset")
+        thumbnail = slot.get("thumbnail")
+        if (
+            not isinstance(key, tuple)
+            or len(key) != 2
+            or not isinstance(dataset, DatasetRecord)
+            or not isinstance(thumbnail, ThumbnailRecord)
+        ):
+            return
+        dataset_name, image_path = key
+        if not isinstance(dataset_name, str) or not isinstance(image_path, str):
+            return
+        self._queue_thumbnail_double_click(dataset_name, image_path, dataset, thumbnail)
+
+    def _prepare_gallery_card_slot(
+        self,
+        slot: dict[str, object],
+        dataset: DatasetRecord,
+        thumbnail: ThumbnailRecord,
+        row: int,
+        column: int,
+    ) -> None:
+        key = (dataset.dataset_name, thumbnail.image_path)
+        slot["current_key"] = key
+        slot["dataset"] = dataset
+        slot["thumbnail"] = thumbnail
+
+        card = slot.get("card")
+        title = slot.get("title")
+        subtitle = slot.get("subtitle")
+        image_canvas = slot.get("image_canvas")
+        variable = slot.get("variable")
+        if not isinstance(card, tk.Frame):
+            return
+        if isinstance(variable, tk.BooleanVar):
+            variable.set(key in self.multi_selected_keys)
+        if isinstance(title, tk.Label):
+            title.configure(text=thumbnail.ts_name, wraplength=self.thumbnail_size)
+        if isinstance(subtitle, tk.Label):
+            subtitle.configure(
+                text=f"{dataset.dataset_name} | Rating: {thumbnail.rating or '-'}",
+                wraplength=self.thumbnail_size,
+            )
+        if isinstance(image_canvas, tk.Canvas):
+            image_canvas.configure(
+                width=self.thumbnail_size,
+                height=self.thumbnail_size,
+                background=self.app._current_appearance.main_background,
+            )
+            image_canvas.delete("all")
+            image_canvas.create_text(
+                self.thumbnail_size // 2,
+                self.thumbnail_size // 2,
+                text="Loading preview...",
+                width=max(self.thumbnail_size - 16, 40),
+                justify="center",
+                fill=self.app._current_appearance.main_foreground,
+            )
+        card.grid(row=row, column=column, sticky="n", padx=6, pady=6)
+        self.card_widgets[key] = {
+            "card": card,
+            "checkbutton": slot["checkbutton"],
+            "image_canvas": image_canvas,
+            "title": title,
+            "subtitle": subtitle,
+        }
+        if isinstance(variable, tk.BooleanVar):
+            self.selection_vars[key] = variable
+
+    def _render_gallery_batch(
+        self,
+        page_items: list[tuple[DatasetRecord, ThumbnailRecord]],
+        start_index: int,
+        generation: int,
+        batch_size: int = 8,
+    ) -> None:
+        if generation != self._render_generation:
+            return
+        end_index = min(start_index + batch_size, len(page_items))
+        for slot_index in range(start_index, end_index):
+            dataset, thumbnail = page_items[slot_index]
+            slot = self.gallery_card_pool[slot_index]
+            image_canvas = slot.get("image_canvas")
+            if not isinstance(image_canvas, tk.Canvas):
+                continue
+            image = self._resolve_thumbnail_image(dataset, thumbnail)
+            image_canvas.delete("all")
+            if image is None:
+                image_canvas.create_text(
+                    self.thumbnail_size // 2,
+                    self.thumbnail_size // 2,
+                    text="Preview unavailable",
+                    width=max(self.thumbnail_size - 16, 40),
+                    justify="center",
+                    fill=self.app._current_appearance.main_foreground,
+                )
+                continue
+            image_canvas.create_image(
+                self.thumbnail_size // 2,
+                self.thumbnail_size // 2,
+                image=image,
+                anchor="center",
+            )
+            image_canvas.image = image
+        if end_index < len(page_items):
+            self._pending_render_batch_after = self.frame.after_idle(
+                lambda: self._render_gallery_batch(page_items, end_index, generation, batch_size)
+            )
+        else:
+            self._pending_render_batch_after = None
+
     def _thumbnail_image(self, image_path: str) -> tk.PhotoImage | None:
         key = (image_path, self.thumbnail_size)
         if key in self.thumbnail_images:
@@ -872,6 +1176,16 @@ class GalleryTab(SidebarTab):
             image = image.subsample(subsample, subsample)
         self.thumbnail_images[key] = image
         return image
+
+    def _resolve_thumbnail_image(self, dataset: DatasetRecord, thumbnail: ThumbnailRecord) -> tk.PhotoImage | None:
+        display_path = self._display_thumbnail_path(dataset, thumbnail)
+        image = self._thumbnail_image(display_path)
+        if image is not None:
+            return image
+        if display_path != thumbnail.image_path:
+            self.thumbnail_display_paths[(dataset.dataset_name, thumbnail.image_path)] = thumbnail.image_path
+            return self._thumbnail_image(thumbnail.image_path)
+        return None
 
     def _filtered_items(
         self,
@@ -977,6 +1291,9 @@ class GalleryTab(SidebarTab):
             card = widgets.get("card")
             if isinstance(card, tk.Frame):
                 card.configure(background=card_background, bd=border_width)
+            image_canvas = widgets.get("image_canvas")
+            if isinstance(image_canvas, tk.Canvas):
+                image_canvas.configure(background=self.app._current_appearance.main_background)
             title = widgets.get("title")
             if isinstance(title, tk.Label):
                 title.configure(bg=card_background, fg=text_foreground)
@@ -1001,12 +1318,32 @@ class GalleryTab(SidebarTab):
         card = widgets.get("card")
         if isinstance(card, tk.Frame):
             card.configure(background=card_background, bd=border_width)
+        image_canvas = widgets.get("image_canvas")
+        if isinstance(image_canvas, tk.Canvas):
+            image_canvas.configure(background=self.app._current_appearance.main_background)
         title = widgets.get("title")
         if isinstance(title, tk.Label):
             title.configure(bg=card_background, fg=text_foreground)
         subtitle = widgets.get("subtitle")
         if isinstance(subtitle, tk.Label):
             subtitle.configure(bg=card_background, fg=text_foreground)
+
+    def _update_multi_selection_widgets(self) -> None:
+        enabled = self.multi_selection_var.get()
+        for key, widgets in self.card_widgets.items():
+            checkbutton = widgets.get("checkbutton")
+            variable = self.selection_vars.get(key)
+            if variable is not None:
+                variable.set(key in self.multi_selected_keys)
+            if isinstance(checkbutton, ttk.Checkbutton):
+                if enabled:
+                    checkbutton.grid()
+                else:
+                    checkbutton.grid_remove()
+        if enabled:
+            self.select_all_button.grid()
+        else:
+            self.select_all_button.grid_remove()
 
     def _schedule_multi_selection_details_update(self) -> None:
         if self._pending_multi_details_after is not None:
@@ -1107,7 +1444,7 @@ class GalleryTab(SidebarTab):
         thumbnail.rating = int(self.selected_rating_var.get())
         self.selected_tags_var.set(", ".join(thumbnail.tags) if thumbnail.tags else "-")
         self._update_tag_suggestions()
-        self._request_gallery_render()
+        self._request_gallery_render(reuse_prepared_records=True)
 
     def _link_selected_mrc_file(self) -> None:
         if self.multi_selection_var.get():
@@ -1469,48 +1806,22 @@ class GalleryTab(SidebarTab):
 
     def _toggle_multi_selection(self) -> None:
         enabled = not self.multi_selection_var.get()
-        busy = _GalleryBusyDialog(
-            self.frame,
-            "Updating gallery",
-            "Switching multi-selection mode. Please wait.",
-        )
-        try:
-            self.multi_selection_var.set(enabled)
-            self.multi_selected_keys.clear()
-            self.selection_vars.clear()
-            if enabled:
-                self.selected_thumbnail_key = None
-                self.select_all_button.grid()
-            else:
-                self.select_all_button.grid_remove()
-            self._update_details_for_current_selection()
-            if self.app.active_tab_id == self.tab_id and self.frame.winfo_ismapped():
-                self._render_gallery()
-            else:
-                self._request_gallery_render()
-        finally:
-            busy.close()
+        self.multi_selection_var.set(enabled)
+        self.multi_selected_keys.clear()
+        if enabled:
+            self.selected_thumbnail_key = None
+        self._update_multi_selection_widgets()
+        self._update_details_for_current_selection()
+        self._apply_selection_styles()
 
     def prepare_multi_selection(self) -> None:
-        busy = _GalleryBusyDialog(
-            self.frame,
-            "Updating gallery",
-            "Preparing multi-selection mode. Please wait.",
-        )
-        try:
-            if not self.multi_selection_var.get():
-                self.multi_selection_var.set(True)
-                self.select_all_button.grid()
-            self.multi_selected_keys.clear()
-            self.selection_vars.clear()
-            self.selected_thumbnail_key = None
-            self._update_details_for_current_selection()
-            if self.app.active_tab_id == self.tab_id and self.frame.winfo_ismapped():
-                self._render_gallery()
-            else:
-                self._request_gallery_render()
-        finally:
-            busy.close()
+        if not self.multi_selection_var.get():
+            self.multi_selection_var.set(True)
+        self.multi_selected_keys.clear()
+        self.selected_thumbnail_key = None
+        self._update_multi_selection_widgets()
+        self._update_details_for_current_selection()
+        self._apply_selection_styles()
 
     def _records_for_ts_transfer(self) -> list[tuple[DatasetRecord, ThumbnailRecord]]:
         if self.multi_selection_var.get():
@@ -1536,7 +1847,7 @@ class GalleryTab(SidebarTab):
         if not self.multi_selection_var.get():
             return
         datasets = self._datasets_for_selection()
-        records_by_dataset = self._prepare_thumbnail_cache(datasets)
+        records_by_dataset = self._existing_records_by_dataset(datasets)
         items = self._filtered_items(records_by_dataset)
         self.multi_selected_keys = {
             (dataset.dataset_name, thumbnail.image_path)
@@ -1756,7 +2067,7 @@ class GalleryTab(SidebarTab):
         self.tag_input_var.set("")
         self._select_thumbnail(dataset_name, image_path)
         self._update_tag_suggestions()
-        self._request_gallery_render()
+        self._request_gallery_render(reuse_prepared_records=True)
 
     def _remove_selected_tag(self) -> None:
         if self.selected_thumbnail_key is None:
@@ -1775,31 +2086,39 @@ class GalleryTab(SidebarTab):
         thumbnail.tags = [tag for tag in thumbnail.tags if tag != tag_to_remove]
         self._select_thumbnail(dataset_name, image_path)
         self._update_tag_suggestions()
-        self._request_gallery_render()
+        self._request_gallery_render(reuse_prepared_records=True)
 
     def _render_gallery(self, _event=None) -> None:
         self._pending_render_after = None
         self._needs_render_when_shown = False
-        for child in self.gallery_frame.winfo_children():
-            child.destroy()
-        self.selection_vars.clear()
+        self._cancel_pending_auto_select()
+        self._cancel_pending_render_batch()
         self.card_widgets.clear()
+        self.selection_vars.clear()
 
         datasets = self._datasets_for_selection()
         if not datasets:
             self.summary_label.config(text="No datasets available yet.")
+            self._hide_unused_gallery_cards(0)
+            self._update_pager_controls(0, 0, 0)
+            self._update_details_for_current_selection()
             self._update_import_button_label()
             return
 
-        records_by_dataset = self._prepare_thumbnail_cache(datasets)
+        reuse_prepared_records = self._reuse_prepared_records_once
+        self._reuse_prepared_records_once = False
+        if reuse_prepared_records:
+            records_by_dataset = self._existing_records_by_dataset(datasets)
+        else:
+            records_by_dataset = self._prepare_thumbnail_cache(datasets)
         items = self._filtered_items(records_by_dataset)
         self._update_import_button_label()
-        self._update_tag_suggestions()
 
         if not items:
             self.summary_label.config(
                 text="No thumbnails matched the current selection or filters. Use 'Reset filters' to show all available TS."
             )
+            self._hide_unused_gallery_cards(0)
             self._update_pager_controls(0, 0, 0)
             self._update_details_for_current_selection()
             return
@@ -1807,128 +2126,45 @@ class GalleryTab(SidebarTab):
         page_items, start, end, total_items = self._paged_items(items)
         self._prune_thumbnail_cache(page_items)
         columns = self._column_count_for_width()
+        previous_columns = self._last_render_column_count or 0
+        for column in range(max(columns, previous_columns)):
+            self.gallery_frame.columnconfigure(column, weight=1 if column < columns else 0)
         self._last_render_column_count = columns
-        for column in range(columns):
-            self.gallery_frame.columnconfigure(column, weight=1)
 
         self.summary_label.config(
             text=(
                 f"Showing {start + 1}-{end} of {total_items} thumbnails."
-                if total_items > GALLERY_PAGE_SIZE
+                if total_items > self._gallery_page_size()
                 else f"Showing {total_items} thumbnails."
             )
         )
         self._update_pager_controls(start, end, total_items)
+        filtered_keys = {(dataset.dataset_name, thumbnail.image_path) for dataset, thumbnail in items}
         if self.multi_selection_var.get():
-            filtered_keys = {(dataset.dataset_name, thumbnail.image_path) for dataset, thumbnail in items}
             self.multi_selected_keys.intersection_update(filtered_keys)
+        elif self.selected_thumbnail_key not in filtered_keys:
+            self.selected_thumbnail_key = None
 
+        self._render_generation += 1
+        generation = self._render_generation
+        self._ensure_gallery_card_pool(len(page_items))
         for index, (dataset, thumbnail) in enumerate(page_items):
-            image = self._thumbnail_image(self._display_thumbnail_path(dataset, thumbnail))
-            if image is None:
-                continue
-
             row = index // columns
             column = index % columns
-            key = (dataset.dataset_name, thumbnail.image_path)
-            is_selected = (
-                key in self.multi_selected_keys
-                if self.multi_selection_var.get()
-                else self.selected_thumbnail_key == key
-            )
-            card_background = (
-                self.app._current_appearance.sidebar_background
-                if is_selected
-                else self.app._current_appearance.main_background
-            )
-            text_foreground = self.app._current_appearance.main_foreground
-
-            card = tk.Frame(
-                self.gallery_frame,
-                bd=2 if is_selected else 1,
-                relief="solid",
-                background=card_background,
-                padx=8,
-                pady=8,
-            )
-            card.grid(row=row, column=column, sticky="n", padx=6, pady=6)
-
-            if self.multi_selection_var.get():
-                variable = tk.BooleanVar(value=key in self.multi_selected_keys)
-                self.selection_vars[key] = variable
-                ttk.Checkbutton(
-                    card,
-                    variable=variable,
-                    command=lambda d=dataset.dataset_name, p=thumbnail.image_path: self._select_thumbnail(d, p),
-                ).grid(row=0, column=0, sticky="nw")
-
-            canvas = tk.Canvas(
-                card,
-                width=self.thumbnail_size,
-                height=self.thumbnail_size,
-                highlightthickness=0,
-                background=self.app._current_appearance.main_background,
-            )
-            canvas.grid(row=1 if self.multi_selection_var.get() else 0, column=0)
-            canvas.create_image(
-                self.thumbnail_size // 2,
-                self.thumbnail_size // 2,
-                image=image,
-                anchor="center",
-            )
-
-            title = tk.Label(
-                card,
-                text=thumbnail.ts_name,
-                wraplength=self.thumbnail_size,
-                bg=card["background"],
-                fg=text_foreground,
-                justify="center",
-            )
-            title.grid(
-                row=2 if self.multi_selection_var.get() else 1,
-                column=0,
-                sticky="ew",
-                pady=(6, 0),
-            )
-            subtitle = tk.Label(
-                card,
-                text=f"{dataset.dataset_name} | Rating: {thumbnail.rating or '-'}",
-                wraplength=self.thumbnail_size,
-                bg=card["background"],
-                fg=text_foreground,
-                justify="center",
-            )
-            subtitle.grid(
-                row=3 if self.multi_selection_var.get() else 2,
-                column=0,
-                sticky="ew",
-                pady=(2, 0),
-            )
-            self.card_widgets[key] = {
-                "card": card,
-                "title": title,
-                "subtitle": subtitle,
-            }
-
-            for widget in (card, canvas, title, subtitle):
-                widget.bind(
-                    "<Button-1>",
-                    lambda _event, d=dataset.dataset_name, p=thumbnail.image_path: self._queue_thumbnail_single_click(d, p),
-                )
-                widget.bind(
-                    "<Double-Button-1>",
-                    lambda _event, ds=dataset.dataset_name, p=thumbnail.image_path, d=dataset, t=thumbnail: self._queue_thumbnail_double_click(ds, p, d, t),
-                )
+            self._prepare_gallery_card_slot(self.gallery_card_pool[index], dataset, thumbnail, row, column)
+        self._hide_unused_gallery_cards(len(page_items))
+        self._update_multi_selection_widgets()
 
         if self.multi_selection_var.get():
             self._apply_selection_styles()
             self._update_details_for_current_selection()
         elif self.selected_thumbnail_key is None and page_items:
-            self._select_thumbnail(page_items[0][0].dataset_name, page_items[0][1].image_path)
+            self._apply_selection_styles()
+            self._schedule_auto_select_thumbnail(page_items[0][0].dataset_name, page_items[0][1].image_path)
         else:
             self._apply_selection_styles()
             self._update_details_for_current_selection()
+        self._render_gallery_batch(page_items, 0, generation)
 
     def _import_thumbnails(self) -> None:
         datasets = self._datasets_for_selection()
@@ -1958,9 +2194,10 @@ class GalleryTab(SidebarTab):
         self.thumbnail_size = max(80, min(420, new_size))
         self.thumbnail_size_var.set(self.thumbnail_size)
         self.thumbnail_images.clear()
-        self._request_gallery_render()
+        self._request_gallery_render(reuse_prepared_records=True)
 
     def _on_dataset_selected(self, _event=None) -> None:
+        self._cancel_pending_auto_select()
         self.selected_thumbnail_key = None
         self.multi_selected_keys.clear()
         self._reset_gallery_page()
@@ -1981,6 +2218,7 @@ class GalleryTab(SidebarTab):
             self.multi_selection_var.set(False)
             self.multi_selected_keys.clear()
             self.selection_vars.clear()
+            self._cancel_pending_auto_select()
             self.selected_thumbnail_key = None
             self.select_all_button.grid_remove()
             self._clear_selected_thumbnail_details()
@@ -1998,6 +2236,11 @@ class GalleryTab(SidebarTab):
             self.dataset_var.set("All datasets")
 
         self._update_tag_suggestions()
+        for dataset in project.datasets:
+            folder = self._effective_thumbnail_folder(dataset)
+            if dataset.thumbnails and folder:
+                self.dataset_match_cache[(dataset.dataset_name, folder)] = list(dataset.thumbnails)
+                self._reindex_dataset_records(dataset, list(dataset.thumbnails))
         if self.app.active_tab_id == self.tab_id and self.frame.winfo_ismapped():
             self._request_gallery_render()
         else:
@@ -2010,7 +2253,7 @@ class GalleryTab(SidebarTab):
         if self.app.project.datasets and not self.dataset_var.get().strip():
             self.dataset_var.set("All datasets")
         if self.app.project.datasets:
-            self._request_gallery_render()
+            self.frame.after_idle(self._request_gallery_render)
             return
         if self._needs_render_when_shown:
-            self._request_gallery_render()
+            self.frame.after_idle(self._request_gallery_render)

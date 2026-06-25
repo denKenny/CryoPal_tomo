@@ -84,6 +84,16 @@ class PreferencesDialog:
         )
         ttk.Entry(container, textvariable=self.thumbnail_cache_size_var, width=10).grid(row=7, column=0, sticky="w")
 
+        ttk.Label(container, text="Gallery TS per page").grid(
+            row=6, column=1, sticky="w", pady=(12, 4), padx=(12, 0)
+        )
+        self.gallery_page_size_var = tk.StringVar(
+            value=str(project_preference_int(app.project, "gallery_page_size", default=50, minimum=8, maximum=500))
+        )
+        ttk.Entry(container, textvariable=self.gallery_page_size_var, width=10).grid(
+            row=7, column=1, sticky="w", padx=(12, 0)
+        )
+
         footer = ttk.Frame(container)
         footer.grid(row=8, column=0, columnspan=2, sticky="e", pady=(16, 0))
         cancel_label = "Revert section" if self.embedded else "Cancel"
@@ -111,12 +121,17 @@ class PreferencesDialog:
         saved_size = str(
             project_preference_int(self.app.project, "thumbnail_cache_size", default=256, minimum=32, maximum=4096)
         )
+        current_page_size = self.gallery_page_size_var.get().strip()
+        saved_page_size = str(
+            project_preference_int(self.app.project, "gallery_page_size", default=50, minimum=8, maximum=500)
+        )
         return any(
             (
                 current != saved,
                 current_downscaled != saved_downscaled,
                 current_location != saved_location,
                 current_size != saved_size,
+                current_page_size != saved_page_size,
             )
         )
 
@@ -134,6 +149,18 @@ class PreferencesDialog:
                 parent=self.window,
             )
             return False
+        try:
+            page_size = int(self.gallery_page_size_var.get().strip() or "50")
+        except ValueError:
+            messagebox.showerror("Preferences", "Gallery TS per page must be an integer.", parent=self.window)
+            return False
+        if page_size < 8 or page_size > 500:
+            messagebox.showerror(
+                "Preferences",
+                "Gallery TS per page must be between 8 and 500.",
+                parent=self.window,
+            )
+            return False
         self.app.project.state.preferences["save_particle_plots"] = (
             "true" if self.save_particle_plots_var.get() else "false"
         )
@@ -142,6 +169,7 @@ class PreferencesDialog:
         )
         self.app.project.state.preferences["thumbnail_cache_location"] = location
         self.app.project.state.preferences["thumbnail_cache_size"] = str(size)
+        self.app.project.state.preferences["gallery_page_size"] = str(page_size)
         self.app.on_project_changed("preferences")
         self.app.status_var.set("Preferences updated")
         if close_window:
@@ -160,6 +188,9 @@ class PreferencesDialog:
         )
         self.thumbnail_cache_size_var.set(
             str(project_preference_int(self.app.project, "thumbnail_cache_size", default=256, minimum=32, maximum=4096))
+        )
+        self.gallery_page_size_var.set(
+            str(project_preference_int(self.app.project, "gallery_page_size", default=50, minimum=8, maximum=500))
         )
 
     def _save(self) -> None:
