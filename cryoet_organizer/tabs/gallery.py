@@ -165,7 +165,7 @@ class GalleryTab(SidebarTab):
 
         action_buttons = ttk.Frame(controls)
         action_buttons.grid(row=1, column=4, sticky="ew")
-        action_buttons.columnconfigure(1, weight=1)
+        action_buttons.columnconfigure(2, weight=1)
         ttk.Button(
             action_buttons,
             text="Reset filters",
@@ -176,7 +176,13 @@ class GalleryTab(SidebarTab):
             text="Import thumbnails",
             command=self._import_thumbnails,
         )
-        self.import_button.grid(row=0, column=1, sticky="e")
+        self.import_button.grid(row=0, column=1, sticky="e", padx=(0, 8))
+        self.link_mrc_folder_button = ttk.Button(
+            action_buttons,
+            text="Link .mrc files",
+            command=self._link_mrc_folder,
+        )
+        self.link_mrc_folder_button.grid(row=0, column=2, sticky="e")
         ttk.Button(
             controls,
             text="Multi selection",
@@ -392,6 +398,14 @@ class GalleryTab(SidebarTab):
     def _matching_mrc_path(self, dataset: DatasetRecord, ts_name: str) -> str:
         resolved = resolve_dataset_file(self.app.project, dataset, ts_name, "tomogram")
         return resolved.path
+
+    def _refresh_dataset_mrc_paths(self, dataset: DatasetRecord) -> int:
+        matched = 0
+        for record in dataset.thumbnails:
+            record.mrc_path = self._matching_mrc_path(dataset, record.ts_name)
+            if record.mrc_path:
+                matched += 1
+        return matched
 
     def _ts_stems_for_matching(self, dataset: DatasetRecord) -> list[str]:
         return dataset_ts_names(dataset)
@@ -2187,6 +2201,33 @@ class GalleryTab(SidebarTab):
         self._update_tag_suggestions()
         self._request_gallery_render()
         self.app.status_var.set(f"Thumbnail folder set to: {folder} ({imported} matches)")
+
+    def _link_mrc_folder(self) -> None:
+        datasets = self._datasets_for_selection()
+        if not datasets:
+            messagebox.showinfo("No dataset selected", "Please load a dataset first.")
+            return
+
+        folder = filedialog.askdirectory(title="Select tomogram (.mrc) folder")
+        if not folder:
+            return
+
+        matched = 0
+        thumbnails_seen = 0
+        for dataset in datasets:
+            dataset.tomogram_folder = folder
+            matched += self._refresh_dataset_mrc_paths(dataset)
+            thumbnails_seen += len(dataset.thumbnails)
+
+        if self.selected_thumbnail_key is not None:
+            dataset_name, image_path = self.selected_thumbnail_key
+            self._select_thumbnail(dataset_name, image_path)
+        else:
+            self._update_details_for_current_selection()
+        self.app.on_project_changed("gallery")
+        self.app.status_var.set(
+            f"Tomogram folder set to: {folder} ({matched}/{thumbnails_seen} thumbnails matched to .mrc files)"
+        )
 
     def _change_zoom(self, direction: int) -> None:
         factor = 1.1 if direction > 0 else 1 / 1.1

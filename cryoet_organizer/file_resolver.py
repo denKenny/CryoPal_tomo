@@ -355,6 +355,8 @@ def _path_mtime(path: Path) -> float:
 
 
 def _candidate_base_dirs(dataset: DatasetRecord, ts_name: str, config: FileRoleConfig) -> list[Path]:
+    if config.role == "tomogram" and dataset.tomogram_folder.strip():
+        return [Path(dataset.tomogram_folder.strip())]
     base_dir_text = _render_template(config.base_dir_template, dataset, ts_name)
     if not base_dir_text:
         return []

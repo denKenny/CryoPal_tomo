@@ -66,6 +66,38 @@ class FileRegistryTests(unittest.TestCase):
         remove_custom_file_role(project, "mask_file")
         self.assertNotIn("mask_file", project.state.file_registry_patterns)
 
+    def test_dataset_specific_tomogram_folder_overrides_default_reconstruction_folder(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            manual_tomograms = root / "manual_tomograms"
+            manual_tomograms.mkdir()
+            reconstruction = root / "reconstruction"
+            reconstruction.mkdir()
+
+            expected = manual_tomograms / "TS_01_manual.mrc"
+            expected.write_text("manual tomogram", encoding="utf-8")
+            fallback = reconstruction / "TS_01_reconstruction.mrc"
+            fallback.write_text("fallback tomogram", encoding="utf-8")
+
+            dataset = DatasetRecord(
+                dataset_name="DS",
+                sample="S",
+                pixel_size=1.0,
+                exposure=1.0,
+                tomogram_x=1,
+                tomogram_y=1,
+                tomogram_z=1,
+                raw_frames_folder="",
+                mdocs_folder="",
+                tilt_series_processing_folder=str(root),
+                tomogram_folder=str(manual_tomograms),
+            )
+            project = ProjectData(datasets=[dataset])
+
+            resolved = resolve_dataset_file(project, dataset, "TS_01", "tomogram")
+            self.assertEqual(resolved.path, str(expected))
+            self.assertEqual(resolved.source, "automatic")
+
     def test_unified_mdoc_role_uses_prepared_mapping(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

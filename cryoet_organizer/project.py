@@ -234,6 +234,7 @@ class DatasetRecord:
     tilt_series_processing_folder: str = ""
     tilt_series_data_folder: str = ""
     thumbnail_folder: str = ""
+    tomogram_folder: str = ""
     thumbnails: list[ThumbnailRecord] = field(default_factory=list)
     processing_root_folder: str = ""
     processing_folder: str = ""
@@ -270,6 +271,7 @@ class DatasetRecord:
             tilt_series_processing_folder=payload.get("tilt_series_processing_folder", ""),
             tilt_series_data_folder=payload.get("tilt_series_data_folder", ""),
             thumbnail_folder=payload.get("thumbnail_folder", ""),
+            tomogram_folder=payload.get("tomogram_folder", ""),
             thumbnails=[
                 ThumbnailRecord.from_dict(item) for item in payload.get("thumbnails", [])
             ],

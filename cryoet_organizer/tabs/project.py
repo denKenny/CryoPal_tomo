@@ -1025,6 +1025,7 @@ class ProjectOverviewTab(SidebarTab):
                     ("Tiltseries processing folder", dataset.tilt_series_processing_folder or "-"),
                     ("Tomostar folder", dataset.tilt_series_data_folder or "-"),
                     ("Stored thumbnail folder", dataset.thumbnail_folder or "-"),
+                    ("Stored tomogram folder", dataset.tomogram_folder or "-"),
                     ("Effective thumbnail source", effective_thumbnail_source or "-"),
                     ("Thumbnail cache enabled", "Yes" if cache_enabled else "No"),
                     ("Thumbnail cache folder", thumbnail_cache_folder if cache_enabled else "(disabled)"),
