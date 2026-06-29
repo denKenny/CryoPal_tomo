@@ -39,7 +39,7 @@ class ProcessLogWindow:
             text_frame,
             wrap="word",
             state="disabled",
-            font=("TkFixedFont", 10),
+            font="TkDefaultFont",
             background="#1e1e1e",
             foreground="#d4d4d4",
             insertbackground="#d4d4d4",

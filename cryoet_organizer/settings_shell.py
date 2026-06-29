@@ -21,17 +21,20 @@ SETTINGS_SHELL_ORDER: tuple[str, ...] = (
 class SettingsShellWindow:
     def __init__(self, app) -> None:
         self.app = app
-        self._card_target_width = 1080
+        self._card_target_width = app._scale_pixels(1080)
         self.window = tk.Toplevel(app.root)
         self.window.title("Settings")
-        self.window.geometry("1180x760")
-        self.window.minsize(980, 620)
+        self.window.geometry(f"{app._scale_pixels(1180)}x{app._scale_pixels(760)}")
+        self.window.minsize(app._scale_pixels(980), app._scale_pixels(620))
         self.window.transient(app.root)
         self.window.protocol("WM_DELETE_WINDOW", self.close)
         self.window.columnconfigure(0, weight=1)
         self.window.rowconfigure(1, weight=1)
 
-        header = ttk.Frame(self.window, padding=(12, 12, 12, 0))
+        header = ttk.Frame(
+            self.window,
+            padding=(app._scale_pixels(12), app._scale_pixels(12), app._scale_pixels(12), 0),
+        )
         header.grid(row=0, column=0, sticky="ew")
         header.columnconfigure(0, weight=1)
 
@@ -50,13 +53,30 @@ class SettingsShellWindow:
                 text=SETTINGS_CATEGORY_LABELS[key],
                 command=lambda current=key: self.open_section(current),
             )
-            button.grid(row=index // 4, column=index % 4, padx=4, pady=4, sticky="ew")
+            button.grid(
+                row=index // 4,
+                column=index % 4,
+                padx=app._scale_pixels(4),
+                pady=app._scale_pixels(4),
+                sticky="ew",
+            )
             self.nav_buttons[key] = button
 
-        ttk.Button(actions, text="Save all", command=self.save_all).grid(row=0, column=0, padx=(8, 0))
-        ttk.Button(actions, text="Close settings", command=self.close).grid(row=0, column=1, padx=(8, 0))
+        ttk.Button(actions, text="Save all", command=self.save_all).grid(
+            row=0,
+            column=0,
+            padx=(app._scale_pixels(8), 0),
+        )
+        ttk.Button(actions, text="Close settings", command=self.close).grid(
+            row=0,
+            column=1,
+            padx=(app._scale_pixels(8), 0),
+        )
 
-        self.content = ttk.Frame(self.window, padding=(12, 6, 12, 12))
+        self.content = ttk.Frame(
+            self.window,
+            padding=(app._scale_pixels(12), app._scale_pixels(6), app._scale_pixels(12), app._scale_pixels(12)),
+        )
         self.content.grid(row=1, column=0, sticky="nsew")
         self.content.columnconfigure(0, weight=1)
         self.content.rowconfigure(0, weight=1)
@@ -69,7 +89,7 @@ class SettingsShellWindow:
             bd=0,
         )
         self.card_container.place(x=0, y=0, anchor="nw")
-        self.card = ttk.Frame(self.card_container, padding=10)
+        self.card = ttk.Frame(self.card_container, padding=app._scale_pixels(10))
         self.card.grid(row=0, column=0, sticky="nsew")
         self.card_container.columnconfigure(0, weight=1)
         self.card_container.rowconfigure(0, weight=1)
@@ -124,9 +144,11 @@ class SettingsShellWindow:
 
     def _layout_card(self, _event=None) -> None:
         self.content.update_idletasks()
-        available_width = max(320, self.content.winfo_width())
-        available_height = max(240, self.content.winfo_height())
-        card_width = min(self._card_target_width, max(320, available_width - 24))
+        minimum_width = self.app._scale_pixels(320)
+        minimum_height = self.app._scale_pixels(240)
+        available_width = max(minimum_width, self.content.winfo_width())
+        available_height = max(minimum_height, self.content.winfo_height())
+        card_width = min(self._card_target_width, max(minimum_width, available_width - self.app._scale_pixels(24)))
         x = max(0, (available_width - card_width) // 2)
         self.card_container.place(x=x, y=0, width=card_width, height=available_height)
 

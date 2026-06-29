@@ -38,6 +38,7 @@ from cryoet_organizer.project import (
 )
 from cryoet_organizer.preferences_dialog import PreferencesDialog
 from cryoet_organizer.recent_projects import add_recent_project, load_recent_projects
+from cryoet_organizer.resizable_sections import clear_layout_preferences
 from cryoet_organizer.custom_jobs_dialog import CustomJobsDialog
 from cryoet_organizer.shortcuts_dialog import ManageShortcutsDialog
 from cryoet_organizer.settings_bundle import (
@@ -206,11 +207,17 @@ class CryoETOrganizerApp:
         self.root = tk.Tk()
         self.root.withdraw()
         self.root.title("CryoPal_tomo")
-        self.root.geometry("1280x820")
-        self.root.minsize(1120, 700)
+        self._base_window_size = (1280, 820)
+        self._base_window_minsize = (1120, 700)
+        self._base_sidebar_width = 220
+        self._base_sidebar_logo_width = 180
+        self._ui_scale_factor = 1.0
+        self.root.geometry(f"{self._base_window_size[0]}x{self._base_window_size[1]}")
+        self.root.minsize(*self._base_window_minsize)
         self.logo_image: tk.PhotoImage | None = None
         self.logo_label: ttk.Label | None = None
         self._lifecycle_splash: _LogoSplash | None = None
+        self.main_pane: tk.PanedWindow | None = None
 
         self.project = ProjectData()
         self.project_path: Path | None = None
@@ -260,6 +267,9 @@ class CryoETOrganizerApp:
         self.root.protocol("WM_DELETE_WINDOW", self.close_app)
         self._finish_startup()
 
+    def _scale_pixels(self, value: int) -> int:
+        return max(1, int(round(value * self._ui_scale_factor)))
+
     def _configure_style(self) -> None:
         try:
             self._style.theme_use("clam")
@@ -267,6 +277,8 @@ class CryoETOrganizerApp:
             pass
         self._style.configure("Heading.TLabel", font=("TkDefaultFont", 14, "bold"))
         self._style.configure("Error.TLabel", foreground="#aa1f1f")
+        self._style.configure("Monospace.TLabel", font="TkDefaultFont")
+        self._style.configure("Technical.Treeview", font="TkDefaultFont")
         self.apply_appearance_config(self._current_appearance)
 
     def _build_menu(self) -> None:
@@ -308,41 +320,66 @@ class CryoETOrganizerApp:
         self.root.config(menu=menu_bar)
 
     def _build_layout(self) -> None:
-        self.root.columnconfigure(1, weight=1)
+        self.root.columnconfigure(0, weight=1)
         self.root.rowconfigure(0, weight=1)
+        self.main_pane = tk.PanedWindow(
+            self.root,
+            orient="horizontal",
+            sashwidth=max(6, self._scale_pixels(6)),
+            opaqueresize=True,
+            bd=0,
+            relief="flat",
+        )
+        self.main_pane.grid(row=0, column=0, sticky="nsew")
 
-        self.sidebar = ttk.Frame(self.root, style="Sidebar.TFrame", padding=12)
-        self.sidebar.grid(row=0, column=0, sticky="nsw")
+        self.sidebar = ttk.Frame(self.main_pane, style="Sidebar.TFrame", padding=self._scale_pixels(12))
         self.sidebar.columnconfigure(0, weight=1)
         self.sidebar.rowconfigure(998, weight=1)
         self._build_sidebar_logo()
 
-        self.content = ttk.Frame(self.root, padding=0)
-        self.content.grid(row=0, column=1, sticky="nsew")
+        self.content = ttk.Frame(self.main_pane, padding=0)
         self.content.columnconfigure(0, weight=1)
         self.content.rowconfigure(1, weight=1)
+        self.main_pane.add(self.sidebar, minsize=self._scale_pixels(210), sticky="nsw")
+        self.main_pane.add(self.content, minsize=self._scale_pixels(640), stretch="always")
+        self.root.after_idle(self._initialize_main_pane)
 
         self.debug_banner = ttk.Label(
             self.content,
             textvariable=self.debug_banner_var,
             style="DebugBanner.TLabel",
             anchor="w",
-            padding=(12, 8),
+            padding=(self._scale_pixels(12), self._scale_pixels(8)),
         )
         self.debug_banner.grid(row=0, column=0, sticky="ew")
         self.debug_banner.grid_remove()
 
         status_frame = ttk.Frame(self.root, padding=0)
-        status_frame.grid(row=1, column=0, columnspan=2, sticky="ew")
+        status_frame.grid(row=1, column=0, sticky="ew")
         status_frame.columnconfigure(0, weight=1)
         status = ttk.Label(
             status_frame,
             textvariable=self.status_var,
             relief="sunken",
             anchor="w",
-            padding=(10, 6),
+            padding=(self._scale_pixels(10), self._scale_pixels(6)),
         )
         status.grid(row=0, column=0, sticky="ew")
+
+    def _initialize_main_pane(self) -> None:
+        if self.main_pane is None or not self.main_pane.winfo_exists():
+            return
+        self.main_pane.update_idletasks()
+        total_width = max(self.main_pane.winfo_width(), self._scale_pixels(self._base_window_size[0]))
+        preferred_width = self._scale_pixels(self._base_sidebar_width)
+        sidebar_width = min(
+            max(preferred_width, self._scale_pixels(170)),
+            min(self._scale_pixels(280), max(self._scale_pixels(190), int(total_width * 0.22))),
+        )
+        try:
+            self.main_pane.sash_place(0, sidebar_width, 0)
+        except tk.TclError:
+            pass
 
     def _build_sidebar_logo(self) -> None:
         logo_path = self._logo_asset_path()
@@ -354,8 +391,15 @@ class CryoETOrganizerApp:
         except tk.TclError:
             return
 
-        # Keep the logo compact enough for the sidebar while preserving visibility.
-        target_width = 220
+        if self.logo_label is not None:
+            try:
+                self.logo_label.destroy()
+            except tk.TclError:
+                pass
+            self.logo_label = None
+            self.logo_image = None
+
+        target_width = self._scale_pixels(self._base_sidebar_logo_width)
         if image.width() > target_width:
             factor = max(1, round(image.width() / target_width))
             image = image.subsample(factor, factor)
@@ -368,7 +412,7 @@ class CryoETOrganizerApp:
             highlightthickness=0,
             background=self._current_appearance.sidebar_background,
         )
-        self.logo_label.grid(row=0, column=0, sticky="w", pady=(0, 12))
+        self.logo_label.grid(row=0, column=0, sticky="w", pady=(0, self._scale_pixels(12)))
 
     def _logo_asset_path(self) -> Path:
         return Path(__file__).resolve().parent / "assets" / "CryoPal_tomo_logo.png"
@@ -582,6 +626,19 @@ class CryoETOrganizerApp:
 
     def refresh_tabs(self, *domains: str) -> None:
         self._apply_project_to_tabs(tuple(domains) if domains else None)
+
+    def reset_window_sizes(self) -> None:
+        clear_layout_preferences(self.project)
+        for tab in self.tabs.values():
+            reset_layout = getattr(tab, "reset_window_sizes", None)
+            if callable(reset_layout):
+                try:
+                    reset_layout()
+                except Exception:
+                    pass
+        self._modified = True
+        self._update_title()
+        self.status_var.set("Window sizes reset to defaults")
 
     def _sync_tabs_to_project(self) -> None:
         for tab in self.tabs.values():
@@ -1463,6 +1520,9 @@ class CryoETOrganizerApp:
         sidebar_button_fg = config.sidebar_button_foreground
         main_bg = config.main_background
         main_fg = config.main_foreground
+        button_pad_x = self._scale_pixels(12)
+        button_pad_y = self._scale_pixels(10)
+        debug_size = 10
 
         active_sidebar_bg = _shift_hex_color(sidebar_button_bg, -18)
 
@@ -1474,13 +1534,18 @@ class CryoETOrganizerApp:
         self._style.configure("TCheckbutton", background=main_bg, foreground=main_fg)
         self._style.configure("TRadiobutton", background=main_bg, foreground=main_fg)
         self._style.configure("Heading.TLabel", background=main_bg, foreground=main_fg)
-        self._style.configure("DebugBanner.TLabel", background="#9c2f2f", foreground="#ffffff", font=("TkDefaultFont", 10, "bold"))
+        self._style.configure(
+            "DebugBanner.TLabel",
+            background="#9c2f2f",
+            foreground="#ffffff",
+            font=("TkDefaultFont", debug_size, "bold"),
+        )
 
         self._style.configure("Sidebar.TFrame", background=sidebar_bg)
         self._style.configure(
             "Sidebar.TButton",
             anchor="w",
-            padding=(12, 10),
+            padding=(button_pad_x, button_pad_y),
             background=sidebar_button_bg,
             foreground=sidebar_button_fg,
         )
@@ -1492,7 +1557,7 @@ class CryoETOrganizerApp:
         self._style.configure(
             "ActiveSidebar.TButton",
             anchor="w",
-            padding=(12, 10),
+            padding=(button_pad_x, button_pad_y),
             background=active_sidebar_bg,
             foreground=sidebar_button_fg,
         )

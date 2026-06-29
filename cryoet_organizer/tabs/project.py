@@ -6,7 +6,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from xml.etree import ElementTree as ET
 
-from cryoet_organizer.dialogs import show_detail_dialog
+from cryoet_organizer.dialogs import create_scrollable_frame, show_detail_dialog
 from cryoet_organizer.job_defaults import resolve_job_default
 from cryoet_organizer.preferences import project_preference, project_preference_enabled, project_preference_int
 from cryoet_organizer.project import (
@@ -19,8 +19,10 @@ from cryoet_organizer.project import (
     prepare_unified_mdocs_directory,
 )
 from cryoet_organizer.thumbnail_cache import effective_thumbnail_source_folder, resolve_thumbnail_cache_dir
+from cryoet_organizer.resizable_sections import ResizableSectionStack
 from cryoet_organizer.tabs.base import LabeledEntry, LabeledPathEntry, SidebarTab
 from cryoet_organizer.warp_settings import WarpSettingsSummary, parse_warp_settings
+from cryoet_organizer.dialogs import bind_scrollable_canvas, fit_outer_canvas_to_viewport
 
 
 class ProjectOverviewTab(SidebarTab):
@@ -30,7 +32,7 @@ class ProjectOverviewTab(SidebarTab):
 
     def build(self) -> None:
         self.frame.columnconfigure(0, weight=1)
-        self.frame.rowconfigure(2, weight=1)
+        self.frame.rowconfigure(0, weight=1)
         self.sort_column = "created_at"
         self.sort_descending = False
         self.dataset_action_var = tk.StringVar(value="Project actions")
@@ -38,16 +40,35 @@ class ProjectOverviewTab(SidebarTab):
         self.import_frame_settings_summary: WarpSettingsSummary | None = None
         self.import_tilt_settings_summary: WarpSettingsSummary | None = None
         self.remove_selected_datasets: set[str] = set()
+        self._layout_project_id: int | None = None
+        self._table_pane_default_height = self.app._scale_pixels(420)
+        self._table_pane_minsize = self.app._scale_pixels(260)
+        self._forms_pane_default_height = self.app._scale_pixels(620)
+        self._forms_pane_minsize = self.app._scale_pixels(320)
+
+        self.outer_canvas = tk.Canvas(self.frame, highlightthickness=0)
+        self.outer_canvas.grid(row=0, column=0, sticky="nsew")
+        self.outer_scrollbar = ttk.Scrollbar(self.frame, orient="vertical", command=self.outer_canvas.yview)
+        self.outer_scrollbar.grid(row=0, column=1, sticky="ns")
+        self.outer_xscrollbar = ttk.Scrollbar(self.frame, orient="horizontal", command=self.outer_canvas.xview)
+        self.outer_xscrollbar.grid(row=1, column=0, sticky="ew")
+        self.outer_canvas.configure(yscrollcommand=self.outer_scrollbar.set, xscrollcommand=self.outer_xscrollbar.set)
+
+        self.content = ttk.Frame(self.outer_canvas, padding=2)
+        self.content.columnconfigure(0, weight=1)
+        self.outer_window = self.outer_canvas.create_window((0, 0), window=self.content, anchor="nw")
+        self.content.bind("<Configure>", self._on_outer_frame_configure)
+        self.outer_canvas.bind("<Configure>", self._on_outer_canvas_configure)
 
         intro = (
-            "Fuege hier Datensaetze hinzu oder importiere bereits verarbeitete Datasets, "
-            "damit Processing, Gallery und Particles dieselben gespeicherten Pfade verwenden."
+            "Add datasets here or import already processed datasets so Processing, Gallery, "
+            "and Particles can use the same stored paths."
         )
-        ttk.Label(self.frame, text=intro, wraplength=900, justify="left").grid(
+        ttk.Label(self.content, text=intro, wraplength=900, justify="left").grid(
             row=0, column=0, sticky="w", pady=(0, 12)
         )
 
-        header = ttk.Frame(self.frame)
+        header = ttk.Frame(self.content)
         header.grid(row=1, column=0, sticky="ew", pady=(0, 12))
         header.columnconfigure(0, weight=1)
         header.columnconfigure(1, weight=0)
@@ -73,8 +94,33 @@ class ProjectOverviewTab(SidebarTab):
         self.dataset_action_combo.grid(row=1, column=0, sticky="ew")
         self.dataset_action_combo.bind("<<ComboboxSelected>>", self._on_dataset_action_changed)
 
-        table_box = ttk.LabelFrame(self.frame, text="Datasets in project", padding=12)
-        table_box.grid(row=2, column=0, sticky="nsew")
+        self.layout_pane = ResizableSectionStack(
+            self.content,
+            app=self.app,
+            preference_namespace="project_overview",
+            bottom_spacing=self.app._scale_pixels(140),
+            on_layout_changed=self._schedule_outer_layout_refresh,
+        )
+        self.layout_pane.grid(row=2, column=0, sticky="nsew", pady=(0, 0))
+
+        table_section = self.layout_pane.add_section(
+            "dataset_table",
+            default_height=self._table_pane_default_height,
+            min_height=self._table_pane_minsize,
+        )
+        table_section.columnconfigure(0, weight=1)
+        table_section.rowconfigure(0, weight=1)
+
+        forms_section = self.layout_pane.add_section(
+            "forms",
+            default_height=self._forms_pane_default_height,
+            min_height=self._forms_pane_minsize,
+        )
+        forms_section.columnconfigure(0, weight=1)
+        forms_section.rowconfigure(0, weight=1)
+
+        table_box = ttk.LabelFrame(table_section, text="Datasets in project", padding=12)
+        table_box.grid(row=0, column=0, sticky="nsew")
         table_box.columnconfigure(0, weight=1)
         table_box.rowconfigure(0, weight=1)
 
@@ -89,7 +135,13 @@ class ProjectOverviewTab(SidebarTab):
             "processing_folder",
             "created_at",
         )
-        self.dataset_table = ttk.Treeview(table_box, columns=columns, show="headings", height=20)
+        self.dataset_table = ttk.Treeview(
+            table_box,
+            columns=columns,
+            show="headings",
+            height=20,
+            style="Technical.Treeview",
+        )
         headings = {
             "dataset_name": "Dataset",
             "sample": "Sample",
@@ -129,18 +181,36 @@ class ProjectOverviewTab(SidebarTab):
         self.dataset_count_label = ttk.Label(table_box, text="0 datasets")
         self.dataset_count_label.grid(row=1, column=0, sticky="w", pady=(8, 0))
 
-        self.add_dataset_form = self._build_add_dataset_form()
-        self.add_dataset_form.grid(row=3, column=0, sticky="ew", pady=(12, 0))
+        self.forms_host, self.forms_container, self.forms_scroll_canvas = create_scrollable_frame(
+            forms_section,
+            allow_horizontal=True,
+            fill_vertical=True,
+        )
+        self.forms_host.grid(row=0, column=0, sticky="nsew")
+        self.forms_container.columnconfigure(0, weight=1)
+
+        self.add_dataset_form = self._build_add_dataset_form(self.forms_container)
+        self.add_dataset_form.grid(row=0, column=0, sticky="ew", pady=(12, 0))
         self.add_dataset_form.grid_remove()
 
-        self.import_dataset_form = self._build_import_dataset_form()
-        self.import_dataset_form.grid(row=4, column=0, sticky="ew", pady=(12, 0))
+        self.import_dataset_form = self._build_import_dataset_form(self.forms_container)
+        self.import_dataset_form.grid(row=1, column=0, sticky="ew", pady=(12, 0))
         self.import_dataset_form.grid_remove()
 
-        self.remove_dataset_form = self._build_remove_dataset_form()
-        self.remove_dataset_form.grid(row=5, column=0, sticky="ew", pady=(12, 0))
+        self.remove_dataset_form = self._build_remove_dataset_form(self.forms_container)
+        self.remove_dataset_form.grid(row=2, column=0, sticky="ew", pady=(12, 0))
         self.remove_dataset_form.grid_remove()
+        self.layout_pane.set_section_visible("forms", False)
         self._apply_custom_defaults()
+
+    def _on_outer_frame_configure(self, _event=None) -> None:
+        self.outer_canvas.configure(scrollregion=self.outer_canvas.bbox("all"))
+
+    def _on_outer_canvas_configure(self, event) -> None:
+        fit_outer_canvas_to_viewport(self.outer_canvas, self.outer_window, self.content, event)
+
+    def _schedule_outer_layout_refresh(self) -> None:
+        self.outer_canvas.after_idle(self._on_outer_frame_configure)
 
     def _project_default(self, group: str, job_key: str, field_key: str, base_value: str) -> str:
         return resolve_job_default(
@@ -160,8 +230,8 @@ class ProjectOverviewTab(SidebarTab):
         self.clear_form()
         self.clear_import_form()
 
-    def _build_add_dataset_form(self) -> ttk.LabelFrame:
-        form = ttk.LabelFrame(self.frame, text="Add dataset for processing", padding=12)
+    def _build_add_dataset_form(self, parent: tk.Misc) -> ttk.LabelFrame:
+        form = ttk.LabelFrame(parent, text="Add dataset for processing", padding=12)
         for column in range(2):
             form.columnconfigure(column, weight=1)
 
@@ -255,8 +325,8 @@ class ProjectOverviewTab(SidebarTab):
         )
         return form
 
-    def _build_import_dataset_form(self) -> ttk.LabelFrame:
-        form = ttk.LabelFrame(self.frame, text="Import already processed dataset", padding=12)
+    def _build_import_dataset_form(self, parent: tk.Misc) -> ttk.LabelFrame:
+        form = ttk.LabelFrame(parent, text="Import already processed dataset", padding=12)
         for column in range(2):
             form.columnconfigure(column, weight=1)
 
@@ -419,8 +489,14 @@ class ProjectOverviewTab(SidebarTab):
         self.import_overwrite_frame.grid_remove()
         return form
 
-    def _on_dataset_action_changed(self, _event=None) -> None:
-        selection = self.dataset_action_var.get()
+    def _apply_dataset_action_view(self, selection: str) -> None:
+        show_forms = selection != "Project actions"
+        self.layout_pane.set_section_visible("forms", show_forms)
+        if show_forms:
+            self.forms_host.grid(row=0, column=0, sticky="nsew")
+        else:
+            self.forms_host.grid_remove()
+
         if selection == "Add dataset for processing":
             self.add_dataset_form.grid()
             self.import_dataset_form.grid_remove()
@@ -439,8 +515,12 @@ class ProjectOverviewTab(SidebarTab):
             self.import_dataset_form.grid_remove()
             self.remove_dataset_form.grid_remove()
 
-    def _build_remove_dataset_form(self) -> ttk.LabelFrame:
-        form = ttk.LabelFrame(self.frame, text="Remove dataset", padding=12)
+    def _on_dataset_action_changed(self, _event=None) -> None:
+        selection = self.dataset_action_var.get()
+        self._apply_dataset_action_view(selection)
+
+    def _build_remove_dataset_form(self, parent: tk.Misc) -> ttk.LabelFrame:
+        form = ttk.LabelFrame(parent, text="Remove dataset", padding=12)
         form.columnconfigure(0, weight=1)
         form.rowconfigure(1, weight=1)
 
@@ -460,7 +540,13 @@ class ProjectOverviewTab(SidebarTab):
         table_box.rowconfigure(0, weight=1)
 
         columns = ("selected", "dataset_name", "sample", "number_of_ts", "processing_folder")
-        self.remove_dataset_table = ttk.Treeview(table_box, columns=columns, show="headings", height=8)
+        self.remove_dataset_table = ttk.Treeview(
+            table_box,
+            columns=columns,
+            show="headings",
+            height=8,
+            style="Technical.Treeview",
+        )
         headings = {
             "selected": "",
             "dataset_name": "Dataset",
@@ -549,7 +635,7 @@ class ProjectOverviewTab(SidebarTab):
         self.remove_selected_datasets.clear()
         self._refresh_remove_dataset_table(self.app.project)
         self.dataset_action_var.set("Project actions")
-        self.remove_dataset_form.grid_remove()
+        self._apply_dataset_action_view("Project actions")
         self.app.on_project_changed(
             "datasets",
             "processing_m",
@@ -1169,7 +1255,7 @@ class ProjectOverviewTab(SidebarTab):
         self.app.project.datasets.append(dataset)
         self.clear_form()
         self.dataset_action_var.set("Project actions")
-        self.add_dataset_form.grid_remove()
+        self._apply_dataset_action_view("Project actions")
         self.app.on_project_changed("datasets")
         self.app.status_var.set(f"Added dataset: {dataset.dataset_name} ({status_detail})")
 
@@ -1269,7 +1355,7 @@ class ProjectOverviewTab(SidebarTab):
         self.app.project.datasets.append(dataset)
         self.clear_import_form()
         self.dataset_action_var.set("Project actions")
-        self.import_dataset_form.grid_remove()
+        self._apply_dataset_action_view("Project actions")
         self.app.on_project_changed("datasets")
         self.app.status_var.set(f"Imported processed dataset: {dataset.dataset_name}")
 
@@ -1438,18 +1524,26 @@ class ProjectOverviewTab(SidebarTab):
         project.name = self.project_name_entry.get() or "Untitled Project"
         project.dataset_sort_column = self.sort_column
         project.dataset_sort_descending = self.sort_descending
+        self.layout_pane.write_to_project(project)
 
     def on_project_loaded(self, project: ProjectData) -> None:
+        project_id = id(project)
+        if self._layout_project_id != project_id:
+            self._layout_project_id = project_id
+            self.layout_pane.restore_from_project(project)
         self.project_name_entry.set(project.name)
         self.sort_column = project.dataset_sort_column
         self.sort_descending = project.dataset_sort_descending
         self.remove_selected_datasets.clear()
         self.dataset_action_var.set("Project actions")
-        self.add_dataset_form.grid_remove()
-        self.import_dataset_form.grid_remove()
-        self.remove_dataset_form.grid_remove()
+        self._apply_dataset_action_view("Project actions")
         if self.import_overwrite_visible:
             self._toggle_import_overwrite()
         self._apply_custom_defaults()
         self._refresh_table(project)
         self._refresh_remove_dataset_table(project)
+        self._schedule_outer_layout_refresh()
+
+    def reset_window_sizes(self) -> None:
+        self.layout_pane.reset_to_defaults()
+        self._schedule_outer_layout_refresh()

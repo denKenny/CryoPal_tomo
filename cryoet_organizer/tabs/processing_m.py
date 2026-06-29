@@ -6,7 +6,7 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
-from cryoet_organizer.dialogs import bind_scrollable_canvas, show_detail_dialog
+from cryoet_organizer.dialogs import bind_scrollable_canvas, fit_outer_canvas_to_viewport, show_detail_dialog
 from cryoet_organizer.environments import environment_titles
 from cryoet_organizer.job_execution import (
     build_slurm_override_metadata,
@@ -20,6 +20,7 @@ from cryoet_organizer.job_defaults import resolve_job_default
 from cryoet_organizer.m_population import parse_population_file
 from cryoet_organizer.mtools_catalog import MToolCommand, MToolFlag, M_GROUPS, m_jobs_by_group
 from cryoet_organizer.project import JobHistoryEntry, MPopulationRecord, ProjectData
+from cryoet_organizer.resizable_sections import ResizableSectionStack, VerticalSplitPane
 from cryoet_organizer.scheduled_slurm_dialog import CollectiveSlurmSubmissionDialog, ask_scheduled_slurm_mode
 from cryoet_organizer.slurm import SlurmSubmissionResult, find_slurm_profile, render_sbatch_script
 from cryoet_organizer.slurm_override_ui import SlurmOverrideUI
@@ -68,16 +69,28 @@ class ProcessingMTab(SidebarTab):
         self._required_param_rows: list[dict[str, object]] = []
         self._advanced_param_rows: list[dict[str, object]] = []
         self.history_entry_refs: dict[str, JobHistoryEntry] = {}
+        self._layout_project_id: int | None = None
+        self._history_pane_default_height = self.app._scale_pixels(200)
+        self._job_pane_default_height = self.app._scale_pixels(170)
+        self._parameters_pane_default_height = self.app._scale_pixels(580)
+        self._history_pane_minsize = self.app._scale_pixels(180)
+        self._job_pane_minsize = self.app._scale_pixels(150)
+        self._parameters_pane_minsize = self.app._scale_pixels(460)
+        self._command_preview_default_height = self.app._scale_pixels(220)
+        self._parameter_fields_default_height = self.app._scale_pixels(320)
+        self._command_preview_minsize = self.app._scale_pixels(180)
+        self._parameter_fields_minsize = self.app._scale_pixels(260)
 
         self.outer_canvas = tk.Canvas(self.frame, highlightthickness=0)
         self.outer_canvas.grid(row=0, column=0, sticky="nsew")
         self.outer_scrollbar = ttk.Scrollbar(self.frame, orient="vertical", command=self.outer_canvas.yview)
         self.outer_scrollbar.grid(row=0, column=1, sticky="ns")
-        self.outer_canvas.configure(yscrollcommand=self.outer_scrollbar.set)
+        self.outer_xscrollbar = ttk.Scrollbar(self.frame, orient="horizontal", command=self.outer_canvas.xview)
+        self.outer_xscrollbar.grid(row=1, column=0, sticky="ew")
+        self.outer_canvas.configure(yscrollcommand=self.outer_scrollbar.set, xscrollcommand=self.outer_xscrollbar.set)
 
         self.content = ttk.Frame(self.outer_canvas, padding=2)
         self.content.columnconfigure(0, weight=1)
-        self.content.rowconfigure(5, weight=1)
         self.outer_window = self.outer_canvas.create_window((0, 0), window=self.content, anchor="nw")
         self.content.bind("<Configure>", self._on_outer_frame_configure)
         self.outer_canvas.bind("<Configure>", self._on_outer_canvas_configure)
@@ -149,8 +162,38 @@ class ProcessingMTab(SidebarTab):
         self.create_population_button = ttk.Button(creator_actions, text="Create", command=self._create_population)
         self.create_population_button.grid(row=0, column=1)
 
-        self.history_box = ttk.LabelFrame(self.content, text="Job history", padding=12)
-        self.history_box.grid(row=4, column=0, sticky="nsew", pady=(12, 0))
+        self.processing_pane = ResizableSectionStack(
+            self.content,
+            app=self.app,
+            preference_namespace="processing_m",
+            bottom_spacing=self.app._scale_pixels(140),
+            on_layout_changed=self._schedule_outer_layout_refresh,
+        )
+        self.processing_pane.grid(row=4, column=0, sticky="nsew", pady=(12, 0))
+        self.history_pane_frame = self.processing_pane.add_section(
+            "history",
+            default_height=self._history_pane_default_height,
+            min_height=self._history_pane_minsize,
+        )
+        self.history_pane_frame.columnconfigure(0, weight=1)
+        self.history_pane_frame.rowconfigure(0, weight=1)
+        self.job_pane_frame = self.processing_pane.add_section(
+            "setup",
+            default_height=self._job_pane_default_height,
+            min_height=self._job_pane_minsize,
+        )
+        self.job_pane_frame.columnconfigure(0, weight=1)
+        self.job_pane_frame.rowconfigure(0, weight=1)
+        self.parameters_pane_frame = self.processing_pane.add_section(
+            "parameters",
+            default_height=self._parameters_pane_default_height,
+            min_height=self._parameters_pane_minsize,
+        )
+        self.parameters_pane_frame.columnconfigure(0, weight=1)
+        self.parameters_pane_frame.rowconfigure(0, weight=1)
+
+        self.history_box = ttk.LabelFrame(self.history_pane_frame, text="Job history", padding=12)
+        self.history_box.grid(row=0, column=0, sticky="nsew")
         self.history_box.columnconfigure(0, weight=1)
         self.history_box.rowconfigure(0, weight=1)
 
@@ -159,6 +202,7 @@ class ProcessingMTab(SidebarTab):
             columns=("job_name", "timestamp", "action"),
             show="headings",
             height=6,
+            style="Technical.Treeview",
         )
         self.history_table.heading("job_name", text="Job", command=lambda: self._sort_history("job_name"))
         self.history_table.column("job_name", width=260, anchor="w")
@@ -214,10 +258,9 @@ class ProcessingMTab(SidebarTab):
         self.app.attach_abort_button(history_abort)
         self.history_table.bind("<Double-1>", self._show_selected_history_details)
 
-        self.processing_box = ttk.LabelFrame(self.content, text="Processing setup", padding=12)
-        self.processing_box.grid(row=5, column=0, sticky="nsew", pady=(12, 0))
+        self.processing_box = ttk.LabelFrame(self.job_pane_frame, text="Processing setup", padding=12)
+        self.processing_box.grid(row=0, column=0, sticky="nsew")
         self.processing_box.columnconfigure(0, weight=1)
-        self.processing_box.rowconfigure(3, weight=1)
 
         selection_grid = ttk.Frame(self.processing_box)
         selection_grid.grid(row=0, column=0, sticky="ew")
@@ -244,15 +287,37 @@ class ProcessingMTab(SidebarTab):
         )
         self.job_hint.grid(row=1, column=0, sticky="w", pady=(10, 0))
 
-        self.parameters_box = ttk.LabelFrame(self.processing_box, text="Job parameters", padding=12)
-        self.parameters_box.grid(row=2, column=0, sticky="nsew", pady=(12, 0))
+        self.parameters_box = ttk.LabelFrame(self.parameters_pane_frame, text="Job parameters", padding=12)
+        self.parameters_box.grid(row=0, column=0, sticky="nsew")
         self.parameters_box.columnconfigure(0, weight=1)
-        self.parameters_box.rowconfigure(4, weight=1)
+        self.parameters_box.rowconfigure(0, weight=1)
 
-        command_header = ttk.Frame(self.parameters_box)
+        self.command_parameter_pane = VerticalSplitPane(
+            self.parameters_box,
+            app=self.app,
+            preference_namespace="processing_m",
+            default_top_height=self._command_preview_default_height,
+            min_top_height=self._command_preview_minsize,
+            min_bottom_height=self._parameter_fields_minsize,
+            resize_parent_by=lambda delta: self.processing_pane.resize_section("parameters", delta),
+            on_layout_changed=self._schedule_outer_layout_refresh,
+        )
+        self.command_parameter_pane.grid(row=0, column=0, sticky="nsew")
+        self.command_pane_frame = self.command_parameter_pane.top_frame()
+        self.command_pane_frame.columnconfigure(0, weight=1)
+        self.command_pane_frame.rowconfigure(0, weight=1)
+        self.parameter_fields_frame = self.command_parameter_pane.bottom_frame()
+        self.parameter_fields_frame.columnconfigure(0, weight=1)
+        self.parameter_fields_frame.rowconfigure(0, weight=1)
+
+        command_box = ttk.LabelFrame(self.command_pane_frame, text="Command preview", padding=12)
+        command_box.grid(row=0, column=0, sticky="nsew")
+        command_box.columnconfigure(0, weight=1)
+        command_box.rowconfigure(3, weight=1)
+
+        command_header = ttk.Frame(command_box)
         command_header.grid(row=0, column=0, sticky="ew", pady=(0, 8))
         command_header.columnconfigure(0, weight=1)
-        ttk.Label(command_header, text="Command preview", style="Heading.TLabel").grid(row=0, column=0, sticky="w")
         ttk.Button(command_header, text="Copy command", command=self._copy_command).grid(
             row=0, column=1, sticky="e", padx=(8, 0)
         )
@@ -271,7 +336,7 @@ class ProcessingMTab(SidebarTab):
         run_abort.grid(row=0, column=4, sticky="e", padx=(8, 0))
         self.app.attach_abort_button(run_abort)
 
-        execution_row = ttk.Frame(self.parameters_box)
+        execution_row = ttk.Frame(command_box)
         execution_row.grid(row=1, column=0, sticky="ew", pady=(0, 8))
         execution_row.columnconfigure(3, weight=1)
         ttk.Label(execution_row, text="Execution").grid(row=0, column=0, sticky="w", padx=(0, 8))
@@ -302,28 +367,33 @@ class ProcessingMTab(SidebarTab):
         self.slurm_profile_combo.grid(row=0, column=3, sticky="w")
         self.slurm_profile_combo.bind("<<ComboboxSelected>>", lambda _e: self.slurm_overrides_ui.rebuild(preserve_existing=False))
 
-        self.slurm_overrides_frame = ttk.Frame(self.parameters_box)
+        self.slurm_overrides_frame = ttk.Frame(command_box)
         self.slurm_overrides_frame.grid(row=2, column=0, sticky="ew", pady=(0, 8))
         self.slurm_overrides_ui.register_frame(self.slurm_overrides_frame)
 
-        self.command_text = tk.Text(self.parameters_box, height=4, wrap="word", font="TkDefaultFont")
-        self.command_text.grid(row=3, column=0, sticky="ew", pady=(0, 10))
+        self.command_text = tk.Text(command_box, height=6, wrap="word", font="TkDefaultFont")
+        self.command_text.grid(row=3, column=0, sticky="nsew")
         self.command_text.insert("1.0", "MTools")
 
-        self.parameter_canvas = tk.Canvas(self.parameters_box, highlightthickness=0)
-        self.parameter_canvas.grid(row=4, column=0, sticky="nsew")
+        parameter_box = ttk.LabelFrame(self.parameter_fields_frame, text="Parameters", padding=12)
+        parameter_box.grid(row=0, column=0, sticky="nsew")
+        parameter_box.columnconfigure(0, weight=1)
+        parameter_box.rowconfigure(0, weight=1)
+
+        self.parameter_canvas = tk.Canvas(parameter_box, highlightthickness=0)
+        self.parameter_canvas.grid(row=0, column=0, sticky="nsew")
         self.parameter_scrollbar = ttk.Scrollbar(
-            self.parameters_box,
+            parameter_box,
             orient="vertical",
             command=self.parameter_canvas.yview,
         )
-        self.parameter_scrollbar.grid(row=4, column=1, sticky="ns")
+        self.parameter_scrollbar.grid(row=0, column=1, sticky="ns")
         self.parameter_xscrollbar = ttk.Scrollbar(
-            self.parameters_box,
+            parameter_box,
             orient="horizontal",
             command=self.parameter_canvas.xview,
         )
-        self.parameter_xscrollbar.grid(row=5, column=0, sticky="ew")
+        self.parameter_xscrollbar.grid(row=1, column=0, sticky="ew")
         self.parameter_canvas.configure(
             yscrollcommand=self.parameter_scrollbar.set,
             xscrollcommand=self.parameter_xscrollbar.set,
@@ -350,6 +420,7 @@ class ProcessingMTab(SidebarTab):
         self.processing_advanced_frame.columnconfigure(0, weight=1)
         self.processing_advanced_button.grid_remove()
         self.processing_advanced_frame.grid_remove()
+        self.processing_pane.grid_remove()
 
         for variable in (self.create_directory_var, self.create_name_var):
             variable.trace_add("write", lambda *_args: self._update_create_command_preview())
@@ -358,12 +429,16 @@ class ProcessingMTab(SidebarTab):
         self._refresh_slurm_profiles()
         self._update_create_command_preview()
         self._update_population_ui()
+        self.processing_pane.grid_remove()
 
     def _on_outer_frame_configure(self, _event=None) -> None:
         self.outer_canvas.configure(scrollregion=self.outer_canvas.bbox("all"))
 
     def _on_outer_canvas_configure(self, event) -> None:
-        self.outer_canvas.itemconfigure(self.outer_window, width=event.width)
+        fit_outer_canvas_to_viewport(self.outer_canvas, self.outer_window, self.content, event)
+
+    def _schedule_outer_layout_refresh(self) -> None:
+        self.outer_canvas.after_idle(self._on_outer_frame_configure)
 
     def _on_parameter_frame_configure(self, _event=None) -> None:
         self.parameter_canvas.configure(scrollregion=self.parameter_canvas.bbox("all"))
@@ -374,6 +449,9 @@ class ProcessingMTab(SidebarTab):
     def _scroll_job_view_to_top(self) -> None:
         self.parameter_canvas.yview_moveto(0)
         self.parameter_canvas.xview_moveto(0)
+
+    def on_tab_shown(self) -> None:
+        self.frame.after_idle(self._on_outer_frame_configure)
 
     def _toggle_creator(self) -> None:
         if self.creator_visible:
@@ -573,11 +651,18 @@ class ProcessingMTab(SidebarTab):
         population = self._selected_population()
         if population is None:
             self._update_population_summary()
+            self.processing_pane.grid_remove()
+            self.processing_pane.set_section_visible("history", True)
+            self.processing_pane.set_section_visible("setup", True)
+            self.processing_pane.set_section_visible("parameters", False)
             self.history_box.grid_remove()
             self.processing_box.grid_remove()
             return
+        self.processing_pane.grid()
         self.history_box.grid()
         self.processing_box.grid()
+        self.processing_pane.set_section_visible("history", True)
+        self.processing_pane.set_section_visible("setup", True)
         self._update_population_summary()
 
     def _refresh_processing_selection(self) -> None:
@@ -1545,6 +1630,8 @@ class ProcessingMTab(SidebarTab):
         self.parameter_choice_vars.clear()
 
         if self.current_job is None:
+            self.parameters_box.grid_remove()
+            self.processing_pane.set_section_visible("parameters", False)
             self._suspend_command_preview_updates = False
             self._set_command_text("MTools")
             self.processing_advanced_button.grid_remove()
@@ -1553,6 +1640,8 @@ class ProcessingMTab(SidebarTab):
             self._hide_unused_parameter_rows(self._advanced_param_rows, 0)
             return
 
+        self.parameters_box.grid()
+        self.processing_pane.set_section_visible("parameters", True)
         required_flags = [flag for flag in self.current_job.flags if flag.required]
         advanced_flags = [flag for flag in self.current_job.flags if not flag.required]
 
@@ -1626,6 +1715,11 @@ class ProcessingMTab(SidebarTab):
         self._update_population_summary()
 
     def on_project_loaded(self, project: ProjectData) -> None:
+        project_id = id(project)
+        if self._layout_project_id != project_id:
+            self._layout_project_id = project_id
+            self.processing_pane.restore_from_project(project)
+            self.command_parameter_pane.restore_from_project(project)
         self.available_jobs = m_jobs_by_group()
         self._refresh_population_choices(project)
         self._refresh_history()
@@ -1633,3 +1727,12 @@ class ProcessingMTab(SidebarTab):
         self._refresh_processing_selection()
         self._update_population_ui()
         self.create_environment_var.set(self._create_population_environment_default())
+
+    def sync_to_project(self, project: ProjectData) -> None:
+        self.processing_pane.write_to_project(project)
+        self.command_parameter_pane.write_to_project(project)
+
+    def reset_window_sizes(self) -> None:
+        self.processing_pane.reset_to_defaults()
+        self.command_parameter_pane.reset_to_defaults()
+        self._schedule_outer_layout_refresh()

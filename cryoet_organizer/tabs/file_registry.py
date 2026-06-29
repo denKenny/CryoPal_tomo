@@ -19,7 +19,9 @@ from cryoet_organizer.file_resolver import (
     set_file_override,
     set_file_role_config,
 )
+from cryoet_organizer.dialogs import bind_scrollable_canvas, fit_outer_canvas_to_viewport
 from cryoet_organizer.project import ProjectData
+from cryoet_organizer.resizable_sections import ResizableSectionStack
 from cryoet_organizer.tabs.base import SidebarTab
 
 
@@ -30,6 +32,7 @@ class FileRegistryTab(SidebarTab):
 
     def build(self) -> None:
         self.current_project: ProjectData | None = None
+        self._layout_project_id: int | None = None
         self._suspend_role_table_callback = False
         self.current_role_var = tk.StringVar(value=file_role_order()[0])
         self.open_dataset_nodes: set[str] = set()
@@ -41,9 +44,30 @@ class FileRegistryTab(SidebarTab):
         self.apply_ts_matching_var = tk.BooleanVar(value=True)
 
         self.frame.columnconfigure(0, weight=1)
-        self.frame.rowconfigure(3, weight=1)
+        self.frame.rowconfigure(0, weight=1)
 
-        intro = ttk.LabelFrame(self.frame, text="File Registry", padding=12)
+        self._overview_pane_default_height = self.app._scale_pixels(260)
+        self._pattern_pane_default_height = self.app._scale_pixels(210)
+        self._registry_pane_default_height = self.app._scale_pixels(420)
+        self._overview_pane_minsize = self.app._scale_pixels(220)
+        self._pattern_pane_minsize = self.app._scale_pixels(180)
+        self._registry_pane_minsize = self.app._scale_pixels(320)
+
+        self.outer_canvas = tk.Canvas(self.frame, highlightthickness=0)
+        self.outer_canvas.grid(row=0, column=0, sticky="nsew")
+        self.outer_scrollbar = ttk.Scrollbar(self.frame, orient="vertical", command=self.outer_canvas.yview)
+        self.outer_scrollbar.grid(row=0, column=1, sticky="ns")
+        self.outer_xscrollbar = ttk.Scrollbar(self.frame, orient="horizontal", command=self.outer_canvas.xview)
+        self.outer_xscrollbar.grid(row=1, column=0, sticky="ew")
+        self.outer_canvas.configure(yscrollcommand=self.outer_scrollbar.set, xscrollcommand=self.outer_xscrollbar.set)
+
+        self.content = ttk.Frame(self.outer_canvas, padding=2)
+        self.content.columnconfigure(0, weight=1)
+        self.outer_window = self.outer_canvas.create_window((0, 0), window=self.content, anchor="nw")
+        self.content.bind("<Configure>", self._on_outer_frame_configure)
+        self.outer_canvas.bind("<Configure>", self._on_outer_canvas_configure)
+
+        intro = ttk.LabelFrame(self.content, text="File Registry", padding=12)
         intro.grid(row=0, column=0, sticky="ew")
         intro.columnconfigure(0, weight=1)
         ttk.Label(
@@ -57,10 +81,44 @@ class FileRegistryTab(SidebarTab):
             justify="left",
         ).grid(row=0, column=0, sticky="w")
 
-        role_box = ttk.LabelFrame(self.frame, text="File roles overview", padding=12)
-        role_box.grid(row=1, column=0, sticky="ew", pady=(12, 0))
+        self.section_pane = ResizableSectionStack(
+            self.content,
+            app=self.app,
+            preference_namespace="file_registry",
+            bottom_spacing=self.app._scale_pixels(120),
+            on_layout_changed=self._schedule_outer_layout_refresh,
+        )
+        self.section_pane.grid(row=1, column=0, sticky="nsew", pady=(12, 0))
+
+        roles_section = self.section_pane.add_section(
+            "roles",
+            default_height=self._overview_pane_default_height,
+            min_height=self._overview_pane_minsize,
+        )
+        roles_section.columnconfigure(0, weight=1)
+        roles_section.rowconfigure(0, weight=1)
+
+        pattern_section = self.section_pane.add_section(
+            "pattern",
+            default_height=self._pattern_pane_default_height,
+            min_height=self._pattern_pane_minsize,
+        )
+        pattern_section.columnconfigure(0, weight=1)
+        pattern_section.rowconfigure(0, weight=1)
+
+        registry_section = self.section_pane.add_section(
+            "registry",
+            default_height=self._registry_pane_default_height,
+            min_height=self._registry_pane_minsize,
+        )
+        registry_section.columnconfigure(0, weight=1)
+        registry_section.rowconfigure(0, weight=1)
+
+        role_box = ttk.LabelFrame(roles_section, text="File roles overview", padding=12)
+        role_box.grid(row=0, column=0, sticky="nsew")
         role_box.columnconfigure(0, weight=1)
         role_box.columnconfigure(1, weight=1)
+        role_box.rowconfigure(1, weight=1)
         ttk.Label(role_box, text="Selected file role").grid(row=0, column=0, sticky="w", pady=(0, 4))
         self.role_combo = ttk.Combobox(
             role_box,
@@ -75,6 +133,7 @@ class FileRegistryTab(SidebarTab):
             columns=("title", "base_dir", "pattern"),
             show="headings",
             height=5,
+            style="Technical.Treeview",
         )
         self.roles_table.heading("title", text="Role")
         self.roles_table.heading("base_dir", text="Base directory")
@@ -82,19 +141,21 @@ class FileRegistryTab(SidebarTab):
         self.roles_table.column("title", width=180, anchor="w")
         self.roles_table.column("base_dir", width=420, anchor="w")
         self.roles_table.column("pattern", width=220, anchor="w")
-        self.roles_table.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(12, 0))
+        self.roles_table.grid(row=1, column=0, columnspan=2, sticky="nsew", pady=(12, 0))
         self.roles_table.bind("<<TreeviewSelect>>", self._on_role_table_selected)
+        roles_yscroll = ttk.Scrollbar(role_box, orient="vertical", command=self.roles_table.yview)
+        roles_yscroll.grid(row=1, column=2, sticky="ns", pady=(12, 0))
         roles_xscroll = ttk.Scrollbar(role_box, orient="horizontal", command=self.roles_table.xview)
-        roles_xscroll.grid(row=3, column=0, columnspan=2, sticky="ew")
-        self.roles_table.configure(xscrollcommand=roles_xscroll.set)
+        roles_xscroll.grid(row=3, column=0, columnspan=3, sticky="ew")
+        self.roles_table.configure(yscrollcommand=roles_yscroll.set, xscrollcommand=roles_xscroll.set)
         role_actions = ttk.Frame(role_box)
-        role_actions.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(12, 0))
+        role_actions.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(12, 0))
         role_actions.columnconfigure(0, weight=1)
         ttk.Button(role_actions, text="Add file role", command=self._add_file_role).grid(row=0, column=1, padx=(8, 0))
         ttk.Button(role_actions, text="Remove selected role", command=self._remove_selected_role).grid(row=0, column=2, padx=(8, 0))
 
-        pattern_box = ttk.LabelFrame(self.frame, text="Default pattern", padding=12)
-        pattern_box.grid(row=2, column=0, sticky="ew", pady=(12, 0))
+        pattern_box = ttk.LabelFrame(pattern_section, text="Default pattern", padding=12)
+        pattern_box.grid(row=0, column=0, sticky="nsew")
         pattern_box.columnconfigure(1, weight=1)
 
         ttk.Label(pattern_box, text="Base directory template").grid(row=0, column=0, sticky="w", pady=(0, 4))
@@ -121,8 +182,8 @@ class FileRegistryTab(SidebarTab):
             row=4, column=1, sticky="e", pady=(12, 0)
         )
 
-        registry_box = ttk.LabelFrame(self.frame, text="Dataset and TS associations", padding=12)
-        registry_box.grid(row=3, column=0, sticky="nsew", pady=(12, 0))
+        registry_box = ttk.LabelFrame(registry_section, text="Dataset and TS associations", padding=12)
+        registry_box.grid(row=0, column=0, sticky="nsew")
         registry_box.columnconfigure(0, weight=1)
         registry_box.rowconfigure(0, weight=1)
 
@@ -131,6 +192,7 @@ class FileRegistryTab(SidebarTab):
             columns=("ts_name", "path", "source", "note"),
             show="tree headings",
             height=18,
+            style="Technical.Treeview",
         )
         self.registry_tree.heading("#0", text="Dataset / TS")
         self.registry_tree.heading("ts_name", text="TS name")
@@ -160,6 +222,18 @@ class FileRegistryTab(SidebarTab):
         ttk.Button(actions, text="Reset overrides for selected dataset", command=self._reset_dataset_overrides).grid(row=0, column=2, padx=(8, 0))
 
         self._load_current_role()
+
+    def _on_outer_frame_configure(self, _event=None) -> None:
+        self.outer_canvas.configure(scrollregion=self.outer_canvas.bbox("all"))
+
+    def _on_outer_canvas_configure(self, event) -> None:
+        fit_outer_canvas_to_viewport(self.outer_canvas, self.outer_window, self.content, event)
+
+    def _schedule_outer_layout_refresh(self) -> None:
+        self.outer_canvas.after_idle(self._on_outer_frame_configure)
+
+    def on_tab_shown(self) -> None:
+        self.frame.after_idle(self._on_outer_frame_configure)
 
     def _role_config(self) -> FileRoleConfig:
         project = self.current_project or self.app.project
@@ -367,5 +441,16 @@ class FileRegistryTab(SidebarTab):
         self.app.status_var.set(f"Reset overrides for {dataset_name}")
 
     def on_project_loaded(self, project: ProjectData) -> None:
+        project_id = id(project)
+        if self._layout_project_id != project_id:
+            self._layout_project_id = project_id
+            self.section_pane.restore_from_project(project)
         self.current_project = project
         self._load_current_role()
+
+    def sync_to_project(self, project: ProjectData) -> None:
+        self.section_pane.write_to_project(project)
+
+    def reset_window_sizes(self) -> None:
+        self.section_pane.reset_to_defaults()
+        self._schedule_outer_layout_refresh()

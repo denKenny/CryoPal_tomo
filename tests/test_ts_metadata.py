@@ -51,6 +51,7 @@ class TsMetadataCacheTests(unittest.TestCase):
                     "    1.5\n"
                     "    3.0\n"
                     "  </Dose>\n"
+                    "  <AxisAngle>86.6</AxisAngle>\n"
                     "  <CTF>\n"
                     '    <Param Name="CTFResolutionEstimate" Value="7.2" />\n'
                     '    <Param Name="Defocus" Value="2.35" />\n'
@@ -80,6 +81,7 @@ class TsMetadataCacheTests(unittest.TestCase):
             self.assertEqual(metadata.defocus_min, 2.35)
             self.assertEqual(metadata.defocus_max, 2.35)
             self.assertEqual(metadata.ctf_resolution_estimate, 7.2)
+            self.assertEqual(metadata.axis_angle, 86.6)
 
 
 if __name__ == "__main__":

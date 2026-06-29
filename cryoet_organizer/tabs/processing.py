@@ -7,7 +7,7 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
-from cryoet_organizer.dialogs import bind_scrollable_canvas, show_detail_dialog
+from cryoet_organizer.dialogs import bind_scrollable_canvas, fit_outer_canvas_to_viewport, show_detail_dialog
 from cryoet_organizer.environments import environment_titles
 from cryoet_organizer.job_execution import (
     build_slurm_override_metadata,
@@ -19,6 +19,7 @@ from cryoet_organizer.job_execution import (
 )
 from cryoet_organizer.job_defaults import resolve_job_default
 from cryoet_organizer.project import DatasetRecord, JobHistoryEntry, ProjectData
+from cryoet_organizer.resizable_sections import ResizableSectionStack, VerticalSplitPane
 from cryoet_organizer.scheduled_slurm_dialog import CollectiveSlurmSubmissionDialog, ask_scheduled_slurm_mode
 from cryoet_organizer.slurm import SlurmSubmissionResult, find_slurm_profile, render_sbatch_script
 from cryoet_organizer.slurm_override_ui import SlurmOverrideUI
@@ -63,6 +64,17 @@ class ProcessingTab(SidebarTab):
         self._required_param_rows: list[dict[str, object]] = []
         self._advanced_param_rows: list[dict[str, object]] = []
         self.history_entry_refs: dict[str, tuple[int, JobHistoryEntry]] = {}
+        self._layout_project_id: int | None = None
+        self._history_pane_default_height = self.app._scale_pixels(200)
+        self._job_pane_default_height = self.app._scale_pixels(170)
+        self._parameters_pane_default_height = self.app._scale_pixels(580)
+        self._history_pane_minsize = self.app._scale_pixels(180)
+        self._job_pane_minsize = self.app._scale_pixels(150)
+        self._parameters_pane_minsize = self.app._scale_pixels(460)
+        self._command_preview_default_height = self.app._scale_pixels(220)
+        self._parameter_fields_default_height = self.app._scale_pixels(320)
+        self._command_preview_minsize = self.app._scale_pixels(180)
+        self._parameter_fields_minsize = self.app._scale_pixels(260)
 
         self.outer_canvas = tk.Canvas(self.frame, highlightthickness=0)
         self.outer_canvas.grid(row=0, column=0, sticky="nsew")
@@ -72,11 +84,17 @@ class ProcessingTab(SidebarTab):
             command=self.outer_canvas.yview,
         )
         self.outer_scrollbar.grid(row=0, column=1, sticky="ns")
+        self.outer_xscrollbar = ttk.Scrollbar(
+            self.frame,
+            orient="horizontal",
+            command=self.outer_canvas.xview,
+        )
+        self.outer_xscrollbar.grid(row=1, column=0, sticky="ew")
         self.outer_canvas.configure(yscrollcommand=self.outer_scrollbar.set)
+        self.outer_canvas.configure(xscrollcommand=self.outer_xscrollbar.set)
 
         self.content = ttk.Frame(self.outer_canvas, padding=2)
         self.content.columnconfigure(0, weight=1)
-        self.content.rowconfigure(5, weight=1)
         self.outer_window = self.outer_canvas.create_window((0, 0), window=self.content, anchor="nw")
         self.content.bind("<Configure>", self._on_outer_frame_configure)
         self.outer_canvas.bind("<Configure>", self._on_outer_canvas_configure)
@@ -103,8 +121,38 @@ class ProcessingTab(SidebarTab):
         self.dataset_summary = ttk.Label(self.content, text="", wraplength=900, justify="left")
         self.dataset_summary.grid(row=3, column=0, sticky="w", pady=(16, 0))
 
-        self.history_box = ttk.LabelFrame(self.content, text="Job history", padding=12)
-        self.history_box.grid(row=2, column=0, sticky="nsew", pady=(12, 0))
+        self.processing_pane = ResizableSectionStack(
+            self.content,
+            app=self.app,
+            preference_namespace="processing_warp",
+            bottom_spacing=self.app._scale_pixels(140),
+            on_layout_changed=self._schedule_outer_layout_refresh,
+        )
+        self.processing_pane.grid(row=4, column=0, sticky="nsew", pady=(12, 0))
+        self.history_pane_frame = self.processing_pane.add_section(
+            "history",
+            default_height=self._history_pane_default_height,
+            min_height=self._history_pane_minsize,
+        )
+        self.history_pane_frame.columnconfigure(0, weight=1)
+        self.history_pane_frame.rowconfigure(0, weight=1)
+        self.job_pane_frame = self.processing_pane.add_section(
+            "setup",
+            default_height=self._job_pane_default_height,
+            min_height=self._job_pane_minsize,
+        )
+        self.job_pane_frame.columnconfigure(0, weight=1)
+        self.job_pane_frame.rowconfigure(0, weight=1)
+        self.parameters_pane_frame = self.processing_pane.add_section(
+            "parameters",
+            default_height=self._parameters_pane_default_height,
+            min_height=self._parameters_pane_minsize,
+        )
+        self.parameters_pane_frame.columnconfigure(0, weight=1)
+        self.parameters_pane_frame.rowconfigure(0, weight=1)
+
+        self.history_box = ttk.LabelFrame(self.history_pane_frame, text="Job history", padding=12)
+        self.history_box.grid(row=0, column=0, sticky="nsew")
         self.history_box.columnconfigure(0, weight=1)
         self.history_box.rowconfigure(0, weight=1)
 
@@ -113,6 +161,7 @@ class ProcessingTab(SidebarTab):
             columns=("job_name", "timestamp", "action"),
             show="headings",
             height=6,
+            style="Technical.Treeview",
         )
         self.history_table.heading("job_name", text="Job", command=lambda: self._sort_history("job_name"))
         self.history_table.column("job_name", width=240, anchor="w")
@@ -173,8 +222,8 @@ class ProcessingTab(SidebarTab):
         self.history_table.bind("<Double-1>", self._show_selected_history_details)
         self.history_box.grid_remove()
 
-        self.job_box = ttk.LabelFrame(self.content, text="Processing setup", padding=12)
-        self.job_box.grid(row=4, column=0, sticky="ew", pady=(12, 0))
+        self.job_box = ttk.LabelFrame(self.job_pane_frame, text="Processing setup", padding=12)
+        self.job_box.grid(row=0, column=0, sticky="nsew")
         self.job_box.columnconfigure(0, weight=1)
         self.job_box.columnconfigure(1, weight=1)
 
@@ -205,19 +254,37 @@ class ProcessingTab(SidebarTab):
         self.job_hint.grid(row=2, column=0, columnspan=2, sticky="w", pady=(8, 0))
         self.job_box.grid_remove()
 
-        self.parameters_box = ttk.LabelFrame(self.content, text="Job parameters", padding=12)
-        self.parameters_box.grid(row=5, column=0, sticky="nsew", pady=(12, 0))
+        self.parameters_box = ttk.LabelFrame(self.parameters_pane_frame, text="Job parameters", padding=12)
+        self.parameters_box.grid(row=0, column=0, sticky="nsew")
         self.parameters_box.columnconfigure(0, weight=1)
-        self.parameters_box.rowconfigure(2, weight=1)
+        self.parameters_box.rowconfigure(0, weight=1)
 
-        command_header = ttk.Frame(self.parameters_box)
-        command_header.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 8))
+        self.command_parameter_pane = VerticalSplitPane(
+            self.parameters_box,
+            app=self.app,
+            preference_namespace="processing_warp",
+            default_top_height=self._command_preview_default_height,
+            min_top_height=self._command_preview_minsize,
+            min_bottom_height=self._parameter_fields_minsize,
+            resize_parent_by=lambda delta: self.processing_pane.resize_section("parameters", delta),
+            on_layout_changed=self._schedule_outer_layout_refresh,
+        )
+        self.command_parameter_pane.grid(row=0, column=0, sticky="nsew")
+        self.command_pane_frame = self.command_parameter_pane.top_frame()
+        self.command_pane_frame.columnconfigure(0, weight=1)
+        self.command_pane_frame.rowconfigure(0, weight=1)
+        self.parameter_fields_frame = self.command_parameter_pane.bottom_frame()
+        self.parameter_fields_frame.columnconfigure(0, weight=1)
+        self.parameter_fields_frame.rowconfigure(0, weight=1)
+
+        command_box = ttk.LabelFrame(self.command_pane_frame, text="Command preview", padding=12)
+        command_box.grid(row=0, column=0, sticky="nsew")
+        command_box.columnconfigure(0, weight=1)
+        command_box.rowconfigure(3, weight=1)
+
+        command_header = ttk.Frame(command_box)
+        command_header.grid(row=0, column=0, sticky="ew", pady=(0, 8))
         command_header.columnconfigure(0, weight=1)
-        ttk.Label(
-            command_header,
-            text="Command preview",
-            style="Heading.TLabel",
-        ).grid(row=0, column=0, sticky="w")
         ttk.Button(command_header, text="Copy command", command=self._copy_command).grid(
             row=0, column=1, sticky="e", padx=(8, 0)
         )
@@ -228,8 +295,8 @@ class ProcessingTab(SidebarTab):
             row=0, column=3, sticky="e", padx=(8, 0)
         )
 
-        execution_row = ttk.Frame(self.parameters_box)
-        execution_row.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(0, 8))
+        execution_row = ttk.Frame(command_box)
+        execution_row.grid(row=1, column=0, sticky="ew", pady=(0, 8))
         execution_row.columnconfigure(3, weight=1)
         ttk.Label(execution_row, text="Execution").grid(row=0, column=0, sticky="w", padx=(0, 8))
         execution_combo = ttk.Combobox(
@@ -259,28 +326,33 @@ class ProcessingTab(SidebarTab):
         self.slurm_profile_combo.grid(row=0, column=3, sticky="w")
         self.slurm_profile_combo.bind("<<ComboboxSelected>>", lambda _e: self.slurm_overrides_ui.rebuild(preserve_existing=False))
 
-        self.slurm_overrides_frame = ttk.Frame(self.parameters_box)
-        self.slurm_overrides_frame.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(0, 8))
+        self.slurm_overrides_frame = ttk.Frame(command_box)
+        self.slurm_overrides_frame.grid(row=2, column=0, sticky="ew", pady=(0, 8))
         self.slurm_overrides_ui.register_frame(self.slurm_overrides_frame)
 
-        self.command_text = tk.Text(self.parameters_box, height=4, wrap="word", font="TkDefaultFont")
-        self.command_text.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(0, 10))
+        self.command_text = tk.Text(command_box, height=6, wrap="word", font="TkDefaultFont")
+        self.command_text.grid(row=3, column=0, sticky="nsew")
         self.command_text.insert("1.0", "WarpTools")
 
-        self.parameter_canvas = tk.Canvas(self.parameters_box, highlightthickness=0)
-        self.parameter_canvas.grid(row=4, column=0, sticky="nsew")
+        parameter_box = ttk.LabelFrame(self.parameter_fields_frame, text="Parameters", padding=12)
+        parameter_box.grid(row=0, column=0, sticky="nsew")
+        parameter_box.columnconfigure(0, weight=1)
+        parameter_box.rowconfigure(0, weight=1)
+
+        self.parameter_canvas = tk.Canvas(parameter_box, highlightthickness=0)
+        self.parameter_canvas.grid(row=0, column=0, sticky="nsew")
         self.parameter_scrollbar = ttk.Scrollbar(
-            self.parameters_box,
+            parameter_box,
             orient="vertical",
             command=self.parameter_canvas.yview,
         )
-        self.parameter_scrollbar.grid(row=4, column=1, sticky="ns")
+        self.parameter_scrollbar.grid(row=0, column=1, sticky="ns")
         self.parameter_xscrollbar = ttk.Scrollbar(
-            self.parameters_box,
+            parameter_box,
             orient="horizontal",
             command=self.parameter_canvas.xview,
         )
-        self.parameter_xscrollbar.grid(row=5, column=0, sticky="ew")
+        self.parameter_xscrollbar.grid(row=1, column=0, sticky="ew")
         self.parameter_canvas.configure(
             yscrollcommand=self.parameter_scrollbar.set,
             xscrollcommand=self.parameter_xscrollbar.set,
@@ -311,6 +383,7 @@ class ProcessingTab(SidebarTab):
         self.processing_advanced_frame.columnconfigure(0, weight=1)
         self.processing_advanced_button.grid_remove()
         self.processing_advanced_frame.grid_remove()
+        self.processing_pane.grid_remove()
         self.parameters_box.grid_remove()
         self._refresh_slurm_profiles()
 
@@ -318,7 +391,10 @@ class ProcessingTab(SidebarTab):
         self.outer_canvas.configure(scrollregion=self.outer_canvas.bbox("all"))
 
     def _on_outer_canvas_configure(self, event) -> None:
-        self.outer_canvas.itemconfigure(self.outer_window, width=event.width)
+        fit_outer_canvas_to_viewport(self.outer_canvas, self.outer_window, self.content, event)
+
+    def _schedule_outer_layout_refresh(self) -> None:
+        self.outer_canvas.after_idle(self._on_outer_frame_configure)
 
     def _on_parameter_frame_configure(self, _event=None) -> None:
         self.parameter_canvas.configure(scrollregion=self.parameter_canvas.bbox("all"))
@@ -329,6 +405,9 @@ class ProcessingTab(SidebarTab):
     def _scroll_job_view_to_top(self) -> None:
         self.parameter_canvas.yview_moveto(0)
         self.parameter_canvas.xview_moveto(0)
+
+    def on_tab_shown(self) -> None:
+        self.frame.after_idle(self._on_outer_frame_configure)
 
     def _dataset_map(self, project: ProjectData) -> dict[str, DatasetRecord]:
         return {dataset.dataset_name: dataset for dataset in project.datasets}
@@ -342,10 +421,17 @@ class ProcessingTab(SidebarTab):
 
         if self.current_dataset is None:
             self.history_entry_refs = {}
+            self.processing_pane.grid_remove()
+            self.processing_pane.set_section_visible("history", True)
+            self.processing_pane.set_section_visible("setup", True)
+            self.processing_pane.set_section_visible("parameters", False)
             self.history_box.grid_remove()
             return
 
+        self.processing_pane.grid()
         self.history_box.grid()
+        self.processing_pane.set_section_visible("history", True)
+        self.processing_pane.set_section_visible("setup", True)
         entries = [
             (index, entry)
             for index, entry in enumerate(self.current_dataset.job_history)
@@ -672,6 +758,8 @@ class ProcessingTab(SidebarTab):
         )
 
     def sync_to_project(self, project: ProjectData) -> None:
+        self.processing_pane.write_to_project(project)
+        self.command_parameter_pane.write_to_project(project)
         if self.current_dataset is None or self.current_job is None:
             return
 
@@ -1339,11 +1427,13 @@ class ProcessingTab(SidebarTab):
 
         if self.current_job is None:
             self.parameters_box.grid_remove()
+            self.processing_pane.set_section_visible("parameters", False)
             self._suspend_command_preview_updates = False
             self._update_command_preview()
             return
 
         self.parameters_box.grid()
+        self.processing_pane.set_section_visible("parameters", True)
         required_flags: list[WarpToolFlag] = []
         advanced_flags: list[WarpToolFlag] = []
         for flag in self.current_job.flags:
@@ -1413,15 +1503,20 @@ class ProcessingTab(SidebarTab):
         dataset_name = self.dataset_var.get()
         if dataset_name:
             self.current_dataset = self._dataset_map(self.app.project).get(dataset_name)
+            self.processing_pane.grid()
             self.job_box.grid()
+            self.processing_pane.set_section_visible("history", True)
+            self.processing_pane.set_section_visible("setup", True)
             self._refresh_history()
             self._on_group_selected()
             self.dataset_summary.config(text=f"Selected dataset: {dataset_name}")
         else:
             self.current_dataset = None
+            self.processing_pane.grid_remove()
             self.job_box.grid_remove()
             self.history_box.grid_remove()
             self.parameters_box.grid_remove()
+            self.processing_pane.set_section_visible("parameters", False)
             self._set_command_text("WarpTools")
             self.dataset_summary.config(text="")
 
@@ -1443,6 +1538,11 @@ class ProcessingTab(SidebarTab):
             )
 
     def on_project_loaded(self, project: ProjectData) -> None:
+        project_id = id(project)
+        if self._layout_project_id != project_id:
+            self._layout_project_id = project_id
+            self.processing_pane.restore_from_project(project)
+            self.command_parameter_pane.restore_from_project(project)
         dataset_names = [dataset.dataset_name for dataset in project.datasets]
         self.dataset_combo.configure(values=dataset_names)
         self.available_jobs = jobs_by_group()
@@ -1454,9 +1554,11 @@ class ProcessingTab(SidebarTab):
             self.job_var.set("")
             self.current_dataset = None
             self.current_job = None
+            self.processing_pane.grid_remove()
             self.job_box.grid_remove()
             self.history_box.grid_remove()
             self.parameters_box.grid_remove()
+            self.processing_pane.set_section_visible("parameters", False)
             if dataset_names:
                 self.dataset_summary.config(
                     text="Datasets loaded. Choose one above to continue."
@@ -1467,3 +1569,8 @@ class ProcessingTab(SidebarTab):
                 )
         else:
             self._on_dataset_selected()
+
+    def reset_window_sizes(self) -> None:
+        self.processing_pane.reset_to_defaults()
+        self.command_parameter_pane.reset_to_defaults()
+        self._schedule_outer_layout_refresh()

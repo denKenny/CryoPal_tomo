@@ -10,6 +10,7 @@ from cryoet_organizer.preferences import (
 )
 from cryoet_organizer.project import ProjectData
 from cryoet_organizer.project import DatasetRecord
+from cryoet_organizer.resizable_sections import clear_layout_preferences, load_layout_value, save_layout_value
 from cryoet_organizer.thumbnail_cache import effective_thumbnail_source_folder, resolve_thumbnail_cache_dir
 
 
@@ -85,6 +86,36 @@ class PreferencesTests(unittest.TestCase):
         self.assertEqual(
             effective_thumbnail_source_folder(dataset),
             "/real/project/ImportedDS/warp_tiltseries/reconstructions",
+        )
+
+    def test_layout_preferences_are_saved_loaded_and_cleared(self) -> None:
+        project = ProjectData()
+
+        self.assertEqual(
+            load_layout_value(project, "processing_warp", "history", default=200, minimum=120),
+            200,
+        )
+
+        save_layout_value(project, "processing_warp", "history", 275)
+        save_layout_value(project, "gallery", "details", 360, dimension="width")
+
+        self.assertEqual(
+            load_layout_value(project, "processing_warp", "history", default=200, minimum=120),
+            275,
+        )
+        self.assertEqual(
+            load_layout_value(project, "gallery", "details", dimension="width", default=320, minimum=240),
+            360,
+        )
+
+        clear_layout_preferences(project, "processing_warp")
+        self.assertEqual(
+            load_layout_value(project, "processing_warp", "history", default=200, minimum=120),
+            200,
+        )
+        self.assertEqual(
+            load_layout_value(project, "gallery", "details", dimension="width", default=320, minimum=240),
+            360,
         )
 
 

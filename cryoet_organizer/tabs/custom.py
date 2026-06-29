@@ -12,7 +12,7 @@ from cryoet_organizer.custom_jobs import (
     get_project_custom_jobs,
     set_project_custom_jobs,
 )
-from cryoet_organizer.dialogs import bind_scrollable_canvas
+from cryoet_organizer.dialogs import bind_scrollable_canvas, fit_outer_canvas_to_viewport
 from cryoet_organizer.environments import environment_titles
 from cryoet_organizer.file_resolver import resolve_dataset_file
 from cryoet_organizer.file_resolver import file_role_order, role_title
@@ -27,6 +27,7 @@ from cryoet_organizer.project import (
 )
 from cryoet_organizer.slurm import SlurmSubmissionResult
 from cryoet_organizer.slurm_override_ui import SlurmOverrideUI
+from cryoet_organizer.resizable_sections import ResizableSectionStack
 from cryoet_organizer.tabs.base import SidebarTab
 
 
@@ -90,9 +91,10 @@ class CustomTab(SidebarTab):
 
     def build(self) -> None:
         self.frame.columnconfigure(0, weight=1)
-        self.frame.rowconfigure(2, weight=1)
+        self.frame.rowconfigure(0, weight=1)
         self.jobs: list[CustomJobDefinition] = []
         self.current_job: CustomJobDefinition | None = None
+        self._layout_project_id: int | None = None
         self.job_type_var = tk.StringVar(value="Build custom job type...")
         self.builder_name_var = tk.StringVar()
         self.builder_validation_var = tk.StringVar()
@@ -111,8 +113,33 @@ class CustomTab(SidebarTab):
         self.runtime_state: dict[str, dict[str, tk.Variable]] = {}
         self.parameter_rows: list[dict[str, tk.Variable]] = []
 
+        self._builder_meta_default_height = self.app._scale_pixels(260)
+        self._builder_params_default_height = self.app._scale_pixels(420)
+        self._runtime_command_default_height = self.app._scale_pixels(250)
+        self._runtime_ts_default_height = self.app._scale_pixels(200)
+        self._runtime_params_default_height = self.app._scale_pixels(420)
+        self._builder_meta_minsize = self.app._scale_pixels(220)
+        self._builder_params_minsize = self.app._scale_pixels(300)
+        self._runtime_command_minsize = self.app._scale_pixels(210)
+        self._runtime_ts_minsize = self.app._scale_pixels(170)
+        self._runtime_params_minsize = self.app._scale_pixels(320)
+
+        self.outer_canvas = tk.Canvas(self.frame, highlightthickness=0)
+        self.outer_canvas.grid(row=0, column=0, sticky="nsew")
+        self.outer_scrollbar = ttk.Scrollbar(self.frame, orient="vertical", command=self.outer_canvas.yview)
+        self.outer_scrollbar.grid(row=0, column=1, sticky="ns")
+        self.outer_xscrollbar = ttk.Scrollbar(self.frame, orient="horizontal", command=self.outer_canvas.xview)
+        self.outer_xscrollbar.grid(row=1, column=0, sticky="ew")
+        self.outer_canvas.configure(yscrollcommand=self.outer_scrollbar.set, xscrollcommand=self.outer_xscrollbar.set)
+
+        self.content = ttk.Frame(self.outer_canvas, padding=2)
+        self.content.columnconfigure(0, weight=1)
+        self.outer_window = self.outer_canvas.create_window((0, 0), window=self.content, anchor="nw")
+        self.content.bind("<Configure>", self._on_outer_frame_configure)
+        self.outer_canvas.bind("<Configure>", self._on_outer_canvas_configure)
+
         intro = ttk.Label(
-            self.frame,
+            self.content,
             text=(
                 "This section is for custom job types in CryoPal_tomo. "
                 "To create a new one, select 'Build custom job type...'."
@@ -122,7 +149,7 @@ class CustomTab(SidebarTab):
         )
         intro.grid(row=0, column=0, sticky="ew")
 
-        selector = ttk.LabelFrame(self.frame, text="Job type", padding=12)
+        selector = ttk.LabelFrame(self.content, text="Job type", padding=12)
         selector.grid(row=1, column=0, sticky="ew", pady=(12, 0))
         selector.columnconfigure(1, weight=1)
         ttk.Label(selector, text="Select job type").grid(row=0, column=0, sticky="w", pady=(0, 4))
@@ -130,15 +157,68 @@ class CustomTab(SidebarTab):
         self.job_combo.grid(row=0, column=1, sticky="ew")
         self.job_combo.bind("<<ComboboxSelected>>", self._on_job_selection_changed)
 
-        self.builder_frame = ttk.Frame(self.frame)
+        self.builder_frame = ttk.Frame(self.content)
         self.builder_frame.grid(row=2, column=0, sticky="nsew", pady=(12, 0))
         self.builder_frame.columnconfigure(0, weight=1)
-        self.builder_frame.rowconfigure(1, weight=1)
+        self.builder_frame.rowconfigure(0, weight=1)
 
-        self.runtime_frame = ttk.Frame(self.frame)
+        self.builder_pane = ResizableSectionStack(
+            self.builder_frame,
+            app=self.app,
+            preference_namespace="custom_builder",
+            bottom_spacing=self.app._scale_pixels(120),
+            on_layout_changed=self._schedule_outer_layout_refresh,
+        )
+        self.builder_pane.grid(row=0, column=0, sticky="nsew")
+        self.builder_meta_frame = self.builder_pane.add_section(
+            "definition",
+            default_height=self._builder_meta_default_height,
+            min_height=self._builder_meta_minsize,
+        )
+        self.builder_meta_frame.columnconfigure(0, weight=1)
+        self.builder_meta_frame.rowconfigure(0, weight=1)
+        self.builder_params_frame = self.builder_pane.add_section(
+            "parameters",
+            default_height=self._builder_params_default_height,
+            min_height=self._builder_params_minsize,
+        )
+        self.builder_params_frame.columnconfigure(0, weight=1)
+        self.builder_params_frame.rowconfigure(0, weight=1)
+
+        self.runtime_frame = ttk.Frame(self.content)
         self.runtime_frame.grid(row=2, column=0, sticky="nsew", pady=(12, 0))
         self.runtime_frame.columnconfigure(0, weight=1)
-        self.runtime_frame.rowconfigure(2, weight=1)
+        self.runtime_frame.rowconfigure(0, weight=1)
+
+        self.runtime_pane = ResizableSectionStack(
+            self.runtime_frame,
+            app=self.app,
+            preference_namespace="custom_runtime",
+            bottom_spacing=self.app._scale_pixels(140),
+            on_layout_changed=self._schedule_outer_layout_refresh,
+        )
+        self.runtime_pane.grid(row=0, column=0, sticky="nsew")
+        self.runtime_command_pane = self.runtime_pane.add_section(
+            "command",
+            default_height=self._runtime_command_default_height,
+            min_height=self._runtime_command_minsize,
+        )
+        self.runtime_command_pane.columnconfigure(0, weight=1)
+        self.runtime_command_pane.rowconfigure(0, weight=1)
+        self.runtime_ts_pane = self.runtime_pane.add_section(
+            "ts_list",
+            default_height=self._runtime_ts_default_height,
+            min_height=self._runtime_ts_minsize,
+        )
+        self.runtime_ts_pane.columnconfigure(0, weight=1)
+        self.runtime_ts_pane.rowconfigure(0, weight=1)
+        self.runtime_params_pane = self.runtime_pane.add_section(
+            "parameters",
+            default_height=self._runtime_params_default_height,
+            min_height=self._runtime_params_minsize,
+        )
+        self.runtime_params_pane.columnconfigure(0, weight=1)
+        self.runtime_params_pane.rowconfigure(0, weight=1)
 
         self._build_builder_ui()
         self._build_runtime_ui()
@@ -146,8 +226,8 @@ class CustomTab(SidebarTab):
         self._show_builder()
 
     def _build_builder_ui(self) -> None:
-        builder_meta = ttk.LabelFrame(self.builder_frame, text="Build custom job type", padding=12)
-        builder_meta.grid(row=0, column=0, sticky="ew")
+        builder_meta = ttk.LabelFrame(self.builder_meta_frame, text="Build custom job type", padding=12)
+        builder_meta.grid(row=0, column=0, sticky="nsew")
         builder_meta.columnconfigure(1, weight=1)
 
         ttk.Label(builder_meta, text="Job name").grid(row=0, column=0, sticky="w", pady=(0, 4))
@@ -167,7 +247,7 @@ class CustomTab(SidebarTab):
         self.builder_description_text.grid(row=2, column=1, sticky="ew", pady=(0, 8))
 
         ttk.Label(builder_meta, text="Command template").grid(row=3, column=0, sticky="nw", pady=(0, 4))
-        self.builder_command_text = tk.Text(builder_meta, height=3, wrap="word")
+        self.builder_command_text = tk.Text(builder_meta, height=3, wrap="word", font="TkDefaultFont")
         self.builder_command_text.grid(row=3, column=1, sticky="ew")
 
         ttk.Label(
@@ -185,8 +265,8 @@ class CustomTab(SidebarTab):
             justify="left",
         ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(8, 0))
 
-        params_box = ttk.LabelFrame(self.builder_frame, text="Custom parameters", padding=12)
-        params_box.grid(row=1, column=0, sticky="nsew", pady=(12, 0))
+        params_box = ttk.LabelFrame(self.builder_params_frame, text="Custom parameters", padding=12)
+        params_box.grid(row=0, column=0, sticky="nsew")
         params_box.columnconfigure(0, weight=1)
         params_box.rowconfigure(0, weight=1)
 
@@ -204,7 +284,7 @@ class CustomTab(SidebarTab):
         self.params_window = self.params_canvas.create_window((0, 0), window=self.params_rows_frame, anchor="nw")
         bind_scrollable_canvas(self.params_canvas, self.params_window, self.params_rows_frame, allow_horizontal=True)
 
-        builder_actions = ttk.Frame(self.builder_frame)
+        builder_actions = ttk.Frame(params_box)
         builder_actions.grid(row=2, column=0, sticky="ew", pady=(12, 0))
         builder_actions.columnconfigure(0, weight=1)
         ttk.Button(builder_actions, text="Add parameter row", command=self._add_builder_row).grid(row=0, column=0, sticky="w")
@@ -213,25 +293,26 @@ class CustomTab(SidebarTab):
         self._add_builder_row()
 
     def _build_runtime_ui(self) -> None:
-        self.runtime_command_text = self._build_command_section(self.runtime_frame, 0)
+        self.runtime_command_text = self._build_command_section(self.runtime_command_pane, 0)
 
-        self.ts_list_frame = ttk.LabelFrame(self.runtime_frame, text="TS processing list", padding=12)
-        self.ts_list_frame.grid(row=1, column=0, sticky="ew", pady=(12, 0))
+        self.ts_list_frame = ttk.LabelFrame(self.runtime_ts_pane, text="TS processing list", padding=12)
+        self.ts_list_frame.grid(row=0, column=0, sticky="nsew")
         self.ts_list_frame.columnconfigure(0, weight=1)
+        self.ts_list_frame.rowconfigure(0, weight=1)
         self.ts_table = ttk.Treeview(self.ts_list_frame, columns=("dataset_name", "ts_name"), show="headings", height=5)
         self.ts_table.heading("dataset_name", text="Dataset")
         self.ts_table.heading("ts_name", text="TS")
         self.ts_table.column("dataset_name", width=220, anchor="w")
         self.ts_table.column("ts_name", width=260, anchor="w")
-        self.ts_table.grid(row=0, column=0, sticky="ew")
+        self.ts_table.grid(row=0, column=0, sticky="nsew")
         ts_scroll = ttk.Scrollbar(self.ts_list_frame, orient="vertical", command=self.ts_table.yview)
         ts_scroll.grid(row=0, column=1, sticky="ns")
         self.ts_table.configure(yscrollcommand=ts_scroll.set)
         self.ts_summary_var = tk.StringVar(value="0 TS in global processing list")
         ttk.Label(self.ts_list_frame, textvariable=self.ts_summary_var).grid(row=1, column=0, sticky="w", pady=(8, 0))
 
-        self.runtime_params_box = ttk.LabelFrame(self.runtime_frame, text="Custom job parameters", padding=12)
-        self.runtime_params_box.grid(row=2, column=0, sticky="nsew", pady=(12, 0))
+        self.runtime_params_box = ttk.LabelFrame(self.runtime_params_pane, text="Custom job parameters", padding=12)
+        self.runtime_params_box.grid(row=0, column=0, sticky="nsew")
         self.runtime_params_box.columnconfigure(0, weight=1)
         self.runtime_params_box.rowconfigure(0, weight=1)
         self.runtime_canvas = tk.Canvas(self.runtime_params_box, highlightthickness=0)
@@ -252,50 +333,67 @@ class CustomTab(SidebarTab):
             allow_horizontal=True,
         )
 
+    def _on_outer_frame_configure(self, _event=None) -> None:
+        self.outer_canvas.configure(scrollregion=self.outer_canvas.bbox("all"))
+
+    def _on_outer_canvas_configure(self, event) -> None:
+        fit_outer_canvas_to_viewport(self.outer_canvas, self.outer_window, self.content, event)
+
+    def _schedule_outer_layout_refresh(self) -> None:
+        self.outer_canvas.after_idle(self._on_outer_frame_configure)
+
+    def on_tab_shown(self) -> None:
+        self.frame.after_idle(self._on_outer_frame_configure)
+
     def _build_command_section(self, parent, row: int):
         box = ttk.LabelFrame(parent, text="Command preview", padding=12)
-        box.grid(row=row, column=0, sticky="ew")
+        box.grid(row=row, column=0, sticky="nsew")
         box.columnconfigure(0, weight=1)
+        box.rowconfigure(3, weight=1)
         actions = ttk.Frame(box)
         actions.grid(row=0, column=0, sticky="ew", pady=(0, 8))
         actions.columnconfigure(0, weight=1)
-        ttk.Label(actions, text="Execution").grid(row=0, column=1, sticky="e", padx=(0, 8))
+        ttk.Button(actions, text="Copy command", command=self._copy_commands).grid(row=0, column=1, padx=(8, 0))
+        ttk.Button(actions, text="Run command", command=self._run_commands).grid(row=0, column=2, padx=(8, 0))
+        abort_button = ttk.Button(actions, text="Abort", command=self.app.abort_running_commands, state="disabled")
+        abort_button.grid(row=0, column=3, padx=(8, 0))
+        self.app.attach_abort_button(abort_button)
+
+        execution_row = ttk.Frame(box)
+        execution_row.grid(row=1, column=0, sticky="ew", pady=(0, 8))
+        execution_row.columnconfigure(3, weight=1)
+        ttk.Label(execution_row, text="Execution").grid(row=0, column=0, sticky="w", padx=(0, 8))
         self.execution_mode_combo = ttk.Combobox(
-            actions,
+            execution_row,
             textvariable=self.execution_mode_var,
             state="readonly",
             values=("Run locally", "Submit to Slurm"),
             width=18,
         )
-        self.execution_mode_combo.grid(row=0, column=2, sticky="e")
+        self.execution_mode_combo.grid(row=0, column=1, sticky="w")
         self.execution_mode_combo.bind("<<ComboboxSelected>>", lambda _event: self._toggle_slurm_controls())
-        self.execution_target_label = ttk.Label(actions, text="Select environment")
-        self.execution_target_label.grid(row=0, column=3, sticky="e", padx=(12, 8))
+        self.execution_target_label = ttk.Label(execution_row, text="Select environment")
+        self.execution_target_label.grid(row=0, column=2, sticky="e", padx=(12, 8))
         self.environment_combo = ttk.Combobox(
-            actions,
+            execution_row,
             textvariable=self.environment_var,
             state="readonly",
             width=18,
         )
-        self.environment_combo.grid(row=0, column=4, sticky="e")
+        self.environment_combo.grid(row=0, column=3, sticky="w")
         self.slurm_profile_combo = ttk.Combobox(
-            actions,
+            execution_row,
             textvariable=self.slurm_profile_var,
             state="disabled",
             width=18,
         )
-        self.slurm_profile_combo.grid(row=0, column=4, sticky="e")
+        self.slurm_profile_combo.grid(row=0, column=3, sticky="w")
         self.slurm_profile_combo.bind("<<ComboboxSelected>>", lambda _event: self.slurm_overrides_ui.rebuild(preserve_existing=False))
-        ttk.Button(actions, text="Copy command", command=self._copy_commands).grid(row=0, column=5, padx=(8, 0))
-        ttk.Button(actions, text="Run command", command=self._run_commands).grid(row=0, column=6, padx=(8, 0))
-        abort_button = ttk.Button(actions, text="Abort", command=self.app.abort_running_commands, state="disabled")
-        abort_button.grid(row=0, column=7, padx=(8, 0))
-        self.app.attach_abort_button(abort_button)
         self.slurm_overrides_frame = ttk.Frame(box)
-        self.slurm_overrides_frame.grid(row=1, column=0, sticky="ew", pady=(0, 8))
+        self.slurm_overrides_frame.grid(row=2, column=0, sticky="ew", pady=(0, 8))
         self.slurm_overrides_ui.register_frame(self.slurm_overrides_frame)
-        text = tk.Text(box, height=10, wrap="word", font="TkDefaultFont")
-        text.grid(row=2, column=0, sticky="ew")
+        text = tk.Text(box, height=6, wrap="word", font="TkDefaultFont")
+        text.grid(row=3, column=0, sticky="nsew")
         self._toggle_slurm_controls()
         return text
 
@@ -468,10 +566,12 @@ class CustomTab(SidebarTab):
     def _show_builder(self) -> None:
         self.runtime_frame.grid_remove()
         self.builder_frame.grid()
+        self._schedule_outer_layout_refresh()
 
     def _show_runtime(self) -> None:
         self.builder_frame.grid_remove()
         self.runtime_frame.grid()
+        self._schedule_outer_layout_refresh()
 
     def _scroll_active_view_to_top(self, *, builder: bool = False) -> None:
         if builder:
@@ -524,10 +624,7 @@ class CustomTab(SidebarTab):
         self._refresh_ts_table()
         row = 0
         has_ts_inputs = any(parameter.widget.startswith("ts_") for parameter in job.parameters)
-        if has_ts_inputs:
-            self.ts_list_frame.grid()
-        else:
-            self.ts_list_frame.grid_remove()
+        self.runtime_pane.set_section_visible("ts_list", has_ts_inputs)
 
         for parameter in job.parameters:
             state: dict[str, tk.Variable] = {}
@@ -839,19 +936,35 @@ class CustomTab(SidebarTab):
         return payload
 
     def _copy_commands(self) -> None:
-        commands, errors = self._build_commands()
-        if errors:
-            messagebox.showerror("Cannot copy commands", "\n".join(errors))
-            return
-        if not commands:
+        preview_commands = [
+            line.strip()
+            for line in self.runtime_command_text.get("1.0", "end").splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        ]
+        if not preview_commands:
             messagebox.showinfo("No commands", "No commands available for the selected custom job.")
             return
         self.frame.clipboard_clear()
-        self.frame.clipboard_append("\n".join(command for _dataset, _ts, command in commands))
+        self.frame.clipboard_append("\n".join(preview_commands))
         self.app.status_var.set("Custom commands copied to clipboard")
 
     def _run_commands(self) -> None:
         commands, errors = self._build_commands()
+        preview_commands = [
+            line.strip()
+            for line in self.runtime_command_text.get("1.0", "end").splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        ]
+        if preview_commands:
+            overridden: list[tuple[str, str, str]] = []
+            for index, line in enumerate(preview_commands):
+                if index < len(commands):
+                    dataset_name, ts_name, _command = commands[index]
+                    overridden.append((dataset_name, ts_name, line))
+                else:
+                    overridden.append(("", "", line))
+            commands = overridden
+            errors = []
         if errors:
             if self.app.is_debug_mode_enabled():
                 self.app.debug_log(
@@ -944,6 +1057,12 @@ class CustomTab(SidebarTab):
         self.app.status_var.set(f"{mode} custom job for {command_count} command(s)")
 
     def on_project_loaded(self, _project) -> None:
+        project = self.app.project
+        project_id = id(project)
+        if self._layout_project_id != project_id:
+            self._layout_project_id = project_id
+            self.builder_pane.restore_from_project(project)
+            self.runtime_pane.restore_from_project(project)
         self._refresh_job_options()
         self._refresh_slurm_profiles()
         self._refresh_ts_table()
@@ -959,3 +1078,13 @@ class CustomTab(SidebarTab):
                 self.current_job = refreshed
                 self._build_runtime_form(refreshed)
                 self._scroll_active_view_to_top()
+        self._schedule_outer_layout_refresh()
+
+    def sync_to_project(self, project) -> None:
+        self.builder_pane.write_to_project(project)
+        self.runtime_pane.write_to_project(project)
+
+    def reset_window_sizes(self) -> None:
+        self.builder_pane.reset_to_defaults()
+        self.runtime_pane.reset_to_defaults()
+        self._schedule_outer_layout_refresh()

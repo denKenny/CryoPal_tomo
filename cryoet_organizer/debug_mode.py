@@ -82,7 +82,7 @@ class DebugLogWindow:
             body,
             wrap="word",
             state="disabled",
-            font=("TkFixedFont", 10),
+            font="TkDefaultFont",
             background="#11161d",
             foreground="#dce4ef",
             insertbackground="#dce4ef",

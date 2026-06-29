@@ -399,7 +399,10 @@ def collect_ts_metadata(
 
     axis_candidates: list[float] = []
     if xml_payload:
-        xml_axis = _safe_float(xml_payload.get("attributes", {}).get("AxisAngle"))
+        xml_axis = (
+            _safe_float(xml_payload.get("attributes", {}).get("AxisAngle"))
+            or _safe_float(xml_payload.get("axis_angle", [""])[0] if xml_payload.get("axis_angle") else "")
+        )
         if xml_axis is not None:
             axis_candidates.append(xml_axis)
     if tomostar_payload:

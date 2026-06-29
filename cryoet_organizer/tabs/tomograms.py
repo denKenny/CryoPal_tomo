@@ -8,7 +8,7 @@ import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
-from cryoet_organizer.dialogs import bind_scrollable_canvas, show_detail_dialog
+from cryoet_organizer.dialogs import bind_scrollable_canvas, fit_outer_canvas_to_viewport, show_detail_dialog
 from cryoet_organizer.environments import environment_titles
 from cryoet_organizer.file_resolver import resolve_dataset_file
 from cryoet_organizer.job_execution import (
@@ -28,6 +28,7 @@ from cryoet_organizer.project import (
     dataset_ts_names,
     find_dataset_for_ts_name,
 )
+from cryoet_organizer.resizable_sections import ResizableSectionStack, VerticalSplitPane
 from cryoet_organizer.scheduled_slurm_dialog import CollectiveSlurmSubmissionDialog, ask_scheduled_slurm_mode
 from cryoet_organizer.slurm import SlurmSubmissionResult, find_slurm_profile, render_sbatch_script, wait_for_slurm_job
 from cryoet_organizer.slurm_override_ui import SlurmOverrideUI
@@ -69,6 +70,7 @@ class TomogramsTab(SidebarTab):
         self.execution_target_labels: list[ttk.Label] = []
         self.slurm_override_frames: list[ttk.Frame] = []
         self.advanced_visible_vars: dict[str, tk.BooleanVar] = {}
+        self.job_content_panes: dict[str, VerticalSplitPane] = {}
 
         self.cryolithe_model_dir_var = tk.StringVar()
         self.cryolithe_save_dir_var = tk.StringVar()
@@ -160,17 +162,27 @@ class TomogramsTab(SidebarTab):
         self.membrain_test_time_augmentation_var = tk.BooleanVar(value=True)
         self.membrain_segmentation_threshold_var = tk.StringVar()
         self.membrain_sliding_window_size_var = tk.StringVar()
+        self._workflow_list_pane_default_height = self.app._scale_pixels(220)
+        self._workflow_jobtype_pane_default_height = self.app._scale_pixels(140)
+        self._workflow_bottom_pane_default_height = self.app._scale_pixels(720)
+        self._workflow_list_pane_minsize = self.app._scale_pixels(190)
+        self._workflow_jobtype_pane_minsize = self.app._scale_pixels(120)
+        self._workflow_bottom_pane_minsize = self.app._scale_pixels(560)
+        self._job_command_pane_default_height = self.app._scale_pixels(220)
+        self._job_parameter_pane_default_height = self.app._scale_pixels(420)
+        self._job_command_pane_minsize = self.app._scale_pixels(180)
+        self._job_parameter_pane_minsize = self.app._scale_pixels(360)
 
         self.outer_canvas = tk.Canvas(self.frame, highlightthickness=0)
         self.outer_canvas.grid(row=0, column=0, sticky="nsew")
         self.outer_scrollbar = ttk.Scrollbar(self.frame, orient="vertical", command=self.outer_canvas.yview)
         self.outer_scrollbar.grid(row=0, column=1, sticky="ns")
-        self.outer_canvas.configure(yscrollcommand=self.outer_scrollbar.set)
+        self.outer_xscrollbar = ttk.Scrollbar(self.frame, orient="horizontal", command=self.outer_canvas.xview)
+        self.outer_xscrollbar.grid(row=1, column=0, sticky="ew")
+        self.outer_canvas.configure(yscrollcommand=self.outer_scrollbar.set, xscrollcommand=self.outer_xscrollbar.set)
 
         self.content = ttk.Frame(self.outer_canvas, padding=2)
         self.content.columnconfigure(0, weight=1)
-        self.content.rowconfigure(1, weight=0, minsize=180)
-        self.content.rowconfigure(3, weight=1)
         self.outer_window = self.outer_canvas.create_window((0, 0), window=self.content, anchor="nw")
         self.content.bind("<Configure>", self._on_outer_frame_configure)
         self.outer_canvas.bind("<Configure>", self._on_outer_canvas_configure)
@@ -203,8 +215,38 @@ class TomogramsTab(SidebarTab):
             row=0, column=3, sticky="e"
         )
 
-        list_box = ttk.LabelFrame(self.content, text="TS processing list", padding=12)
-        list_box.grid(row=1, column=0, sticky="nsew", pady=(12, 0))
+        self.workflow_pane = ResizableSectionStack(
+            self.content,
+            app=self.app,
+            preference_namespace="processing_ts",
+            bottom_spacing=self.app._scale_pixels(160),
+            on_layout_changed=self._schedule_outer_layout_refresh,
+        )
+        self.workflow_pane.grid(row=1, column=0, sticky="nsew", pady=(12, 0))
+        self.workflow_list_frame = self.workflow_pane.add_section(
+            "ts_list",
+            default_height=self._workflow_list_pane_default_height,
+            min_height=self._workflow_list_pane_minsize,
+        )
+        self.workflow_list_frame.columnconfigure(0, weight=1)
+        self.workflow_list_frame.rowconfigure(0, weight=1)
+        self.workflow_jobtype_frame = self.workflow_pane.add_section(
+            "job_type",
+            default_height=self._workflow_jobtype_pane_default_height,
+            min_height=self._workflow_jobtype_pane_minsize,
+        )
+        self.workflow_jobtype_frame.columnconfigure(0, weight=1)
+        self.workflow_jobtype_frame.rowconfigure(0, weight=1)
+        self.workflow_bottom_frame = self.workflow_pane.add_section(
+            "content",
+            default_height=self._workflow_bottom_pane_default_height,
+            min_height=self._workflow_bottom_pane_minsize,
+        )
+        self.workflow_bottom_frame.columnconfigure(0, weight=1)
+        self.workflow_bottom_frame.rowconfigure(0, weight=1)
+
+        list_box = ttk.LabelFrame(self.workflow_list_frame, text="TS processing list", padding=12)
+        list_box.grid(row=0, column=0, sticky="nsew")
         list_box.columnconfigure(0, weight=1)
         list_box.rowconfigure(0, weight=1)
 
@@ -238,8 +280,8 @@ class TomogramsTab(SidebarTab):
         self.selection_summary = ttk.Label(list_box, text="0 TS in list")
         self.selection_summary.grid(row=2, column=0, sticky="w", pady=(8, 0))
 
-        jobs_header = ttk.LabelFrame(self.content, text="Job type", padding=12)
-        jobs_header.grid(row=2, column=0, sticky="ew", pady=(12, 0))
+        jobs_header = ttk.LabelFrame(self.workflow_jobtype_frame, text="Job type", padding=12)
+        jobs_header.grid(row=0, column=0, sticky="nsew")
         jobs_header.columnconfigure(1, weight=1)
         ttk.Label(jobs_header, text="Select job type").grid(row=0, column=0, sticky="w", pady=(0, 4))
         self.job_type_combo = ttk.Combobox(
@@ -255,21 +297,19 @@ class TomogramsTab(SidebarTab):
         self.job_type_combo.grid(row=0, column=1, sticky="ew")
         self.job_type_combo.bind("<<ComboboxSelected>>", self._on_job_type_changed)
 
-        self.cryolithe_frame = ttk.Frame(self.content)
-        self.cryolithe_frame.grid(row=3, column=0, sticky="nsew", pady=(12, 0))
+        self.cryolithe_frame = ttk.Frame(self.workflow_bottom_frame)
+        self.cryolithe_frame.grid(row=0, column=0, sticky="nsew")
         self.cryolithe_frame.columnconfigure(0, weight=1)
-        self.cryolithe_frame.rowconfigure(1, weight=1)
+        self.cryolithe_frame.rowconfigure(0, weight=1)
 
-        self.cryolithe_command_text = self._build_command_section(
+        self.cryolithe_command_text, self.cryolithe_params = self._create_job_sections(
             self.cryolithe_frame,
-            0,
-            "Command preview",
+            "cryolithe",
             self._copy_cryolithe_commands,
             self._schedule_cryolithe_commands,
             self._run_cryolithe_commands,
+            "CryoLithe parameters",
         )
-
-        self.cryolithe_params = self._create_scrollable_group(self.cryolithe_frame, 1, "CryoLithe parameters")
         ttk.Label(self.cryolithe_params, text="Save directory").grid(row=0, column=0, sticky="w", pady=(0, 4))
         save_row = ttk.Frame(self.cryolithe_params)
         save_row.grid(row=0, column=1, sticky="ew", pady=(0, 8))
@@ -310,57 +350,34 @@ class TomogramsTab(SidebarTab):
             justify="left",
         ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(10, 0))
 
-        self.pytom_frame = ttk.Frame(self.content)
-        self.pytom_frame.grid(row=3, column=0, sticky="nsew", pady=(12, 0))
+        self.pytom_frame = ttk.Frame(self.workflow_bottom_frame)
+        self.pytom_frame.grid(row=0, column=0, sticky="nsew")
         self.pytom_frame.columnconfigure(0, weight=1)
-        self.pytom_frame.rowconfigure(1, weight=1)
+        self.pytom_frame.rowconfigure(0, weight=1)
 
-        self.pytom_command_text = self._build_command_section(
+        self.pytom_command_text, self.pytom_params = self._create_job_sections(
             self.pytom_frame,
-            0,
-            "Command preview",
+            "pytom",
             self._copy_pytom_commands,
             self._schedule_pytom_commands,
             self._run_pytom_commands,
-        )
-
-        pytom_params_box = ttk.LabelFrame(self.pytom_frame, text="PyTom parameters", padding=12)
-        pytom_params_box.grid(row=1, column=0, sticky="nsew", pady=(12, 0))
-        pytom_params_box.columnconfigure(0, weight=1)
-        pytom_params_box.rowconfigure(0, weight=1)
-
-        self.pytom_canvas = tk.Canvas(pytom_params_box, highlightthickness=0)
-        self.pytom_canvas.grid(row=0, column=0, sticky="nsew")
-        pytom_scroll = ttk.Scrollbar(pytom_params_box, orient="vertical", command=self.pytom_canvas.yview)
-        pytom_scroll.grid(row=0, column=1, sticky="ns")
-        self.pytom_canvas.configure(yscrollcommand=pytom_scroll.set)
-        self.pytom_params = ttk.Frame(self.pytom_canvas)
-        self.pytom_params.columnconfigure(1, weight=1)
-        self.pytom_window = self.pytom_canvas.create_window((0, 0), window=self.pytom_params, anchor="nw")
-        self.pytom_params.bind(
-            "<Configure>", lambda _event: self.pytom_canvas.configure(scrollregion=self.pytom_canvas.bbox("all"))
-        )
-        self.pytom_canvas.bind(
-            "<Configure>",
-            lambda event: self.pytom_canvas.itemconfigure(self.pytom_window, width=event.width),
+            "PyTom parameters",
         )
         self._build_pytom_parameter_form()
 
-        self.extract_frame = ttk.Frame(self.content)
-        self.extract_frame.grid(row=3, column=0, sticky="nsew", pady=(12, 0))
+        self.extract_frame = ttk.Frame(self.workflow_bottom_frame)
+        self.extract_frame.grid(row=0, column=0, sticky="nsew")
         self.extract_frame.columnconfigure(0, weight=1)
-        self.extract_frame.rowconfigure(1, weight=1)
+        self.extract_frame.rowconfigure(0, weight=1)
 
-        self.extract_command_text = self._build_command_section(
+        self.extract_command_text, self.extract_params = self._create_job_sections(
             self.extract_frame,
-            0,
-            "Command preview",
+            "extract",
             self._copy_extract_commands,
             self._schedule_extract_commands,
             self._run_extract_commands,
+            "PyTom extract parameters",
         )
-
-        self.extract_params = self._create_scrollable_group(self.extract_frame, 1, "PyTom extract parameters")
 
         self._add_path_row(
             self.extract_params,
@@ -428,21 +445,19 @@ class TomogramsTab(SidebarTab):
             command=self._update_extract_preview,
         ).grid(row=8, column=0, columnspan=2, sticky="w", pady=(0, 8))
 
-        self.slabify_frame = ttk.Frame(self.content)
-        self.slabify_frame.grid(row=3, column=0, sticky="nsew", pady=(12, 0))
+        self.slabify_frame = ttk.Frame(self.workflow_bottom_frame)
+        self.slabify_frame.grid(row=0, column=0, sticky="nsew")
         self.slabify_frame.columnconfigure(0, weight=1)
-        self.slabify_frame.rowconfigure(1, weight=1)
+        self.slabify_frame.rowconfigure(0, weight=1)
 
-        self.slabify_command_text = self._build_command_section(
+        self.slabify_command_text, self.slabify_params = self._create_job_sections(
             self.slabify_frame,
-            0,
-            "Command preview",
+            "slabify",
             self._copy_slabify_commands,
             self._schedule_slabify_commands,
             self._run_slabify_commands,
+            "Slabify parameters",
         )
-
-        self.slabify_params = self._create_scrollable_group(self.slabify_frame, 1, "Slabify parameters")
         ttk.Checkbutton(
             self.slabify_params,
             text="Input directory manually",
@@ -502,8 +517,8 @@ class TomogramsTab(SidebarTab):
         self._add_text_row(slabify_advanced, 13, "Percentile", self.slabify_percentile_var)
         self._add_text_row(slabify_advanced, 14, "Seed", self.slabify_seed_var)
 
-        self.history_frame = ttk.Frame(self.content)
-        self.history_frame.grid(row=3, column=0, sticky="nsew", pady=(12, 0))
+        self.history_frame = ttk.Frame(self.workflow_bottom_frame)
+        self.history_frame.grid(row=0, column=0, sticky="nsew")
         self.history_frame.columnconfigure(0, weight=1)
         self.history_frame.rowconfigure(1, weight=1)
 
@@ -548,7 +563,6 @@ class TomogramsTab(SidebarTab):
         history_scroll = ttk.Scrollbar(history_box, orient="vertical", command=self.history_table.yview)
         history_scroll.grid(row=0, column=1, sticky="ns")
         self.history_table.configure(yscrollcommand=history_scroll.set)
-
         history_actions = ttk.Frame(history_box)
         history_actions.grid(row=1, column=0, sticky="ew", pady=(8, 0))
         history_actions.columnconfigure(4, weight=1)
@@ -582,21 +596,19 @@ class TomogramsTab(SidebarTab):
         self.app.attach_abort_button(history_abort)
         self.history_table.bind("<Double-1>", self._show_selected_history_details)
 
-        self.membrain_frame = ttk.Frame(self.content)
-        self.membrain_frame.grid(row=3, column=0, sticky="nsew", pady=(12, 0))
+        self.membrain_frame = ttk.Frame(self.workflow_bottom_frame)
+        self.membrain_frame.grid(row=0, column=0, sticky="nsew")
         self.membrain_frame.columnconfigure(0, weight=1)
-        self.membrain_frame.rowconfigure(1, weight=1)
+        self.membrain_frame.rowconfigure(0, weight=1)
 
-        self.membrain_command_text = self._build_command_section(
+        self.membrain_command_text, self.membrain_params = self._create_job_sections(
             self.membrain_frame,
-            0,
-            "Command preview",
+            "membrain",
             self._copy_membrain_commands,
             self._schedule_membrain_commands,
             self._run_membrain_commands,
+            "MemBrain-seg parameters",
         )
-
-        self.membrain_params = self._create_scrollable_group(self.membrain_frame, 1, "MemBrain-seg parameters")
         ttk.Checkbutton(
             self.membrain_params,
             text="Input TS directory manually",
@@ -682,12 +694,54 @@ class TomogramsTab(SidebarTab):
         self.outer_canvas.configure(scrollregion=self.outer_canvas.bbox("all"))
 
     def _on_outer_canvas_configure(self, event) -> None:
-        self.outer_canvas.itemconfigure(self.outer_window, width=event.width)
+        fit_outer_canvas_to_viewport(self.outer_canvas, self.outer_window, self.content, event)
+
+    def _schedule_outer_layout_refresh(self) -> None:
+        self.outer_canvas.after_idle(self._on_outer_frame_configure)
+
+    def _create_job_sections(
+        self,
+        parent,
+        job_key: str,
+        copy_command,
+        schedule_command,
+        run_command,
+        parameter_title: str,
+    ) -> tuple[tk.Text, ttk.Frame]:
+        pane = VerticalSplitPane(
+            parent,
+            app=self.app,
+            preference_namespace=f"processing_ts_{job_key}",
+            default_top_height=self._job_command_pane_default_height,
+            min_top_height=self._job_command_pane_minsize,
+            min_bottom_height=self._job_parameter_pane_minsize,
+            resize_parent_by=lambda delta: self.workflow_pane.resize_section("content", delta),
+            on_layout_changed=self._schedule_outer_layout_refresh,
+        )
+        pane.grid(row=0, column=0, sticky="nsew")
+        command_host = pane.top_frame()
+        command_host.columnconfigure(0, weight=1)
+        command_host.rowconfigure(0, weight=1)
+        parameter_host = pane.bottom_frame()
+        parameter_host.columnconfigure(0, weight=1)
+        parameter_host.rowconfigure(0, weight=1)
+        self.job_content_panes[job_key] = pane
+        command_text = self._build_command_section(
+            command_host,
+            0,
+            "Command preview",
+            copy_command,
+            schedule_command,
+            run_command,
+        )
+        parameter_frame = self._create_scrollable_group(parameter_host, 0, parameter_title, outer_pady=(0, 0))
+        return command_text, parameter_frame
 
     def _build_command_section(self, parent, row: int, title: str, copy_command, schedule_command, run_command):
         box = ttk.LabelFrame(parent, text=title, padding=12)
-        box.grid(row=row, column=0, sticky="ew")
+        box.grid(row=row, column=0, sticky="nsew")
         box.columnconfigure(0, weight=1)
+        box.rowconfigure(3, weight=1)
         actions = ttk.Frame(box)
         actions.grid(row=0, column=0, sticky="ew", pady=(0, 8))
         actions.columnconfigure(0, weight=1)
@@ -741,12 +795,15 @@ class TomogramsTab(SidebarTab):
         self.slurm_overrides_ui.register_frame(overrides)
         self.slurm_override_frames.append(overrides)
         text = tk.Text(box, height=6, wrap="word", font="TkDefaultFont")
-        text.grid(row=3, column=0, sticky="ew")
+        text.grid(row=3, column=0, sticky="nsew")
         return text
 
-    def _create_scrollable_group(self, parent, row: int, title: str) -> ttk.Frame:
+    def on_tab_shown(self) -> None:
+        self.frame.after_idle(self._on_outer_frame_configure)
+
+    def _create_scrollable_group(self, parent, row: int, title: str, *, outer_pady=(12, 0)) -> ttk.Frame:
         box = ttk.LabelFrame(parent, text=title, padding=12)
-        box.grid(row=row, column=0, sticky="nsew", pady=(12, 0))
+        box.grid(row=row, column=0, sticky="nsew", pady=outer_pady)
         box.columnconfigure(0, weight=1)
         box.rowconfigure(0, weight=1)
         canvas = tk.Canvas(box, highlightthickness=0, height=360)
@@ -765,7 +822,7 @@ class TomogramsTab(SidebarTab):
 
     def _scroll_job_view_to_top(self) -> None:
         for canvas in (
-            getattr(self, "pytom_canvas", None),
+            getattr(self.pytom_params, "_scroll_canvas", None) if hasattr(self, "pytom_params") else None,
             getattr(self.cryolithe_params, "_scroll_canvas", None) if hasattr(self, "cryolithe_params") else None,
             getattr(self.extract_params, "_scroll_canvas", None) if hasattr(self, "extract_params") else None,
             getattr(self.slabify_params, "_scroll_canvas", None) if hasattr(self, "slabify_params") else None,
@@ -2436,17 +2493,9 @@ class TomogramsTab(SidebarTab):
         widget: tk.Text,
         job_name: str,
     ) -> list[tuple[DatasetRecord | None, dict[str, str], str]]:
-        lines = [
-            line.strip()
-            for line in widget.get("1.0", "end").splitlines()
-            if line.strip() and not line.lstrip().startswith("#")
-        ]
+        lines = self._preview_lines_from_widget(widget)
         if not lines:
             return []
-        self.app.debug_log(
-            "WARN",
-            f"No concrete {job_name} commands resolved; simulating the current command preview instead.",
-        )
         return [
             (
                 None,
@@ -2456,7 +2505,48 @@ class TomogramsTab(SidebarTab):
             for line in lines
         ]
 
-    def _debug_prepare_commands(
+    def _preview_lines_from_widget(self, widget: tk.Text) -> list[str]:
+        return [
+            line.strip()
+            for line in widget.get("1.0", "end").splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        ]
+
+    def _commands_with_preview_override(
+        self,
+        commands: list[tuple[DatasetRecord | None, dict[str, str], str]],
+        preview_widget: tk.Text,
+        job_name: str,
+        *,
+        fallback_dataset: DatasetRecord | None = None,
+        fallback_ts_name: str = "Preview override",
+    ) -> list[tuple[DatasetRecord | None, dict[str, str], str]]:
+        preview_lines = self._preview_lines_from_widget(preview_widget)
+        if not preview_lines:
+            return commands
+        if not commands:
+            return [
+                (
+                    fallback_dataset,
+                    {"job_name": job_name, "ts_name": fallback_ts_name},
+                    line,
+                )
+                for line in preview_lines
+            ]
+        overridden: list[tuple[DatasetRecord | None, dict[str, str], str]] = []
+        template_dataset, template_spec, _template_command = commands[-1]
+        for index, line in enumerate(preview_lines):
+            if index < len(commands):
+                dataset, spec, _command = commands[index]
+                overridden.append((dataset, dict(spec), line))
+                continue
+            extra_spec = dict(template_spec)
+            extra_spec["job_name"] = job_name
+            extra_spec["ts_name"] = extra_spec.get("ts_name") or f"Preview line {index + 1}"
+            overridden.append((template_dataset, extra_spec, line))
+        return overridden
+
+    def _prepare_commands_for_execution(
         self,
         commands: list[tuple[DatasetRecord | None, dict[str, str], str]],
         errors: list[str],
@@ -2465,7 +2555,26 @@ class TomogramsTab(SidebarTab):
         empty_title: str,
         empty_message: str,
         job_name: str,
+        fallback_dataset: DatasetRecord | None = None,
+        fallback_ts_name: str = "Preview override",
     ) -> list[tuple[DatasetRecord | None, dict[str, str], str]]:
+        preview_lines = self._preview_lines_from_widget(preview_widget)
+        if preview_lines:
+            if errors:
+                self.app.debug_log(
+                    "WARN",
+                    f"Ignoring {job_name} resolution errors because the current command preview will be used: "
+                    + "; ".join(errors),
+                )
+            prepared = self._commands_with_preview_override(
+                commands,
+                preview_widget,
+                job_name,
+                fallback_dataset=fallback_dataset,
+                fallback_ts_name=fallback_ts_name,
+            )
+            if prepared:
+                return prepared
         if not self.app.is_debug_mode_enabled():
             if errors:
                 messagebox.showerror("Cannot run commands", "\n".join(errors))
@@ -2483,6 +2592,25 @@ class TomogramsTab(SidebarTab):
         if commands:
             return commands
         return self._preview_commands_from_widget(preview_widget, job_name)
+
+    def _debug_prepare_commands(
+        self,
+        commands: list[tuple[DatasetRecord | None, dict[str, str], str]],
+        errors: list[str],
+        *,
+        preview_widget: tk.Text,
+        empty_title: str,
+        empty_message: str,
+        job_name: str,
+    ) -> list[tuple[DatasetRecord | None, dict[str, str], str]]:
+        return self._prepare_commands_for_execution(
+            commands,
+            errors,
+            preview_widget=preview_widget,
+            empty_title=empty_title,
+            empty_message=empty_message,
+            job_name=job_name,
+        )
 
     def _current_slurm_overrides(self) -> dict[str, str]:
         return self.slurm_overrides_ui.metadata()
@@ -2604,13 +2732,11 @@ class TomogramsTab(SidebarTab):
         if pseudo_dataset is None:
             messagebox.showinfo("Schedule command", "Please add at least one dataset to the project first.")
             return
+        preview_widget = self._preview_widget_for_job(job_name)
+        preview_lines = self._preview_lines_from_widget(preview_widget) if preview_widget is not None else []
         command_preview = "Resolved at runtime"
-        if self.app.is_debug_mode_enabled():
-            preview_widget = self._preview_widget_for_job(job_name)
-            if preview_widget is not None:
-                preview_commands = self._preview_commands_from_widget(preview_widget, job_name)
-                if preview_commands:
-                    command_preview = "\n".join(command for _dataset, _spec, command in preview_commands)
+        if preview_lines:
+            command_preview = "\n".join(preview_lines)
         spec = {
             "job_name": job_name,
             "schedule_mode": "deferred",
@@ -3523,7 +3649,31 @@ class TomogramsTab(SidebarTab):
         entry: JobHistoryEntry,
     ) -> tuple[list[tuple[DatasetRecord | None, dict[str, str], str]], list[str]]:
         commands, errors = self._resolve_scheduled_entry(entry)
-        if errors and self.app.is_debug_mode_enabled():
+        fallback_lines = [
+            line.strip()
+            for line in entry.command.splitlines()
+            if line.strip() and line != "Resolved at runtime" and not line.lstrip().startswith("#")
+        ]
+        if fallback_lines:
+            overridden: list[tuple[DatasetRecord | None, dict[str, str], str]] = []
+            for index, line in enumerate(fallback_lines):
+                if index < len(commands):
+                    resolved_dataset, spec, _command = commands[index]
+                    overridden.append((resolved_dataset, dict(spec), line))
+                else:
+                    overridden.append(
+                        (
+                            dataset,
+                            {
+                                "job_name": entry.job_name,
+                                "ts_name": entry.parameters.get("ts_name", "Scheduled preview"),
+                            },
+                            line,
+                        )
+                    )
+            commands = overridden
+            errors = []
+        elif errors and self.app.is_debug_mode_enabled():
             self.app.debug_log(
                 "WARN",
                 f"Ignoring scheduled {entry.job_name} resolution errors in Debug mode: " + "; ".join(errors),
@@ -3841,6 +3991,9 @@ class TomogramsTab(SidebarTab):
         project_id = id(project)
         if self.bound_project_id != project_id:
             self.bound_project_id = project_id
+            self.workflow_pane.restore_from_project(project)
+            for pane in self.job_content_panes.values():
+                pane.restore_from_project(project)
             stored = project.state.tomograms_selection
             self.selected_entries = [
                 {"dataset_name": str(item.get("dataset_name", "")), "ts_name": str(item.get("ts_name", ""))}
@@ -3859,4 +4012,13 @@ class TomogramsTab(SidebarTab):
         self._on_job_type_changed()
 
     def sync_to_project(self, project: ProjectData) -> None:
+        self.workflow_pane.write_to_project(project)
+        for pane in self.job_content_panes.values():
+            pane.write_to_project(project)
         project.state.tomograms_selection = [dict(item) for item in self.selected_entries]
+
+    def reset_window_sizes(self) -> None:
+        self.workflow_pane.reset_to_defaults()
+        for pane in self.job_content_panes.values():
+            pane.reset_to_defaults()
+        self._schedule_outer_layout_refresh()

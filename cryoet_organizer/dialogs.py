@@ -2,8 +2,25 @@ from __future__ import annotations
 
 import re
 import tkinter as tk
+import tkinter.font as tkfont
 from tkinter import ttk
 from typing import Any
+
+
+def technical_font_name() -> str:
+    try:
+        tkfont.nametofont("TkDefaultFont")
+        return "TkDefaultFont"
+    except tk.TclError:
+        return "TkFixedFont"
+
+
+def technical_row_height(*, minimum: int = 24, padding: int = 10) -> int:
+    try:
+        font = tkfont.nametofont(technical_font_name())
+        return max(minimum, font.metrics("linespace") + max(padding, font.metrics("descent") + 4))
+    except tk.TclError:
+        return minimum
 
 
 def bind_scrollable_canvas(
@@ -12,22 +29,80 @@ def bind_scrollable_canvas(
     inner: tk.Misc,
     *,
     allow_horizontal: bool = False,
+    fill_vertical: bool = False,
 ) -> None:
     def sync_scrollregion(_event=None) -> None:
         bbox = canvas.bbox("all")
         if bbox is not None:
             canvas.configure(scrollregion=bbox)
 
-    def sync_window_width(event=None) -> None:
+    def sync_window_size(event=None) -> None:
         target_width = canvas.winfo_width() if event is None else event.width
         if allow_horizontal:
             target_width = max(target_width, inner.winfo_reqwidth())
-        canvas.itemconfigure(window_id, width=target_width)
+        options: dict[str, int] = {"width": target_width}
+        if fill_vertical:
+            target_height = canvas.winfo_height() if event is None else event.height
+            options["height"] = max(target_height, inner.winfo_reqheight())
+        canvas.itemconfigure(window_id, **options)
 
     inner.bind("<Configure>", sync_scrollregion)
-    canvas.bind("<Configure>", sync_window_width)
+    canvas.bind("<Configure>", sync_window_size)
     canvas.after_idle(sync_scrollregion)
-    canvas.after_idle(sync_window_width)
+    canvas.after_idle(sync_window_size)
+
+
+def create_scrollable_frame(
+    parent: tk.Misc,
+    *,
+    allow_horizontal: bool = False,
+    fill_vertical: bool = False,
+    inner_padding: int | tuple[int, int, int, int] = 0,
+) -> tuple[ttk.Frame, ttk.Frame, tk.Canvas]:
+    host = ttk.Frame(parent)
+    host.columnconfigure(0, weight=1)
+    host.rowconfigure(0, weight=1)
+
+    canvas = tk.Canvas(host, highlightthickness=0)
+    canvas.grid(row=0, column=0, sticky="nsew")
+    yscroll = ttk.Scrollbar(host, orient="vertical", command=canvas.yview)
+    yscroll.grid(row=0, column=1, sticky="ns")
+    canvas.configure(yscrollcommand=yscroll.set)
+
+    if allow_horizontal:
+        xscroll = ttk.Scrollbar(host, orient="horizontal", command=canvas.xview)
+        xscroll.grid(row=1, column=0, sticky="ew")
+        canvas.configure(xscrollcommand=xscroll.set)
+
+    inner = ttk.Frame(canvas, padding=inner_padding)
+    inner.columnconfigure(0, weight=1)
+    window_id = canvas.create_window((0, 0), window=inner, anchor="nw")
+    bind_scrollable_canvas(
+        canvas,
+        window_id,
+        inner,
+        allow_horizontal=allow_horizontal,
+        fill_vertical=fill_vertical,
+    )
+    return host, inner, canvas
+
+
+def fit_outer_canvas_to_viewport(
+    canvas: tk.Canvas,
+    window_id: int,
+    inner: tk.Misc,
+    event,
+    *,
+    allow_horizontal: bool = True,
+) -> None:
+    inner.update_idletasks()
+    viewport_width = max(1, int(getattr(event, "width", 1) or 1))
+    requested_width = inner.winfo_reqwidth()
+    target_width = max(viewport_width, requested_width) if allow_horizontal else viewport_width
+    canvas.itemconfigure(window_id, width=target_width)
+    bbox = canvas.bbox("all")
+    if bbox is not None:
+        canvas.configure(scrollregion=bbox)
 
 
 def make_copy_name(existing_names: list[str], original_name: str) -> str:
@@ -72,13 +147,20 @@ def show_detail_dialog(
     container.columnconfigure(0, weight=1)
     container.rowconfigure(0, weight=1)
 
-    tree = ttk.Treeview(container, columns=("field", "value"), show="tree headings")
+    style = ttk.Style(window)
+    style.configure(
+        "Detail.Technical.Treeview",
+        font=technical_font_name(),
+        rowheight=technical_row_height(),
+    )
+
+    tree = ttk.Treeview(container, columns=("field", "value"), show="tree headings", style="Detail.Technical.Treeview")
     tree.heading("#0", text="Section")
     tree.heading("field", text="Field")
     tree.heading("value", text="Value")
-    tree.column("#0", width=180, anchor="w")
-    tree.column("field", width=240, anchor="w")
-    tree.column("value", width=520, anchor="w")
+    tree.column("#0", width=180, anchor="w", stretch=False)
+    tree.column("field", width=240, anchor="w", stretch=False)
+    tree.column("value", width=520, anchor="w", stretch=False)
     tree.grid(row=0, column=0, sticky="nsew")
 
     yscroll = ttk.Scrollbar(container, orient="vertical", command=tree.yview)
@@ -92,13 +174,15 @@ def show_detail_dialog(
         for field, value in rows:
             tree.insert(section_id, "end", text="", values=(field, value))
 
+    autosize_detail_tree_columns(tree, sections)
+
     next_row = 2
     if command:
         command_box = ttk.LabelFrame(container, text="Command", padding=12)
         command_box.grid(row=next_row, column=0, columnspan=2, sticky="nsew", pady=(12, 0))
         command_box.columnconfigure(0, weight=1)
         command_box.rowconfigure(0, weight=1)
-        command_text = tk.Text(command_box, height=command_height, wrap="word")
+        command_text = tk.Text(command_box, height=command_height, wrap="word", font=technical_font_name())
         command_text.grid(row=0, column=0, sticky="nsew")
         command_text.insert("1.0", command)
         command_scroll = ttk.Scrollbar(command_box, orient="vertical", command=command_text.yview)
@@ -109,6 +193,31 @@ def show_detail_dialog(
     footer = ttk.Frame(container)
     footer.grid(row=next_row, column=0, columnspan=2, sticky="e", pady=(12, 0))
     ttk.Button(footer, text="Close", command=window.destroy).grid(row=0, column=0)
+
+
+def autosize_detail_tree_columns(
+    tree: ttk.Treeview,
+    sections: list[tuple[str, list[tuple[str, str]]]],
+) -> None:
+    try:
+        font = tkfont.nametofont(technical_font_name())
+    except tk.TclError:
+        return
+
+    padding = 24
+    section_width = font.measure("Section") + padding
+    field_width = font.measure("Field") + padding
+    value_width = font.measure("Value") + padding
+
+    for section_title, rows in sections:
+        section_width = max(section_width, font.measure(str(section_title)) + padding)
+        for field, value in rows:
+            field_width = max(field_width, font.measure(str(field)) + padding)
+            value_width = max(value_width, font.measure(str(value)) + padding)
+
+    tree.column("#0", width=max(180, section_width), stretch=False)
+    tree.column("field", width=max(240, field_width), stretch=False)
+    tree.column("value", width=max(520, value_width), stretch=False)
 
 
 def choose_items_dialog(

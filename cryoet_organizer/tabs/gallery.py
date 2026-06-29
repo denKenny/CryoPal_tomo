@@ -10,7 +10,7 @@ from queue import Empty, Queue
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
-from cryoet_organizer.dialogs import bind_scrollable_canvas
+from cryoet_organizer.dialogs import autosize_detail_tree_columns, bind_scrollable_canvas
 from cryoet_organizer.file_resolver import file_role_order, resolve_dataset_file, role_title
 from cryoet_organizer.preferences import project_preference, project_preference_enabled, project_preference_int
 from cryoet_organizer.project import (
@@ -20,6 +20,7 @@ from cryoet_organizer.project import (
     best_matching_ts_name,
     dataset_ts_names,
 )
+from cryoet_organizer.resizable_sections import load_layout_value, save_layout_value
 from cryoet_organizer.thumbnail_cache import effective_thumbnail_source_folder, resolve_thumbnail_cache_dir, thumbnail_cache_location
 from cryoet_organizer.ts_metadata import collect_ts_metadata, ts_metadata_sections
 from cryoet_organizer.tabs.base import SidebarTab
@@ -84,8 +85,7 @@ class GalleryTab(SidebarTab):
 
     def build(self) -> None:
         self.frame.columnconfigure(0, weight=1)
-        self.frame.columnconfigure(1, weight=0)
-        self.frame.rowconfigure(2, weight=1)
+        self.frame.rowconfigure(0, weight=1)
 
         self.dataset_var = tk.StringVar()
         self.min_rating_var = tk.StringVar(value="Any")
@@ -116,6 +116,10 @@ class GalleryTab(SidebarTab):
         self._current_page = 0
         self._current_page_count = 0
         self._render_generation = 0
+        self._main_pane_initialized = False
+        self._default_details_pane_width = self.app._scale_pixels(360)
+        self._details_pane_min_width = self.app._scale_pixels(320)
+        self._details_pane_width = self._default_details_pane_width
 
         self.selected_dataset_var = tk.StringVar(value="-")
         self.selected_ts_var = tk.StringVar(value="-")
@@ -125,7 +129,22 @@ class GalleryTab(SidebarTab):
         self.selected_rating_var = tk.IntVar(value=0)
         self.delete_raw_data_var = tk.BooleanVar(value=False)
 
-        controls = ttk.LabelFrame(self.frame, text="Gallery selection", padding=12)
+        self.main_pane = tk.PanedWindow(
+            self.frame,
+            orient="horizontal",
+            sashwidth=6,
+            opaqueresize=True,
+            bd=0,
+            relief="flat",
+        )
+        self.main_pane.grid(row=0, column=0, sticky="nsew")
+        self.main_pane.bind("<Configure>", self._on_main_pane_configure)
+
+        left_panel = ttk.Frame(self.main_pane)
+        left_panel.columnconfigure(0, weight=1)
+        left_panel.rowconfigure(2, weight=1)
+
+        controls = ttk.LabelFrame(left_panel, text="Gallery selection", padding=12)
         controls.grid(row=0, column=0, sticky="ew", padx=(0, 12))
         for column in range(7):
             controls.columnconfigure(column, weight=1 if column in (0, 4) else 0)
@@ -171,18 +190,15 @@ class GalleryTab(SidebarTab):
             text="Reset filters",
             command=self._reset_gallery_filters,
         ).grid(row=0, column=0, sticky="w", padx=(0, 8))
-        self.import_button = ttk.Button(
+        self.manual_import_button = ttk.Menubutton(
             action_buttons,
-            text="Import thumbnails",
-            command=self._import_thumbnails,
+            text="Manual import",
         )
-        self.import_button.grid(row=0, column=1, sticky="e", padx=(0, 8))
-        self.link_mrc_folder_button = ttk.Button(
-            action_buttons,
-            text="Link .mrc files",
-            command=self._link_mrc_folder,
-        )
-        self.link_mrc_folder_button.grid(row=0, column=2, sticky="e")
+        self.manual_import_button.grid(row=0, column=1, columnspan=2, sticky="e")
+        self.manual_import_menu = tk.Menu(self.manual_import_button, tearoff=False)
+        self.manual_import_menu.add_command(label="Import thumbnail folder", command=self._import_thumbnails)
+        self.manual_import_menu.add_command(label="Link .mrc from folder", command=self._link_mrc_folder)
+        self.manual_import_button.configure(menu=self.manual_import_menu)
         ttk.Button(
             controls,
             text="Multi selection",
@@ -240,7 +256,7 @@ class GalleryTab(SidebarTab):
         self.exclude_tags_listbox.configure(yscrollcommand=exclude_scroll.set)
         self.exclude_tags_listbox.bind("<<ListboxSelect>>", self._on_gallery_filter_changed)
 
-        self.summary_label = ttk.Label(self.frame, text="", wraplength=900, justify="left")
+        self.summary_label = ttk.Label(left_panel, text="", wraplength=900, justify="left")
         self.summary_label.grid(row=1, column=0, sticky="nw", pady=(12, 8))
 
         self.pager_row = ttk.Frame(controls)
@@ -253,7 +269,7 @@ class GalleryTab(SidebarTab):
         self.next_page_button.grid(row=0, column=2, padx=(6, 0))
         self.pager_row.grid_remove()
 
-        gallery_container = ttk.Frame(self.frame)
+        gallery_container = ttk.Frame(left_panel)
         gallery_container.grid(row=2, column=0, sticky="nsew")
         gallery_container.columnconfigure(0, weight=1)
         gallery_container.rowconfigure(0, weight=1)
@@ -273,9 +289,20 @@ class GalleryTab(SidebarTab):
         self.gallery_frame.bind("<Configure>", self._on_gallery_frame_configure)
         self.gallery_canvas.bind("<Configure>", self._on_gallery_canvas_configure)
 
-        details = ttk.LabelFrame(self.frame, text="Thumbnail details", padding=12)
-        details.grid(row=0, column=1, rowspan=3, sticky="nsew")
+        details_host = ttk.Frame(self.main_pane)
+        details_host.columnconfigure(0, weight=1)
+        details_host.rowconfigure(0, weight=1)
+        self.details_canvas = tk.Canvas(details_host, highlightthickness=0)
+        self.details_canvas.grid(row=0, column=0, sticky="nsew")
+        details_yscroll = ttk.Scrollbar(details_host, orient="vertical", command=self.details_canvas.yview)
+        details_yscroll.grid(row=0, column=1, sticky="ns")
+        self.details_canvas.configure(yscrollcommand=details_yscroll.set)
+
+        details = ttk.LabelFrame(self.details_canvas, text="Thumbnail details", padding=12)
         details.columnconfigure(0, weight=1)
+        self.details_window = self.details_canvas.create_window((0, 0), window=details, anchor="nw")
+        bind_scrollable_canvas(self.details_canvas, self.details_window, details, allow_horizontal=False)
+        self.details_canvas.bind("<Configure>", self._on_details_canvas_configure, add="+")
 
         ttk.Label(details, text="Dataset").grid(row=0, column=0, sticky="w")
         ttk.Label(details, textvariable=self.selected_dataset_var).grid(row=1, column=0, sticky="w", pady=(0, 8))
@@ -284,22 +311,21 @@ class GalleryTab(SidebarTab):
         ttk.Label(details, text="Pixel size").grid(row=4, column=0, sticky="w")
         ttk.Label(details, textvariable=self.selected_pixelsize_var).grid(row=5, column=0, sticky="w", pady=(0, 12))
         ttk.Label(details, text="Associated MRC").grid(row=6, column=0, sticky="w")
-        ttk.Label(details, textvariable=self.selected_mrc_var, wraplength=240, justify="left").grid(
-            row=7, column=0, sticky="w", pady=(0, 8)
-        )
+        self.selected_mrc_label = ttk.Label(details, textvariable=self.selected_mrc_var, justify="left")
+        self.selected_mrc_label.grid(row=7, column=0, sticky="ew", pady=(0, 8))
         mrc_button_row = ttk.Frame(details)
         mrc_button_row.grid(row=8, column=0, sticky="ew", pady=(0, 12))
         mrc_button_row.columnconfigure(1, weight=1)
         self.open_mrc_button = ttk.Button(
             mrc_button_row,
-            text="Open associated .mrc",
+            text="Open .mrc",
             command=self._open_selected_mrc,
             state="disabled",
         )
         self.open_mrc_button.grid(row=0, column=0, sticky="w")
         self.link_mrc_button = ttk.Button(
             mrc_button_row,
-            text="Link .mrc file",
+            text="Link .mrc",
             command=self._link_selected_mrc_file,
             state="disabled",
         )
@@ -342,9 +368,8 @@ class GalleryTab(SidebarTab):
         self.tag_listbox = tk.Listbox(details, height=8)
         self.tag_listbox.grid(row=15, column=0, sticky="nsew")
         details.rowconfigure(15, weight=1)
-        ttk.Label(details, textvariable=self.selected_tags_var, wraplength=240, justify="left").grid(
-            row=16, column=0, sticky="w", pady=(8, 0)
-        )
+        self.selected_tags_label = ttk.Label(details, textvariable=self.selected_tags_var, justify="left")
+        self.selected_tags_label.grid(row=16, column=0, sticky="ew", pady=(8, 0))
         ttk.Button(
             details,
             text="Delete TS data",
@@ -356,6 +381,65 @@ class GalleryTab(SidebarTab):
             variable=self.delete_raw_data_var,
         ).grid(row=18, column=0, sticky="w")
         self.details_frame = details
+        self.details_host = details_host
+        details_host.configure(width=self._details_pane_width)
+        details_host.grid_propagate(False)
+        self.main_pane.add(left_panel, minsize=420, stretch="always", sticky="nsew")
+        self.main_pane.add(
+            details_host,
+            minsize=self._details_pane_min_width,
+            width=self._details_pane_width,
+            stretch="never",
+            sticky="nsew",
+        )
+        self.frame.after_idle(self._initialize_main_pane)
+
+    def _initialize_main_pane(self) -> None:
+        if self._main_pane_initialized or not self.main_pane.winfo_exists():
+            return
+        if self.main_pane.winfo_width() < 600:
+            self.frame.after(60, self._initialize_main_pane)
+            return
+        self._apply_main_pane_width()
+        self._update_details_wraplength()
+        self._main_pane_initialized = True
+
+    def _apply_main_pane_width(self) -> None:
+        self.main_pane.update_idletasks()
+        total_width = self.main_pane.winfo_width()
+        details_width = max(self._details_pane_min_width, self._details_pane_width)
+        try:
+            self.details_host.configure(width=details_width)
+            self.main_pane.paneconfigure(self.details_host, minsize=self._details_pane_min_width, width=details_width)
+            self.main_pane.sash_place(0, total_width - details_width, 0)
+        except tk.TclError:
+            pass
+        self._update_details_wraplength()
+
+    def _on_main_pane_configure(self, _event=None) -> None:
+        if not self._main_pane_initialized:
+            self._initialize_main_pane()
+            return
+        self._capture_details_pane_width()
+
+    def _on_details_canvas_configure(self, _event=None) -> None:
+        self._update_details_wraplength()
+
+    def _update_details_wraplength(self) -> None:
+        available_width = max(140, self.details_canvas.winfo_width() - self.app._scale_pixels(28))
+        for label in (getattr(self, "selected_mrc_label", None), getattr(self, "selected_tags_label", None)):
+            if label is not None:
+                label.configure(wraplength=available_width)
+
+    def _capture_details_pane_width(self) -> None:
+        try:
+            current_width = int(self.details_host.winfo_width())
+        except tk.TclError:
+            return
+        if current_width <= 0:
+            return
+        self._details_pane_width = max(self._details_pane_min_width, current_width)
+        self._update_details_wraplength()
 
     def _on_gallery_frame_configure(self, _event=None) -> None:
         self.gallery_canvas.configure(scrollregion=self.gallery_canvas.bbox("all"))
@@ -836,9 +920,8 @@ class GalleryTab(SidebarTab):
         return preview
 
     def _update_import_button_label(self) -> None:
-        self.import_button.config(
-            text="Update thumbnails" if self._selection_has_thumbnails() else "Import thumbnails"
-        )
+        if hasattr(self, "manual_import_button"):
+            self.manual_import_button.config(text="Manual import")
 
     def _clear_dataset_thumbnail_runtime_cache(self, dataset_name: str) -> None:
         keys_to_remove = [key for key in self.thumbnail_display_paths if key[0] == dataset_name]
@@ -1567,15 +1650,15 @@ class GalleryTab(SidebarTab):
         container.grid(row=0, column=0, sticky="nsew")
         container.columnconfigure(0, weight=1)
         container.rowconfigure(0, weight=1)
-        container.rowconfigure(1, weight=1)
+        container.rowconfigure(2, weight=1)
 
         tree = ttk.Treeview(container, columns=("field", "value"), show="tree headings")
         tree.heading("#0", text="Section")
         tree.heading("field", text="Field")
         tree.heading("value", text="Value")
-        tree.column("#0", width=180, anchor="w")
-        tree.column("field", width=240, anchor="w")
-        tree.column("value", width=620, anchor="w")
+        tree.column("#0", width=180, anchor="w", stretch=False)
+        tree.column("field", width=240, anchor="w", stretch=False)
+        tree.column("value", width=620, anchor="w", stretch=False)
         tree.grid(row=0, column=0, sticky="nsew")
 
         tree_yscroll = ttk.Scrollbar(container, orient="vertical", command=tree.yview)
@@ -1588,6 +1671,7 @@ class GalleryTab(SidebarTab):
             section_id = tree.insert("", "end", text=section_title, open=True, values=("", ""))
             for field, value in rows:
                 tree.insert(section_id, "end", text="", values=(field, value))
+        autosize_detail_tree_columns(tree, sections)
 
         associated_box = ttk.LabelFrame(container, text="Associated files", padding=12)
         associated_box.grid(row=2, column=0, columnspan=2, sticky="nsew", pady=(12, 0))
@@ -2252,6 +2336,15 @@ class GalleryTab(SidebarTab):
             self.thumbnail_cache_state.clear()
             self.thumbnail_record_index.clear()
             self._loaded_project_id = id(project)
+            self._details_pane_width = load_layout_value(
+                project,
+                "gallery",
+                "details",
+                dimension="width",
+                default=self._default_details_pane_width,
+                minimum=self._details_pane_min_width,
+                maximum=self.app._scale_pixels(900),
+            )
             self.dataset_var.set("All datasets")
             self.min_rating_var.set("Any")
             self.tag_include_mode_var.set("All selected")
@@ -2268,7 +2361,7 @@ class GalleryTab(SidebarTab):
         self.dataset_combo.configure(values=options)
         if not options:
             self.dataset_var.set("")
-            self.import_button.config(text="Import thumbnails")
+            self._update_import_button_label()
             self.summary_label.config(text="No datasets available yet.")
             self._update_pager_controls(0, 0, 0)
             return
@@ -2291,6 +2384,8 @@ class GalleryTab(SidebarTab):
         self._needs_render_when_shown = True
 
     def on_tab_shown(self) -> None:
+        self.frame.after_idle(self._initialize_main_pane)
+        self.frame.after_idle(self._apply_main_pane_width)
         if self.app.project.datasets and not self.dataset_var.get().strip():
             self.dataset_var.set("All datasets")
         if self.app.project.datasets:
@@ -2298,3 +2393,12 @@ class GalleryTab(SidebarTab):
             return
         if self._needs_render_when_shown:
             self.frame.after_idle(self._request_gallery_render)
+
+    def sync_to_project(self, project: ProjectData) -> None:
+        save_layout_value(project, "gallery", "details", self._details_pane_width, dimension="width")
+
+    def reset_window_sizes(self) -> None:
+        self._details_pane_width = self._default_details_pane_width
+        if self.main_pane.winfo_exists():
+            self._apply_main_pane_width()
+            self._update_details_wraplength()

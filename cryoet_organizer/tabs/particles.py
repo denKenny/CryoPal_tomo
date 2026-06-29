@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
-from cryoet_organizer.dialogs import bind_scrollable_canvas, show_detail_dialog
+from cryoet_organizer.dialogs import bind_scrollable_canvas, fit_outer_canvas_to_viewport, show_detail_dialog
 from cryoet_organizer.environments import environment_titles
 from cryoet_organizer.job_execution import (
     build_slurm_override_metadata,
@@ -27,6 +27,7 @@ from cryoet_organizer.particles_catalog import (
 )
 from cryoet_organizer.preferences import project_preference_enabled
 from cryoet_organizer.project import DatasetRecord, JobHistoryEntry, ProjectData
+from cryoet_organizer.resizable_sections import ResizableSectionStack
 from cryoet_organizer.slurm import SlurmSubmissionResult
 from cryoet_organizer.slurm_override_ui import SlurmOverrideUI
 from cryoet_organizer.star_merge import (
@@ -172,6 +173,12 @@ class ParticlesTab(SidebarTab):
         self.job_catalog = particle_jobs_by_title()
         self.current_job = export_particles_warp_job()
         self._export_param_rows: list[dict[str, object]] = []
+        self._export_dataset_pane_default_height = self.app._scale_pixels(190)
+        self._export_command_pane_default_height = self.app._scale_pixels(230)
+        self._export_parameter_pane_default_height = self.app._scale_pixels(430)
+        self._export_dataset_pane_minsize = self.app._scale_pixels(150)
+        self._export_command_pane_minsize = self.app._scale_pixels(190)
+        self._export_parameter_pane_minsize = self.app._scale_pixels(340)
 
         self.outer_canvas = tk.Canvas(self.frame, highlightthickness=0)
         self.outer_canvas.grid(row=0, column=0, sticky="nsew")
@@ -181,11 +188,16 @@ class ParticlesTab(SidebarTab):
             command=self.outer_canvas.yview,
         )
         self.outer_scrollbar.grid(row=0, column=1, sticky="ns")
-        self.outer_canvas.configure(yscrollcommand=self.outer_scrollbar.set)
+        self.outer_xscrollbar = ttk.Scrollbar(
+            self.frame,
+            orient="horizontal",
+            command=self.outer_canvas.xview,
+        )
+        self.outer_xscrollbar.grid(row=1, column=0, sticky="ew")
+        self.outer_canvas.configure(yscrollcommand=self.outer_scrollbar.set, xscrollcommand=self.outer_xscrollbar.set)
 
         self.content = ttk.Frame(self.outer_canvas, padding=2)
         self.content.columnconfigure(0, weight=1)
-        self.content.rowconfigure(1, weight=1)
         self.outer_window = self.outer_canvas.create_window((0, 0), window=self.content, anchor="nw")
         self.content.bind("<Configure>", self._on_outer_frame_configure)
         self.outer_canvas.bind("<Configure>", self._on_outer_canvas_configure)
@@ -211,12 +223,42 @@ class ParticlesTab(SidebarTab):
         self.export_frame = ttk.Frame(self.content)
         self.export_frame.grid(row=1, column=0, sticky="nsew", pady=(12, 0))
         self.export_frame.columnconfigure(0, weight=1)
-        self.export_frame.rowconfigure(2, weight=0)
-        self.export_frame.rowconfigure(3, weight=1)
+        self.export_frame.rowconfigure(0, weight=1)
 
-        dataset_box = ttk.LabelFrame(self.export_frame, text="Datasets", padding=12)
-        dataset_box.grid(row=0, column=0, sticky="ew")
+        self.export_pane = ResizableSectionStack(
+            self.export_frame,
+            app=self.app,
+            preference_namespace="particles_export",
+            bottom_spacing=self.app._scale_pixels(140),
+            on_layout_changed=self._schedule_outer_layout_refresh,
+        )
+        self.export_pane.grid(row=0, column=0, sticky="nsew")
+        self.export_dataset_pane = self.export_pane.add_section(
+            "datasets",
+            default_height=self._export_dataset_pane_default_height,
+            min_height=self._export_dataset_pane_minsize,
+        )
+        self.export_dataset_pane.columnconfigure(0, weight=1)
+        self.export_dataset_pane.rowconfigure(0, weight=1)
+        self.export_command_pane = self.export_pane.add_section(
+            "command",
+            default_height=self._export_command_pane_default_height,
+            min_height=self._export_command_pane_minsize,
+        )
+        self.export_command_pane.columnconfigure(0, weight=1)
+        self.export_command_pane.rowconfigure(0, weight=1)
+        self.export_parameter_pane = self.export_pane.add_section(
+            "parameters",
+            default_height=self._export_parameter_pane_default_height,
+            min_height=self._export_parameter_pane_minsize,
+        )
+        self.export_parameter_pane.columnconfigure(0, weight=1)
+        self.export_parameter_pane.rowconfigure(0, weight=1)
+
+        dataset_box = ttk.LabelFrame(self.export_dataset_pane, text="Datasets", padding=12)
+        dataset_box.grid(row=0, column=0, sticky="nsew")
         dataset_box.columnconfigure(1, weight=1)
+        dataset_box.rowconfigure(1, weight=1)
 
         ttk.Label(dataset_box, text="Add dataset").grid(row=0, column=0, sticky="w", pady=(0, 4))
         self.dataset_picker = ttk.Combobox(
@@ -234,67 +276,75 @@ class ParticlesTab(SidebarTab):
         )
 
         self.selected_dataset_list = tk.Listbox(dataset_box, height=5)
-        self.selected_dataset_list.grid(row=1, column=0, columnspan=5, sticky="ew", pady=(10, 0))
+        self.selected_dataset_list.grid(row=1, column=0, columnspan=5, sticky="nsew", pady=(10, 0))
+        selected_dataset_scroll = ttk.Scrollbar(dataset_box, orient="vertical", command=self.selected_dataset_list.yview)
+        selected_dataset_scroll.grid(row=1, column=5, sticky="ns", pady=(10, 0))
+        self.selected_dataset_list.configure(yscrollcommand=selected_dataset_scroll.set)
 
-        command_box = ttk.LabelFrame(self.export_frame, text="Command preview", padding=12)
-        command_box.grid(row=1, column=0, sticky="ew", pady=(12, 0))
+        command_box = ttk.LabelFrame(self.export_command_pane, text="Command preview", padding=12)
+        command_box.grid(row=0, column=0, sticky="nsew")
         command_box.columnconfigure(0, weight=1)
+        command_box.rowconfigure(3, weight=1)
 
-        action_row = ttk.Frame(command_box)
-        action_row.grid(row=0, column=0, sticky="ew", pady=(0, 8))
-        action_row.columnconfigure(0, weight=1)
-        ttk.Label(action_row, text="Execution").grid(row=0, column=1, sticky="e", padx=(0, 8))
+        command_header = ttk.Frame(command_box)
+        command_header.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        command_header.columnconfigure(0, weight=1)
+        ttk.Button(command_header, text="Copy command", command=self._copy_commands).grid(
+            row=0, column=1, padx=(8, 0)
+        )
+        ttk.Button(command_header, text="Run command", command=self._run_commands).grid(
+            row=0, column=2, padx=(8, 0)
+        )
+        export_abort = ttk.Button(
+            command_header,
+            text="Abort",
+            command=self.app.abort_running_commands,
+            state="disabled",
+        )
+        export_abort.grid(row=0, column=3, padx=(8, 0))
+        self.app.attach_abort_button(export_abort)
+
+        execution_row = ttk.Frame(command_box)
+        execution_row.grid(row=1, column=0, sticky="ew", pady=(0, 8))
+        execution_row.columnconfigure(3, weight=1)
+        ttk.Label(execution_row, text="Execution").grid(row=0, column=0, sticky="w", padx=(0, 8))
         self.execution_mode_combo = ttk.Combobox(
-            action_row,
+            execution_row,
             textvariable=self.execution_mode_var,
             state="readonly",
             values=("Run locally", "Submit to Slurm"),
             width=18,
         )
-        self.execution_mode_combo.grid(row=0, column=2, sticky="e")
+        self.execution_mode_combo.grid(row=0, column=1, sticky="w")
         self.execution_mode_combo.bind("<<ComboboxSelected>>", lambda _event: self._toggle_slurm_controls())
-        self.execution_target_label = ttk.Label(action_row, text="Select environment")
-        self.execution_target_label.grid(row=0, column=3, sticky="e", padx=(12, 8))
+        self.execution_target_label = ttk.Label(execution_row, text="Select environment")
+        self.execution_target_label.grid(row=0, column=2, sticky="e", padx=(16, 8))
         self.slurm_profile_combo = ttk.Combobox(
-            action_row,
+            execution_row,
             textvariable=self.slurm_profile_var,
             state="disabled",
             width=18,
         )
-        self.slurm_profile_combo.grid(row=0, column=4, sticky="e")
+        self.slurm_profile_combo.grid(row=0, column=3, sticky="w")
         self.slurm_profile_combo.bind("<<ComboboxSelected>>", lambda _event: self.slurm_overrides_ui.rebuild(preserve_existing=False))
         self.environment_combo = ttk.Combobox(
-            action_row,
+            execution_row,
             textvariable=self.environment_var,
             state="readonly",
             width=18,
             values=environment_titles(self.app.project),
         )
-        self.environment_combo.grid(row=0, column=4, sticky="e")
-        ttk.Button(action_row, text="Copy command", command=self._copy_commands).grid(
-            row=0, column=5, padx=(8, 0)
-        )
-        ttk.Button(action_row, text="Run command", command=self._run_commands).grid(
-            row=0, column=6, padx=(8, 0)
-        )
-        export_abort = ttk.Button(
-            action_row,
-            text="Abort",
-            command=self.app.abort_running_commands,
-            state="disabled",
-        )
-        export_abort.grid(row=0, column=7, padx=(8, 0))
-        self.app.attach_abort_button(export_abort)
+        self.environment_combo.grid(row=0, column=3, sticky="w")
         self.slurm_overrides_frame = ttk.Frame(command_box)
-        self.slurm_overrides_frame.grid(row=1, column=0, sticky="ew", pady=(0, 8))
+        self.slurm_overrides_frame.grid(row=2, column=0, sticky="ew", pady=(0, 8))
         self.slurm_overrides_ui.register_frame(self.slurm_overrides_frame)
         self._toggle_slurm_controls()
 
-        self.command_text = tk.Text(command_box, height=14, wrap="word", font="TkDefaultFont")
-        self.command_text.grid(row=2, column=0, sticky="nsew")
+        self.command_text = tk.Text(command_box, height=6, wrap="word", font="TkDefaultFont")
+        self.command_text.grid(row=3, column=0, sticky="nsew")
 
-        parameter_box = ttk.LabelFrame(self.export_frame, text="ts_export_particles parameters", padding=12)
-        parameter_box.grid(row=2, column=0, sticky="nsew", pady=(12, 0))
+        parameter_box = ttk.LabelFrame(self.export_parameter_pane, text="Parameters", padding=12)
+        parameter_box.grid(row=0, column=0, sticky="nsew")
         parameter_box.columnconfigure(0, weight=1)
         parameter_box.rowconfigure(0, weight=1)
 
@@ -330,7 +380,6 @@ class ParticlesTab(SidebarTab):
             self.parameter_container,
             allow_horizontal=True,
         )
-
         self.distance_frame = ttk.Frame(self.content)
         self.distance_frame.grid(row=1, column=0, sticky="nsew", pady=(12, 0))
         self.distance_frame.columnconfigure(0, weight=1)
@@ -338,6 +387,7 @@ class ParticlesTab(SidebarTab):
         distance_dataset_box = ttk.LabelFrame(self.distance_frame, text="Datasets", padding=12)
         distance_dataset_box.grid(row=0, column=0, sticky="ew")
         distance_dataset_box.columnconfigure(1, weight=1)
+        distance_dataset_box.rowconfigure(1, weight=1)
         ttk.Label(distance_dataset_box, text="Add dataset").grid(row=0, column=0, sticky="w", pady=(0, 4))
         self.distance_dataset_picker = ttk.Combobox(
             distance_dataset_box,
@@ -363,8 +413,15 @@ class ParticlesTab(SidebarTab):
 
         self.distance_selected_dataset_list = tk.Listbox(distance_dataset_box, height=5)
         self.distance_selected_dataset_list.grid(
-            row=1, column=0, columnspan=5, sticky="ew", pady=(10, 0)
+            row=1, column=0, columnspan=5, sticky="nsew", pady=(10, 0)
         )
+        distance_dataset_scroll = ttk.Scrollbar(
+            distance_dataset_box,
+            orient="vertical",
+            command=self.distance_selected_dataset_list.yview,
+        )
+        distance_dataset_scroll.grid(row=1, column=5, sticky="ns", pady=(10, 0))
+        self.distance_selected_dataset_list.configure(yscrollcommand=distance_dataset_scroll.set)
 
         distance_command_box = ttk.LabelFrame(self.distance_frame, text="Log window", padding=12)
         distance_command_box.grid(row=1, column=0, sticky="ew", pady=(12, 0))
@@ -467,6 +524,7 @@ class ParticlesTab(SidebarTab):
         intersect_dataset_box = ttk.LabelFrame(self.intersect_frame, text="Datasets", padding=12)
         intersect_dataset_box.grid(row=0, column=0, sticky="ew")
         intersect_dataset_box.columnconfigure(1, weight=1)
+        intersect_dataset_box.rowconfigure(1, weight=1)
         ttk.Label(intersect_dataset_box, text="Add dataset").grid(row=0, column=0, sticky="w", pady=(0, 4))
         self.intersect_dataset_picker = ttk.Combobox(
             intersect_dataset_box,
@@ -486,11 +544,19 @@ class ParticlesTab(SidebarTab):
             command=self._remove_selected_intersect_dataset,
         ).grid(row=0, column=4, padx=(8, 0))
         self.intersect_selected_dataset_list = tk.Listbox(intersect_dataset_box, height=5)
-        self.intersect_selected_dataset_list.grid(row=1, column=0, columnspan=5, sticky="ew", pady=(10, 0))
+        self.intersect_selected_dataset_list.grid(row=1, column=0, columnspan=5, sticky="nsew", pady=(10, 0))
+        intersect_dataset_scroll = ttk.Scrollbar(
+            intersect_dataset_box,
+            orient="vertical",
+            command=self.intersect_selected_dataset_list.yview,
+        )
+        intersect_dataset_scroll.grid(row=1, column=5, sticky="ns", pady=(10, 0))
+        self.intersect_selected_dataset_list.configure(yscrollcommand=intersect_dataset_scroll.set)
 
         intersect_star_box = ttk.LabelFrame(self.intersect_frame, text="Input STAR files", padding=12)
         intersect_star_box.grid(row=1, column=0, sticky="ew", pady=(12, 0))
         intersect_star_box.columnconfigure(0, weight=1)
+        intersect_star_box.rowconfigure(1, weight=1)
         star_actions = ttk.Frame(intersect_star_box)
         star_actions.grid(row=0, column=0, sticky="ew", pady=(0, 8))
         star_actions.columnconfigure(0, weight=1)
@@ -501,7 +567,10 @@ class ParticlesTab(SidebarTab):
             row=0, column=2, padx=(8, 0)
         )
         self.intersect_star_list = tk.Listbox(intersect_star_box, height=5)
-        self.intersect_star_list.grid(row=1, column=0, sticky="ew")
+        self.intersect_star_list.grid(row=1, column=0, sticky="nsew")
+        intersect_star_scroll = ttk.Scrollbar(intersect_star_box, orient="vertical", command=self.intersect_star_list.yview)
+        intersect_star_scroll.grid(row=1, column=1, sticky="ns")
+        self.intersect_star_list.configure(yscrollcommand=intersect_star_scroll.set)
         self.intersect_star_list.bind("<<ListboxSelect>>", self._on_intersect_star_selected)
 
         intersect_log_box = ttk.LabelFrame(self.intersect_frame, text="Log window", padding=12)
@@ -611,6 +680,7 @@ class ParticlesTab(SidebarTab):
         merge_split_input_box = ttk.LabelFrame(self.merge_split_frame, text="Input STAR file(s)", padding=12)
         merge_split_input_box.grid(row=1, column=0, sticky="ew", pady=(12, 0))
         merge_split_input_box.columnconfigure(0, weight=1)
+        merge_split_input_box.rowconfigure(1, weight=1)
         merge_split_actions = ttk.Frame(merge_split_input_box)
         merge_split_actions.grid(row=0, column=0, sticky="ew", pady=(0, 8))
         merge_split_actions.columnconfigure(0, weight=1)
@@ -630,7 +700,14 @@ class ParticlesTab(SidebarTab):
             command=self._remove_selected_merge_split_star,
         ).grid(row=0, column=3, padx=(8, 0))
         self.merge_split_star_list = tk.Listbox(merge_split_input_box, height=5)
-        self.merge_split_star_list.grid(row=1, column=0, sticky="ew")
+        self.merge_split_star_list.grid(row=1, column=0, sticky="nsew")
+        merge_split_star_scroll = ttk.Scrollbar(
+            merge_split_input_box,
+            orient="vertical",
+            command=self.merge_split_star_list.yview,
+        )
+        merge_split_star_scroll.grid(row=1, column=1, sticky="ns")
+        self.merge_split_star_list.configure(yscrollcommand=merge_split_star_scroll.set)
         self.merge_split_star_list.bind("<<ListboxSelect>>", self._on_merge_split_star_selected)
 
         merge_split_log_box = ttk.LabelFrame(self.merge_split_frame, text="Log window", padding=12)
@@ -687,6 +764,7 @@ class ParticlesTab(SidebarTab):
         abundance_star_box = ttk.LabelFrame(self.abundance_frame, text="Input STAR files", padding=12)
         abundance_star_box.grid(row=0, column=0, sticky="ew")
         abundance_star_box.columnconfigure(0, weight=1)
+        abundance_star_box.rowconfigure(1, weight=1)
         abundance_actions = ttk.Frame(abundance_star_box)
         abundance_actions.grid(row=0, column=0, sticky="ew", pady=(0, 8))
         abundance_actions.columnconfigure(0, weight=1)
@@ -701,7 +779,10 @@ class ParticlesTab(SidebarTab):
             command=self._remove_selected_abundance_star,
         ).grid(row=0, column=2, padx=(8, 0))
         self.abundance_star_list = tk.Listbox(abundance_star_box, height=5)
-        self.abundance_star_list.grid(row=1, column=0, sticky="ew")
+        self.abundance_star_list.grid(row=1, column=0, sticky="nsew")
+        abundance_star_scroll = ttk.Scrollbar(abundance_star_box, orient="vertical", command=self.abundance_star_list.yview)
+        abundance_star_scroll.grid(row=1, column=1, sticky="ns")
+        self.abundance_star_list.configure(yscrollcommand=abundance_star_scroll.set)
         self.abundance_star_list.bind("<<ListboxSelect>>", self._on_abundance_star_selected)
 
         abundance_parameters = ttk.LabelFrame(self.abundance_frame, text="Plot parameters", padding=12)
@@ -905,6 +986,7 @@ class ParticlesTab(SidebarTab):
             columns=("job_name", "dataset_name", "timestamp", "action"),
             show="headings",
             height=14,
+            style="Technical.Treeview",
         )
         self.history_table.heading("job_name", text="Job", command=lambda: self._sort_history("job_name"))
         self.history_table.heading("dataset_name", text="Dataset", command=lambda: self._sort_history("dataset_name"))
@@ -946,7 +1028,10 @@ class ParticlesTab(SidebarTab):
         self.outer_canvas.configure(scrollregion=self.outer_canvas.bbox("all"))
 
     def _on_outer_canvas_configure(self, event) -> None:
-        self.outer_canvas.itemconfigure(self.outer_window, width=event.width)
+        fit_outer_canvas_to_viewport(self.outer_canvas, self.outer_window, self.content, event)
+
+    def _schedule_outer_layout_refresh(self) -> None:
+        self.outer_canvas.after_idle(self._on_outer_frame_configure)
 
     def _on_parameter_frame_configure(self, _event=None) -> None:
         self.parameter_canvas.configure(scrollregion=self.parameter_canvas.bbox("all"))
@@ -957,6 +1042,9 @@ class ParticlesTab(SidebarTab):
     def _scroll_job_view_to_top(self) -> None:
         self.parameter_canvas.yview_moveto(0)
         self.parameter_canvas.xview_moveto(0)
+
+    def on_tab_shown(self) -> None:
+        self.frame.after_idle(self._on_outer_frame_configure)
 
     def _dataset_map(self) -> dict[str, DatasetRecord]:
         return {dataset.dataset_name: dataset for dataset in self.app.project.datasets}
@@ -1628,6 +1716,29 @@ class ParticlesTab(SidebarTab):
 
     def _current_preview_text(self) -> str:
         return self.command_text.get("1.0", "end").strip()
+
+    def _preview_command_lines(self) -> list[str]:
+        return [
+            line.strip()
+            for line in self.command_text.get("1.0", "end").splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        ]
+
+    def _commands_with_preview_override(
+        self,
+        commands: list[tuple[DatasetRecord, str]],
+    ) -> list[tuple[DatasetRecord, str]]:
+        preview_lines = self._preview_command_lines()
+        if not preview_lines:
+            return commands
+        if not commands:
+            return []
+        overridden: list[tuple[DatasetRecord, str]] = []
+        fallback_dataset = commands[-1][0]
+        for index, line in enumerate(preview_lines):
+            dataset = commands[index][0] if index < len(commands) else fallback_dataset
+            overridden.append((dataset, line))
+        return overridden
 
     def _browse_distance_input_star(self) -> None:
         value = filedialog.askopenfilename(
@@ -3162,7 +3273,7 @@ class ParticlesTab(SidebarTab):
             return
         self.frame.clipboard_clear()
         self.frame.clipboard_append(preview)
-        for dataset, command in self._commands():
+        for dataset, command in self._commands_with_preview_override(self._commands()):
             self._record_history_entry(dataset, "copied", command)
         self.app.on_project_changed("particles")
         self.app.status_var.set("Particle export commands copied to clipboard")
@@ -3179,6 +3290,7 @@ class ParticlesTab(SidebarTab):
                 "The selected datasets are not ready for particle export:\n\n" + "\n".join(dataset_problems),
             )
             return
+        commands = self._commands_with_preview_override(commands)
         use_slurm = self.execution_mode_var.get() == "Submit to Slurm"
         profile_name = self.slurm_profile_var.get().strip()
         if use_slurm and not profile_name and not self.app.is_debug_mode_enabled():
@@ -3401,7 +3513,7 @@ class ParticlesTab(SidebarTab):
             tree_parent = container
             plots_parent = None
 
-        tree = ttk.Treeview(tree_parent, columns=("field", "value"), show="tree headings")
+        tree = ttk.Treeview(tree_parent, columns=("field", "value"), show="tree headings", style="Technical.Treeview")
         tree.heading("#0", text="Section")
         tree.heading("field", text="Field")
         tree.heading("value", text="Value")
@@ -3552,6 +3664,7 @@ class ParticlesTab(SidebarTab):
         project_id = id(project)
         if self.bound_project_id != project_id:
             self.bound_project_id = project_id
+            self.export_pane.restore_from_project(project)
             self.selected_export_datasets = []
             self.selected_distance_datasets = []
             self.selected_intersect_datasets = []
@@ -3604,6 +3717,13 @@ class ParticlesTab(SidebarTab):
         self._refresh_abundance_star_list(show_busy=False)
         self._refresh_intersect_star_list(show_busy=False)
         self._refresh_merge_split_star_list()
+
+    def sync_to_project(self, project: ProjectData) -> None:
+        self.export_pane.write_to_project(project)
+
+    def reset_window_sizes(self) -> None:
+        self.export_pane.reset_to_defaults()
+        self._schedule_outer_layout_refresh()
         self._refresh_convergence_directory_metadata()
         self._on_intersect_identification_changed()
         self._on_job_type_changed()

@@ -61,7 +61,7 @@ class DefaultParametersDialog:
         tree_box.grid(row=content_row, column=0, sticky="nsw")
         tree_box.columnconfigure(0, weight=1)
         tree_box.rowconfigure(0, weight=1)
-        self.tree = ttk.Treeview(tree_box, show="tree")
+        self.tree = ttk.Treeview(tree_box, show="tree", style="Technical.Treeview")
         self.tree.grid(row=0, column=0, sticky="nsw")
         tree_scroll = ttk.Scrollbar(tree_box, orient="vertical", command=self.tree.yview)
         tree_scroll.grid(row=0, column=1, sticky="ns")
