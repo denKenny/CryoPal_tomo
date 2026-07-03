@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import tempfile
 import threading
 import tkinter as tk
@@ -27,6 +28,40 @@ from cryoet_organizer.tabs.base import SidebarTab
 
 GALLERY_PAGE_SIZE = 50
 THUMBNAIL_CACHE_MANIFEST = "index.json"
+_FLOAT_PATTERN = r"[+-]?(?:\d+(?:[\.,]\d*)?|[\.,]\d+)"
+_FLOAT_RANGE_RE = re.compile(rf"^\s*({_FLOAT_PATTERN})\s*-\s*({_FLOAT_PATTERN})\s*$")
+
+
+def _parse_gallery_float(value: str) -> float | None:
+    cleaned = str(value).strip().replace(",", ".")
+    if not cleaned:
+        return None
+    try:
+        return float(cleaned)
+    except ValueError:
+        return None
+
+
+def _parse_gallery_float_range(value: str) -> tuple[float, float] | None:
+    text = str(value).strip()
+    if not text:
+        return None
+    match = _FLOAT_RANGE_RE.match(text)
+    if match is None:
+        return None
+    lower = _parse_gallery_float(match.group(1))
+    upper = _parse_gallery_float(match.group(2))
+    if lower is None or upper is None:
+        return None
+    return (min(lower, upper), max(lower, upper))
+
+
+def _parse_gallery_float_bounds(lower_value: str, upper_value: str) -> tuple[float, float] | None:
+    lower = _parse_gallery_float(lower_value)
+    upper = _parse_gallery_float(upper_value)
+    if lower is None or upper is None:
+        return None
+    return (min(lower, upper), max(lower, upper))
 
 
 class _GalleryBusyDialog:
@@ -89,6 +124,9 @@ class GalleryTab(SidebarTab):
 
         self.dataset_var = tk.StringVar()
         self.min_rating_var = tk.StringVar(value="Any")
+        self.resolution_filter_var = tk.StringVar()
+        self.defocus_min_filter_var = tk.StringVar()
+        self.defocus_max_filter_var = tk.StringVar()
         self.tag_include_mode_var = tk.StringVar(value="All selected")
         self.tag_input_var = tk.StringVar()
         self.thumbnail_size_var = tk.IntVar(value=210)
@@ -109,6 +147,8 @@ class GalleryTab(SidebarTab):
         self._pending_render_batch_after: str | None = None
         self._pending_multi_details_after: str | None = None
         self._pending_auto_select_after: str | None = None
+        self._pending_filter_layout_after: str | None = None
+        self.gallery_filter_items: list[ttk.Frame] = []
         self._reuse_prepared_records_once = False
         self._last_render_column_count: int | None = None
         self._loaded_project_id: int | None = None
@@ -146,32 +186,79 @@ class GalleryTab(SidebarTab):
 
         controls = ttk.LabelFrame(left_panel, text="Gallery selection", padding=12)
         controls.grid(row=0, column=0, sticky="ew", padx=(0, 12))
-        for column in range(7):
-            controls.columnconfigure(column, weight=1 if column in (0, 4) else 0)
+        controls.columnconfigure(0, weight=1)
 
-        ttk.Label(controls, text="Dataset").grid(row=0, column=0, sticky="w", pady=(0, 4))
+        self.gallery_filter_bar = ttk.Frame(controls)
+        self.gallery_filter_bar.grid(row=0, column=0, sticky="ew")
+        self.gallery_filter_bar.bind("<Configure>", self._schedule_gallery_filter_layout)
+
+        dataset_filter = ttk.Frame(self.gallery_filter_bar)
+        dataset_filter.columnconfigure(0, weight=1)
+        ttk.Label(dataset_filter, text="Dataset").grid(row=0, column=0, sticky="w", pady=(0, 4))
         self.dataset_combo = ttk.Combobox(
-            controls,
+            dataset_filter,
             textvariable=self.dataset_var,
             state="readonly",
+            width=28,
         )
-        self.dataset_combo.grid(row=1, column=0, sticky="ew", padx=(0, 12))
+        self.dataset_combo.grid(row=1, column=0, sticky="ew")
         self.dataset_combo.bind("<<ComboboxSelected>>", self._on_dataset_selected)
 
-        ttk.Label(controls, text="Min rating").grid(row=0, column=1, sticky="w", pady=(0, 4))
+        rating_filter = ttk.Frame(self.gallery_filter_bar)
+        rating_filter.columnconfigure(0, weight=1)
+        ttk.Label(rating_filter, text="Min rating").grid(row=0, column=0, sticky="w", pady=(0, 4))
         self.rating_filter_combo = ttk.Combobox(
-            controls,
+            rating_filter,
             textvariable=self.min_rating_var,
             state="readonly",
             values=["Any", "1", "2", "3", "4", "5"],
             width=8,
         )
-        self.rating_filter_combo.grid(row=1, column=1, sticky="ew", padx=(0, 12))
+        self.rating_filter_combo.grid(row=1, column=0, sticky="ew")
         self.rating_filter_combo.bind("<<ComboboxSelected>>", self._on_gallery_filter_changed)
 
-        ttk.Label(controls, text="Thumbnail size").grid(row=0, column=3, sticky="w", pady=(0, 4))
-        zoom_controls = ttk.Frame(controls)
-        zoom_controls.grid(row=1, column=3, sticky="w", padx=(0, 12))
+        resolution_filter = ttk.Frame(self.gallery_filter_bar)
+        resolution_filter.columnconfigure(0, weight=1)
+        ttk.Label(resolution_filter, text="Min res. estimate").grid(row=0, column=0, sticky="w", pady=(0, 4))
+        self.resolution_filter_entry = ttk.Entry(
+            resolution_filter,
+            textvariable=self.resolution_filter_var,
+            width=14,
+        )
+        self.resolution_filter_entry.grid(row=1, column=0, sticky="ew")
+        self.resolution_filter_entry.bind("<KeyRelease>", self._on_gallery_filter_changed)
+        self.resolution_filter_entry.bind("<FocusOut>", self._on_gallery_filter_changed)
+        self.resolution_filter_entry.bind("<Return>", self._on_gallery_filter_changed)
+
+        defocus_filter = ttk.Frame(self.gallery_filter_bar)
+        defocus_filter.columnconfigure(0, weight=1)
+        ttk.Label(defocus_filter, text="Defocus range").grid(row=0, column=0, sticky="w", pady=(0, 4))
+        defocus_range_row = ttk.Frame(defocus_filter)
+        defocus_range_row.grid(row=1, column=0, sticky="ew")
+        defocus_range_row.columnconfigure(0, weight=1)
+        defocus_range_row.columnconfigure(2, weight=1)
+        self.defocus_min_filter_entry = ttk.Entry(
+            defocus_range_row,
+            textvariable=self.defocus_min_filter_var,
+            width=8,
+        )
+        self.defocus_min_filter_entry.grid(row=0, column=0, sticky="ew")
+        ttk.Label(defocus_range_row, text="-").grid(row=0, column=1, padx=6)
+        self.defocus_range_filter_entry = ttk.Entry(
+            defocus_range_row,
+            textvariable=self.defocus_max_filter_var,
+            width=8,
+        )
+        self.defocus_range_filter_entry.grid(row=0, column=2, sticky="ew")
+        for entry in (self.defocus_min_filter_entry, self.defocus_range_filter_entry):
+            entry.bind("<KeyRelease>", self._on_gallery_filter_changed)
+            entry.bind("<FocusOut>", self._on_gallery_filter_changed)
+            entry.bind("<Return>", self._on_gallery_filter_changed)
+
+        zoom_filter = ttk.Frame(self.gallery_filter_bar)
+        ttk.Label(zoom_filter, text="Thumbnail size").grid(row=0, column=0, sticky="w", pady=(0, 4))
+        zoom_controls = ttk.Frame(zoom_filter)
+        zoom_controls.grid(row=1, column=0, sticky="w")
         ttk.Button(zoom_controls, text="-", width=3, command=lambda: self._change_zoom(-1)).grid(
             row=0, column=0
         )
@@ -181,38 +268,55 @@ class GalleryTab(SidebarTab):
         ttk.Button(zoom_controls, text="+", width=3, command=lambda: self._change_zoom(1)).grid(
             row=0, column=2
         )
+        self.gallery_filter_items = [
+            dataset_filter,
+            rating_filter,
+            resolution_filter,
+            defocus_filter,
+            zoom_filter,
+        ]
+        self._schedule_gallery_filter_layout()
 
         action_buttons = ttk.Frame(controls)
-        action_buttons.grid(row=1, column=4, sticky="ew")
-        action_buttons.columnconfigure(2, weight=1)
+        action_buttons.grid(row=1, column=0, sticky="ew", pady=(10, 0))
+        action_buttons.columnconfigure(3, weight=1)
+        self.pager_row = ttk.Frame(action_buttons)
+        self.pager_row.grid(row=0, column=0, sticky="w", padx=(0, 12))
+        self.pager_status_var = tk.StringVar(value="")
+        self.prev_page_button = ttk.Button(self.pager_row, text="Previous", command=lambda: self._change_page(-1))
+        self.prev_page_button.grid(row=0, column=0, padx=(0, 6))
+        ttk.Label(self.pager_row, textvariable=self.pager_status_var).grid(row=0, column=1, padx=4)
+        self.next_page_button = ttk.Button(self.pager_row, text="Next", command=lambda: self._change_page(1))
+        self.next_page_button.grid(row=0, column=2, padx=(6, 0))
+        self.pager_row.grid_remove()
         ttk.Button(
             action_buttons,
             text="Reset filters",
             command=self._reset_gallery_filters,
-        ).grid(row=0, column=0, sticky="w", padx=(0, 8))
+        ).grid(row=0, column=1, sticky="w", padx=(0, 8))
         self.manual_import_button = ttk.Menubutton(
             action_buttons,
             text="Manual import",
         )
-        self.manual_import_button.grid(row=0, column=1, columnspan=2, sticky="e")
+        self.manual_import_button.grid(row=0, column=2, sticky="w")
         self.manual_import_menu = tk.Menu(self.manual_import_button, tearoff=False)
         self.manual_import_menu.add_command(label="Import thumbnail folder", command=self._import_thumbnails)
         self.manual_import_menu.add_command(label="Link .mrc from folder", command=self._link_mrc_folder)
         self.manual_import_button.configure(menu=self.manual_import_menu)
         ttk.Button(
-            controls,
+            action_buttons,
             text="Multi selection",
             command=self._toggle_multi_selection,
-        ).grid(row=1, column=5, sticky="e", padx=(8, 0))
+        ).grid(row=0, column=4, sticky="e", padx=(8, 0))
         self.select_all_button = ttk.Button(
-            controls,
+            action_buttons,
             text="Select all filtered",
             command=self._select_all_visible,
         )
-        self.select_all_button.grid(row=1, column=6, sticky="e", padx=(8, 0))
+        self.select_all_button.grid(row=0, column=5, sticky="e", padx=(8, 0))
         self.select_all_button.grid_remove()
         tag_filters = ttk.LabelFrame(controls, text="Tag filters", padding=10)
-        tag_filters.grid(row=2, column=0, columnspan=7, sticky="ew", pady=(12, 0))
+        tag_filters.grid(row=2, column=0, sticky="ew", pady=(12, 0))
         tag_filters.columnconfigure(0, weight=1)
         tag_filters.columnconfigure(1, weight=1)
 
@@ -258,16 +362,6 @@ class GalleryTab(SidebarTab):
 
         self.summary_label = ttk.Label(left_panel, text="", wraplength=900, justify="left")
         self.summary_label.grid(row=1, column=0, sticky="nw", pady=(12, 8))
-
-        self.pager_row = ttk.Frame(controls)
-        self.pager_row.grid(row=1, column=2, sticky="ew", padx=(0, 12))
-        self.pager_status_var = tk.StringVar(value="")
-        self.prev_page_button = ttk.Button(self.pager_row, text="Previous", command=lambda: self._change_page(-1))
-        self.prev_page_button.grid(row=0, column=0, padx=(0, 6))
-        ttk.Label(self.pager_row, textvariable=self.pager_status_var).grid(row=0, column=1, padx=4)
-        self.next_page_button = ttk.Button(self.pager_row, text="Next", command=lambda: self._change_page(1))
-        self.next_page_button.grid(row=0, column=2, padx=(6, 0))
-        self.pager_row.grid_remove()
 
         gallery_container = ttk.Frame(left_panel)
         gallery_container.grid(row=2, column=0, sticky="nsew")
@@ -430,6 +524,45 @@ class GalleryTab(SidebarTab):
         for label in (getattr(self, "selected_mrc_label", None), getattr(self, "selected_tags_label", None)):
             if label is not None:
                 label.configure(wraplength=available_width)
+
+    def _schedule_gallery_filter_layout(self, _event=None) -> None:
+        if self._pending_filter_layout_after is not None:
+            try:
+                self.frame.after_cancel(self._pending_filter_layout_after)
+            except tk.TclError:
+                pass
+        self._pending_filter_layout_after = self.frame.after_idle(self._layout_gallery_filter_bar)
+
+    def _layout_gallery_filter_bar(self) -> None:
+        self._pending_filter_layout_after = None
+        if not hasattr(self, "gallery_filter_bar"):
+            return
+        width = self.gallery_filter_bar.winfo_width()
+        if width <= 1:
+            self._pending_filter_layout_after = self.frame.after(60, self._layout_gallery_filter_bar)
+            return
+
+        gap = self.app._scale_pixels(12)
+        row_gap = self.app._scale_pixels(8)
+        current_row = 0
+        current_column = 0
+        used_width = 0
+        for item in self.gallery_filter_items:
+            requested_width = max(item.winfo_reqwidth(), self.app._scale_pixels(110))
+            if current_column > 0 and used_width + requested_width + gap > width:
+                current_row += 1
+                current_column = 0
+                used_width = 0
+            item.grid(
+                row=current_row,
+                column=current_column,
+                sticky="ew",
+                padx=(0, gap),
+                pady=(row_gap if current_row else 0, 0),
+            )
+            self.gallery_filter_bar.columnconfigure(current_column, weight=1 if current_column == 0 else 0)
+            used_width += requested_width + gap
+            current_column += 1
 
     def _capture_details_pane_width(self) -> None:
         try:
@@ -875,6 +1008,9 @@ class GalleryTab(SidebarTab):
         else:
             self.dataset_var.set("")
         self.min_rating_var.set("Any")
+        self.resolution_filter_var.set("")
+        self.defocus_min_filter_var.set("")
+        self.defocus_max_filter_var.set("")
         self.tag_include_mode_var.set("All selected")
         self._clear_filter_tag_selections()
         self.multi_selected_keys.clear()
@@ -1284,12 +1420,55 @@ class GalleryTab(SidebarTab):
             return self._thumbnail_image(thumbnail.image_path)
         return None
 
+    def _metadata_filter_values(self) -> tuple[float | None, tuple[float, float] | None]:
+        return (
+            _parse_gallery_float(self.resolution_filter_var.get()),
+            _parse_gallery_float_bounds(
+                self.defocus_min_filter_var.get(),
+                self.defocus_max_filter_var.get(),
+            ),
+        )
+
+    def _passes_metadata_filters(
+        self,
+        dataset: DatasetRecord,
+        thumbnail: ThumbnailRecord,
+        resolution_limit: float | None,
+        defocus_range: tuple[float, float] | None,
+    ) -> bool:
+        if resolution_limit is None and defocus_range is None:
+            return True
+        try:
+            metadata = collect_ts_metadata(
+                self.app.project,
+                dataset,
+                thumbnail.ts_name,
+                thumbnail_path=thumbnail.image_path,
+                mrc_path=thumbnail.mrc_path,
+            )
+        except Exception:
+            return False
+
+        if resolution_limit is not None:
+            estimate = metadata.ctf_resolution_estimate
+            if estimate is None or estimate >= resolution_limit:
+                return False
+        if defocus_range is not None:
+            defocus_value = metadata.defocus_value
+            if defocus_value is None:
+                return False
+            lower, upper = defocus_range
+            if defocus_value < lower or defocus_value > upper:
+                return False
+        return True
+
     def _filtered_items(
         self,
         records_by_dataset: dict[str, list[ThumbnailRecord]] | None = None,
     ) -> list[tuple[DatasetRecord, ThumbnailRecord]]:
         items: list[tuple[DatasetRecord, ThumbnailRecord]] = []
         min_rating = 0 if self.min_rating_var.get() == "Any" else int(self.min_rating_var.get())
+        resolution_limit, defocus_range = self._metadata_filter_values()
         include_tags = self._selected_filter_tags(self.include_tags_listbox)
         exclude_tags = self._selected_filter_tags(self.exclude_tags_listbox)
         include_mode = self.tag_include_mode_var.get().strip() or "All selected"
@@ -1313,6 +1492,8 @@ class GalleryTab(SidebarTab):
                     elif not all(tag in thumbnail_tags for tag in include_tags_folded):
                         continue
                 if exclude_tags_folded and any(tag in thumbnail_tags for tag in exclude_tags_folded):
+                    continue
+                if not self._passes_metadata_filters(dataset, thumbnail, resolution_limit, defocus_range):
                     continue
                 items.append((dataset, thumbnail))
         return items
