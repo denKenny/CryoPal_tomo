@@ -8,6 +8,8 @@ from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, ttk
 
+from cryoet_organizer.dialogs import technical_font_name
+
 
 @dataclass
 class DebugSessionState:
@@ -82,7 +84,7 @@ class DebugLogWindow:
             body,
             wrap="word",
             state="disabled",
-            font="TkDefaultFont",
+            font=technical_font_name(),
             background="#11161d",
             foreground="#dce4ef",
             insertbackground="#dce4ef",

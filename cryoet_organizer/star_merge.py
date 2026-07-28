@@ -6,7 +6,7 @@ import shlex
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Mapping, Sequence, Union
 
 
 class StarMergeError(RuntimeError):
@@ -147,13 +147,15 @@ class _ParticleAbundanceSummary:
 
 
 _CLASSIFICATION_CONVERGENCE_CACHE: dict[
-    tuple[str, int, tuple[str, ...]],
+    tuple[str, int, tuple[tuple[str, str], ...]],
     ParticleClassificationConvergencePlot,
 ] = {}
 _PARTICLE_ABUNDANCE_SUMMARY_CACHE: dict[
-    tuple[str, int, tuple[str, ...]],
+    tuple[str, int, tuple[tuple[str, str], ...]],
     _ParticleAbundanceSummary,
 ] = {}
+
+DatasetMatcherInput = Union[Sequence[str], Mapping[str, Sequence[str]]]
 
 
 def parse_star(path: str | Path) -> StarDocument:
@@ -390,7 +392,7 @@ def particle_star_pixel_size(path: str | Path) -> float:
 
 def distance_clean_particles(
     input_star_path: str | Path,
-    dataset_names: list[str],
+    dataset_names: DatasetMatcherInput,
     radius_px: float,
     output_name: str,
     write_cleaned: bool,
@@ -415,7 +417,6 @@ def distance_clean_particles(
     y_index = _header_index(particles_block.headers, "_rlnCoordinateY")
     z_index = _header_index(particles_block.headers, "_rlnCoordinateZ")
 
-    dataset_names = [name for name in dataset_names if name]
     selected_indices: list[int] = []
     selected_by_identifier: dict[str, list[int]] = {}
 
@@ -475,7 +476,7 @@ def distance_clean_particles(
 
 def intersect_particle_stars(
     input_star_paths: list[str | Path],
-    dataset_names: list[str],
+    dataset_names: DatasetMatcherInput,
     output_name: str,
     write_common: bool,
     write_unique: bool,
@@ -572,6 +573,7 @@ def particle_abundance_plot_data(
     dataset_to_sample: dict[str, str],
     compare_samples: bool,
     measure: str,
+    dataset_aliases: DatasetMatcherInput | None = None,
     cancel_event=None,
 ) -> ParticleAbundancePlot:
     if measure not in {"total", "density"}:
@@ -582,7 +584,7 @@ def particle_abundance_plot_data(
     ordered_dataset_names = sorted(dataset_to_sample.keys(), key=lambda value: (-len(value), value.casefold()))
     summary = _read_particle_abundance_summary(
         input_path,
-        ordered_dataset_names,
+        dataset_aliases or ordered_dataset_names,
         cancel_event=cancel_event,
     )
     mode = summary.mode
@@ -646,13 +648,14 @@ def particle_abundance_plot_data(
 
 def _read_particle_abundance_summary(
     path: Path,
-    dataset_names: list[str],
+    dataset_names: DatasetMatcherInput,
     cancel_event=None,
 ) -> _ParticleAbundanceSummary:
+    matcher_key = _dataset_matcher_cache_key(dataset_names)
     cache_key = (
         str(path.resolve()),
         path.stat().st_mtime_ns,
-        tuple(dataset_names),
+        matcher_key,
     )
     cached = _PARTICLE_ABUNDANCE_SUMMARY_CACHE.get(cache_key)
     if cached is not None:
@@ -724,7 +727,7 @@ def _read_particle_abundance_summary(
 
 def particle_classification_convergence_data(
     input_dir: str | Path,
-    dataset_names: list[str],
+    dataset_names: DatasetMatcherInput,
     cancel_event=None,
 ) -> ParticleClassificationConvergencePlot:
     directory = Path(input_dir)
@@ -745,23 +748,20 @@ def particle_classification_convergence_data(
     if not iteration_files:
         raise StarMergeError("No run_it???_data.star files were found in the selected directory.")
 
-    ordered_dataset_names = sorted(
-        [name for name in dataset_names if name],
-        key=lambda value: (-len(value), value.casefold()),
-    )
-    if not ordered_dataset_names:
+    matcher_key = _dataset_matcher_cache_key(dataset_names)
+    if not matcher_key:
         raise StarMergeError("No datasets are currently loaded in the project catalog.")
 
     cache_key = (
         str(directory.resolve()),
         max(path.stat().st_mtime_ns for _iteration, path in iteration_files),
-        tuple(ordered_dataset_names),
+        matcher_key,
     )
     cached = _CLASSIFICATION_CONVERGENCE_CACHE.get(cache_key)
     if cached is not None:
         return cached
 
-    matcher = _dataset_matcher(ordered_dataset_names)
+    matcher = _dataset_matcher(dataset_names)
 
     iteration_summaries: list[ClassificationIteration] = []
     class_labels: set[str] = set()
@@ -1036,31 +1036,84 @@ def _ensure_star_name(value: str) -> str:
     return f"{stripped}.star"
 
 
-def _matches_any_dataset(identifier: str, dataset_names: list[str]) -> bool:
-    token = Path(identifier).name
-    stem = Path(token).stem
-    for dataset_name in dataset_names:
-        if token.startswith(dataset_name) or stem.startswith(dataset_name):
-            return True
-    return False
+def _alias_variants(value: str) -> set[str]:
+    token = Path(str(value).strip()).name
+    if not token:
+        return set()
+    variants = {token, Path(token).stem}
+    if token.endswith(".tomostar"):
+        variants.add(token.removesuffix(".tomostar"))
+    return {item.casefold() for item in variants if item}
 
 
-def _matched_dataset_name(identifier: str, dataset_names: list[str]) -> str | None:
-    token = Path(identifier).name
-    stem = Path(token).stem
-    for dataset_name in dataset_names:
-        if token.startswith(dataset_name) or stem.startswith(dataset_name):
+def _dataset_alias_pairs(dataset_names: DatasetMatcherInput) -> tuple[tuple[str, str], ...]:
+    pairs: list[tuple[str, str]] = []
+    if isinstance(dataset_names, Mapping):
+        for dataset_name, aliases in dataset_names.items():
+            canonical = str(dataset_name).strip()
+            if not canonical:
+                continue
+            values = [canonical, *(str(alias).strip() for alias in aliases)]
+            for value in values:
+                for variant in _alias_variants(value):
+                    pairs.append((variant, canonical))
+    else:
+        for dataset_name in dataset_names:
+            canonical = str(dataset_name).strip()
+            if not canonical:
+                continue
+            for variant in _alias_variants(canonical):
+                pairs.append((variant, canonical))
+
+    unique: dict[tuple[str, str], tuple[str, str]] = {}
+    for alias, canonical in pairs:
+        unique[(alias, canonical.casefold())] = (alias, canonical)
+    return tuple(
+        sorted(
+            unique.values(),
+            key=lambda item: (-len(item[0]), item[0], item[1].casefold()),
+        )
+    )
+
+
+def _dataset_matcher_cache_key(dataset_names: DatasetMatcherInput) -> tuple[tuple[str, str], ...]:
+    return _dataset_alias_pairs(dataset_names)
+
+
+def _identifier_variants(identifier: str) -> tuple[str, str]:
+    token = Path(identifier).name.casefold()
+    stem = Path(token).stem.casefold()
+    return token, stem
+
+
+def _identifier_matches_alias(identifier: str, alias: str) -> bool:
+    token, stem = _identifier_variants(identifier)
+    return token.startswith(alias) or stem.startswith(alias)
+
+
+def _matches_any_dataset(identifier: str, dataset_names: DatasetMatcherInput) -> bool:
+    return _matched_dataset_name(identifier, dataset_names) is not None
+
+
+def _matched_dataset_name(identifier: str, dataset_names: DatasetMatcherInput) -> str | None:
+    for alias, dataset_name in _dataset_alias_pairs(dataset_names):
+        if _identifier_matches_alias(identifier, alias):
             return dataset_name
     return None
 
 
-def _dataset_matcher(dataset_names: list[str]) -> Callable[[str], str | None]:
+def _dataset_matcher(dataset_names: DatasetMatcherInput) -> Callable[[str], str | None]:
+    alias_pairs = _dataset_alias_pairs(dataset_names)
     cache: dict[str, str | None] = {}
 
     def match(identifier: str) -> str | None:
         if identifier in cache:
             return cache[identifier]
-        dataset_name = _matched_dataset_name(identifier, dataset_names)
+        dataset_name = None
+        for alias, candidate in alias_pairs:
+            if _identifier_matches_alias(identifier, alias):
+                dataset_name = candidate
+                break
         cache[identifier] = dataset_name
         return dataset_name
 
@@ -1169,7 +1222,7 @@ def _read_classification_star_summary(
     )
 
 
-def _prepare_particle_document(path: Path, dataset_names: list[str], cancel_event=None) -> dict:
+def _prepare_particle_document(path: Path, dataset_names: DatasetMatcherInput, cancel_event=None) -> dict:
     document = parse_star(path)
     mode = detect_particle_star_mode(path)
     pixel_size = particle_star_pixel_size(path)

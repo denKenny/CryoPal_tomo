@@ -1,6 +1,5 @@
 from __future__ import annotations
 import re
-import shlex
 import subprocess
 import threading
 import tkinter as tk
@@ -11,6 +10,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from cryoet_organizer.dialogs import bind_scrollable_canvas, fit_outer_canvas_to_viewport, show_detail_dialog
 from cryoet_organizer.environments import environment_titles
+from cryoet_organizer.executables import WARPTOOLS_EXECUTABLE, resolve_executable_command
 from cryoet_organizer.job_execution import (
     build_slurm_override_metadata,
     create_history_entry,
@@ -19,14 +19,19 @@ from cryoet_organizer.job_execution import (
     is_scheduled_history_entry,
     slurm_override_payload,
 )
-from cryoet_organizer.job_defaults import resolve_job_default
+from cryoet_organizer.job_defaults import (
+    added_job_default_fields,
+    is_job_default_field_removed,
+    resolve_job_default,
+    resolve_job_parameter_name,
+)
 from cryoet_organizer.particles_catalog import (
     export_particles_warp_job,
     particle_job_titles,
     particle_jobs_by_title,
 )
 from cryoet_organizer.preferences import project_preference_enabled
-from cryoet_organizer.project import DatasetRecord, JobHistoryEntry, ProjectData
+from cryoet_organizer.project import DatasetRecord, JobHistoryEntry, ProjectData, dataset_ts_names
 from cryoet_organizer.resizable_sections import ResizableSectionStack
 from cryoet_organizer.slurm import SlurmSubmissionResult
 from cryoet_organizer.slurm_override_ui import SlurmOverrideUI
@@ -115,7 +120,7 @@ class _ParticleBusyDialog:
 class ParticlesTab(SidebarTab):
     tab_id = "particles"
     title = "Processing: Particle jobs"
-    refresh_domains = ("particles", "datasets", "defaults", "file_registry", "preferences", "environments")
+    refresh_domains = ("particles", "datasets", "defaults", "executables", "file_registry", "preferences", "environments")
 
     def build(self) -> None:
         self.frame.columnconfigure(0, weight=1)
@@ -1092,6 +1097,23 @@ class ParticlesTab(SidebarTab):
     def _dataset_options(self) -> list[str]:
         return [dataset.dataset_name for dataset in self.app.project.datasets]
 
+    def _dataset_aliases(self, dataset_names: list[str] | None = None) -> dict[str, list[str]]:
+        selected = set(dataset_names) if dataset_names is not None else None
+        aliases: dict[str, list[str]] = {}
+        for dataset in self.app.project.datasets:
+            if selected is not None and dataset.dataset_name not in selected:
+                continue
+            values = [dataset.dataset_name]
+            for ts_name in dataset_ts_names(dataset):
+                if ts_name:
+                    values.extend((ts_name, f"{ts_name}.tomostar"))
+            for thumbnail in dataset.thumbnails:
+                if thumbnail.ts_name:
+                    values.extend((thumbnail.ts_name, f"{thumbnail.ts_name}.tomostar"))
+            unique_values = sorted({value for value in values if value}, key=lambda value: (-len(value), value.casefold()))
+            aliases[dataset.dataset_name] = unique_values
+        return aliases
+
     def _ensure_export_parameter_rows(self, count: int) -> None:
         while len(self._export_param_rows) < count:
             row_frame = ttk.Frame(self.parameter_container)
@@ -1192,12 +1214,12 @@ class ParticlesTab(SidebarTab):
             label_widget.grid_remove()
             check_widget = row["check_widget"]
             if check_widget is not None:
-                check_widget.configure(text=f"{flag.name}{' *' if flag.required else ''}")
+                check_widget.configure(text=f"{self._display_export_parameter_name(flag) or flag.name}{' *' if flag.required else ''}")
             assert isinstance(value_var, tk.BooleanVar)
             value_var.set(False)
         elif desired_kind == "export_output":
             label_widget.grid()
-            label_widget.config(text=f"{flag.name}{' *' if flag.required else ''}")
+            label_widget.config(text=f"{self._display_export_parameter_name(flag) or flag.name}{' *' if flag.required else ''}")
             assert isinstance(value_var, tk.StringVar)
             path_value = Path(default_value.strip()) if default_value.strip() else Path("")
             if path_value.suffix:
@@ -1209,10 +1231,57 @@ class ParticlesTab(SidebarTab):
                     self.export_output_name_var.set("Output.star")
         else:
             label_widget.grid()
-            label_widget.config(text=f"{flag.name}{' *' if flag.required else ''}")
+            label_widget.config(text=f"{self._display_export_parameter_name(flag) or flag.name}{' *' if flag.required else ''}")
             assert isinstance(value_var, tk.StringVar)
             value_var.set(default_value)
         self.parameter_vars[flag.name] = value_var
+
+    def _export_parameter_name(self, field_key: str, base_name: str) -> str:
+        return resolve_job_parameter_name(
+            self.app.project,
+            "Particles",
+            "Export particles",
+            "ts_export_particles",
+            field_key,
+            base_name,
+        )
+
+    def _export_parameter_base_name(self, flag: WarpToolFlag) -> str:
+        return "" if flag.name.startswith("custom__") else flag.name
+
+    def _display_export_parameter_name(self, flag: WarpToolFlag) -> str:
+        return self._export_parameter_name(flag.name, self._export_parameter_base_name(flag))
+
+    def _active_export_flags(self) -> tuple[WarpToolFlag, ...]:
+        flags = [
+            flag
+            for flag in self.current_job.flags
+            if not is_job_default_field_removed(
+                self.app.project,
+                "Particles",
+                "Export particles",
+                "ts_export_particles",
+                flag.name,
+            )
+        ]
+        for field in added_job_default_fields(
+            self.app.project,
+            "Particles",
+            "Export particles",
+            "ts_export_particles",
+        ):
+            flags.append(
+                WarpToolFlag(
+                    name=field.key,
+                    aliases=(),
+                    description=field.description or field.label,
+                    required=False,
+                    default_value=field.default_value,
+                    widget=field.widget,
+                    browse_mode="dir" if field.widget == "path" else "file",
+                )
+            )
+        return tuple(flags)
 
     def _hide_unused_export_parameter_rows(self, used_count: int) -> None:
         for row in self._export_param_rows[used_count:]:
@@ -1224,7 +1293,7 @@ class ParticlesTab(SidebarTab):
         self.parameter_vars.clear()
 
         row = 0
-        for flag in self.current_job.flags:
+        for flag in self._active_export_flags():
             if flag.name == "--settings":
                 continue
             default_value = resolve_job_default(
@@ -1596,9 +1665,6 @@ class ParticlesTab(SidebarTab):
             self.intersect_selected_dataset_list.insert("end", dataset_name)
         self._update_intersect_preview()
 
-    def _quote(self, value: str) -> str:
-        return shlex.quote(value)
-
     def _resolved_export_settings_path(self, dataset: DatasetRecord, *, require_exists: bool = False) -> str:
         candidates: list[Path] = []
         if dataset.tilt_series_settings_file.strip():
@@ -1658,13 +1724,14 @@ class ParticlesTab(SidebarTab):
         }
 
     def _build_command_for_dataset(self, dataset: DatasetRecord) -> str:
-        parts = [f"WarpTools {self.current_job.command}"]
+        parts = [f"{resolve_executable_command(self.app.project, WARPTOOLS_EXECUTABLE)} {self.current_job.command}"]
         dataset_specific = self._dataset_command_values(dataset)
-        for flag in self.current_job.flags:
+        for flag in self._active_export_flags():
             variable = self.parameter_vars.get(flag.name)
+            parameter_name = self._display_export_parameter_name(flag)
             if flag.widget == "bool":
-                if variable is not None and variable.get():
-                    parts.append(flag.name)
+                if variable is not None and variable.get() and parameter_name:
+                    parts.append(parameter_name)
                 continue
 
             value = dataset_specific.get(flag.name, "")
@@ -1675,7 +1742,7 @@ class ParticlesTab(SidebarTab):
                 elif not value:
                     value = current_value
             if value:
-                parts.append(f"{flag.name} {self._quote(value)}")
+                parts.append(f"{parameter_name} {value}" if parameter_name else value)
         return " ".join(parts)
 
     def _commands(self) -> list[tuple[DatasetRecord, str]]:
@@ -1900,7 +1967,7 @@ class ParticlesTab(SidebarTab):
                 self.app.root.after(0, lambda: self._set_distance_log(""))
                 outputs = distance_clean_particles(
                     input_star_path=input_star,
-                    dataset_names=self.selected_distance_datasets,
+                    dataset_names=self._dataset_aliases(self.selected_distance_datasets),
                     radius_px=radius_px,
                     output_name=self.distance_output_name_var.get().strip(),
                     write_cleaned=self.distance_cleaned_var.get(),
@@ -1919,11 +1986,12 @@ class ParticlesTab(SidebarTab):
                 )
                 return
             except Exception as exc:
+                status_message = f"Distance clean failed: {exc}"
                 self.app.root.after(
                     0,
-                    lambda: (
+                    lambda message=status_message: (
                         self._close_particle_busy(busy),
-                        self.app.status_var.set(f"Distance clean failed: {exc}"),
+                        self.app.status_var.set(message),
                     ),
                 )
                 return
@@ -2230,12 +2298,14 @@ class ParticlesTab(SidebarTab):
                 )
                 return
             except Exception as exc:
+                log_message = f"Error: {exc}"
+                status_message = f"Merge/Split failed: {exc}"
                 self.app.root.after(
                     0,
-                    lambda: (
+                    lambda log=log_message, status=status_message: (
                         self._close_particle_busy(busy),
-                        self._append_merge_split_log(f"Error: {exc}"),
-                        self.app.status_var.set(f"Merge/Split failed: {exc}"),
+                        self._append_merge_split_log(log),
+                        self.app.status_var.set(status),
                     ),
                 )
                 return
@@ -2833,6 +2903,7 @@ class ParticlesTab(SidebarTab):
                             dataset_to_sample=dataset_to_sample,
                             compare_samples=compare_samples,
                             measure=measure,
+                            dataset_aliases=self._dataset_aliases(),
                             cancel_event=cancel_event,
                         )
                     )
@@ -2900,10 +2971,11 @@ class ParticlesTab(SidebarTab):
             on_abort=cancel_event.set,
         )
         dataset_names = self._dataset_options()
+        dataset_aliases = self._dataset_aliases()
 
         def worker() -> None:
             try:
-                plot = particle_classification_convergence_data(directory, dataset_names, cancel_event=cancel_event)
+                plot = particle_classification_convergence_data(directory, dataset_aliases, cancel_event=cancel_event)
             except OperationAborted:
                 self.app.root.after(
                     0,
@@ -2914,11 +2986,12 @@ class ParticlesTab(SidebarTab):
                 )
                 return
             except Exception as exc:
+                error_message = f"Could not render plots:\n{exc}"
                 self.app.root.after(
                     0,
-                    lambda: (
+                    lambda message=error_message: (
                         self._close_particle_busy(busy),
-                        self._reset_convergence_plot_display(f"Could not render plots:\n{exc}"),
+                        self._reset_convergence_plot_display(message),
                     ),
                 )
                 return
@@ -3135,7 +3208,7 @@ class ParticlesTab(SidebarTab):
                 self.app.root.after(0, lambda: self._set_intersect_log(""))
                 outputs = intersect_particle_stars(
                     input_star_paths=self.intersect_star_paths,
-                    dataset_names=self.selected_intersect_datasets,
+                    dataset_names=self._dataset_aliases(self.selected_intersect_datasets),
                     output_name=self.intersect_output_name_var.get().strip(),
                     write_common=self.intersect_common_var.get(),
                     write_unique=self.intersect_unique_var.get(),
@@ -3157,12 +3230,14 @@ class ParticlesTab(SidebarTab):
                 )
                 return
             except Exception as exc:
+                log_message = f"Error: {exc}"
+                status_message = f"Intersect failed: {exc}"
                 self.app.root.after(
                     0,
-                    lambda: (
+                    lambda log=log_message, status=status_message: (
                         self._close_particle_busy(busy),
-                        self._append_intersect_log(f"Error: {exc}"),
-                        self.app.status_var.set(f"Intersect failed: {exc}"),
+                        self._append_intersect_log(log),
+                        self.app.status_var.set(status),
                     ),
                 )
                 return
@@ -3235,7 +3310,7 @@ class ParticlesTab(SidebarTab):
     ) -> JobHistoryEntry:
         effective_environment = self._effective_particle_environment()
         values = {}
-        for flag in self.current_job.flags:
+        for flag in self._active_export_flags():
             variable = self.parameter_vars.get(flag.name)
             if variable is None:
                 continue
@@ -3717,6 +3792,7 @@ class ParticlesTab(SidebarTab):
         self._refresh_abundance_star_list(show_busy=False)
         self._refresh_intersect_star_list(show_busy=False)
         self._refresh_merge_split_star_list()
+        self._update_command_preview()
 
     def sync_to_project(self, project: ProjectData) -> None:
         self.export_pane.write_to_project(project)

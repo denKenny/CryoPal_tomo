@@ -2,11 +2,18 @@ from __future__ import annotations
 
 import unittest
 from pathlib import Path
+from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 from cryoet_organizer.preferences import (
+    display_profile_metrics,
+    load_global_preferences,
+    normalize_display_profile,
     project_preference,
     project_preference_enabled,
     project_preference_int,
+    resolve_display_profile,
+    save_global_preferences,
 )
 from cryoet_organizer.project import ProjectData
 from cryoet_organizer.project import DatasetRecord
@@ -117,6 +124,37 @@ class PreferencesTests(unittest.TestCase):
             load_layout_value(project, "gallery", "details", dimension="width", default=320, minimum=240),
             360,
         )
+
+    def test_display_profile_normalization_and_auto_resolution(self) -> None:
+        self.assertEqual(normalize_display_profile("large"), "large")
+        self.assertEqual(normalize_display_profile("unknown"), "auto")
+        self.assertEqual(
+            resolve_display_profile("auto", screen_dpi=170, screen_width=1920, screen_height=1080),
+            "large",
+        )
+        self.assertEqual(
+            resolve_display_profile("auto", screen_dpi=210, screen_width=3840, screen_height=2160),
+            "extra_large",
+        )
+        self.assertEqual(
+            resolve_display_profile("auto", screen_dpi=96, screen_width=2560, screen_height=1440),
+            "large",
+        )
+        self.assertEqual(resolve_display_profile("auto", screen_dpi=96, screen_width=1920, screen_height=1080), "normal")
+        self.assertEqual(display_profile_metrics("large")["body_size"], 12)
+
+    def test_global_preferences_are_loaded_and_saved(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "prefs.json"
+            with patch("cryoet_organizer.preferences._GLOBAL_PREFERENCES_PATH", path):
+                loaded = load_global_preferences()
+                self.assertEqual(loaded["display_profile"], "auto")
+
+                saved = save_global_preferences({"display_profile": "extra_large"})
+                self.assertEqual(saved["display_profile"], "extra_large")
+
+                reloaded = load_global_preferences()
+                self.assertEqual(reloaded["display_profile"], "extra_large")
 
 
 if __name__ == "__main__":

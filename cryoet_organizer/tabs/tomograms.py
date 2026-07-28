@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from datetime import datetime, timezone
 import json
 from pathlib import Path
@@ -10,6 +11,14 @@ from tkinter import filedialog, messagebox, ttk
 
 from cryoet_organizer.dialogs import bind_scrollable_canvas, fit_outer_canvas_to_viewport, show_detail_dialog
 from cryoet_organizer.environments import environment_titles
+from cryoet_organizer.executables import (
+    CRYOLITHE_EXECUTABLE,
+    MEMBRAIN_EXECUTABLE,
+    PYTOM_EXTRACT_EXECUTABLE,
+    PYTOM_MATCH_EXECUTABLE,
+    SLABIFY_EXECUTABLE,
+    resolve_executable_command,
+)
 from cryoet_organizer.file_resolver import resolve_dataset_file
 from cryoet_organizer.job_execution import (
     build_slurm_override_metadata,
@@ -18,7 +27,11 @@ from cryoet_organizer.job_execution import (
     is_scheduled_history_entry,
     slurm_override_payload,
 )
-from cryoet_organizer.job_defaults import resolve_job_default
+from cryoet_organizer.job_defaults import (
+    command_parts_for_added_job_defaults,
+    resolve_job_default,
+    resolve_job_parameter_name,
+)
 from cryoet_organizer.project import (
     DatasetRecord,
     JobHistoryEntry,
@@ -39,7 +52,16 @@ from cryoet_organizer.tomograms_catalog import tomogram_job_titles, tomogram_job
 class TomogramsTab(SidebarTab):
     tab_id = "tomograms"
     title = "Processing: TS jobs"
-    refresh_domains = ("tomograms", "datasets", "file_registry", "defaults", "custom", "ts_selection", "environments")
+    refresh_domains = (
+        "tomograms",
+        "datasets",
+        "file_registry",
+        "defaults",
+        "executables",
+        "custom",
+        "ts_selection",
+        "environments",
+    )
 
     def build(self) -> None:
         self.frame.columnconfigure(0, weight=1)
@@ -1127,6 +1149,24 @@ class TomogramsTab(SidebarTab):
     def _tomogram_default(self, group: str, job_key: str, field_key: str, base_value: str) -> str:
         return resolve_job_default(self.app.project, "Tomograms", group, job_key, field_key, base_value)
 
+    def _tomogram_parameter_name(self, group: str, job_key: str, field_key: str, base_name: str) -> str:
+        return resolve_job_parameter_name(
+            self.app.project,
+            "Tomograms",
+            group,
+            job_key,
+            field_key,
+            base_name,
+        )
+
+    def _tomogram_added_parts(self, group: str, job_key: str) -> list[str]:
+        return command_parts_for_added_job_defaults(
+            self.app.project,
+            "Tomograms",
+            group,
+            job_key,
+        )
+
     def _tomogram_default_bool(self, group: str, job_key: str, field_key: str, base_value: bool) -> bool:
         return self._tomogram_default(group, job_key, field_key, "true" if base_value else "").lower() in {
             "1",
@@ -1834,8 +1874,11 @@ class TomogramsTab(SidebarTab):
         else:
             self._update_cryolithe_preview()
 
-    def _quote(self, value: str) -> str:
-        return shlex.quote(value)
+    def _command_value(self, value: str) -> str:
+        return value
+
+    def _join_command_parts(self, parts: list[str]) -> str:
+        return " ".join(part for part in parts if part and not part.startswith(" "))
 
     def _find_first_matching_file(self, folder: Path, suffixes: tuple[str, ...], token: str) -> Path | None:
         if not folder.exists():
@@ -1943,21 +1986,29 @@ class TomogramsTab(SidebarTab):
                 "angle_file": str(angle_file),
                 "save_name": f"{entry['ts_name']}_CryoLithe.mrc",
             }
-            command = " ".join(
+            cryolithe_command = resolve_executable_command(self.app.project, CRYOLITHE_EXECUTABLE)
+            parameter_name = lambda field_key, base_name: self._tomogram_parameter_name(
+                "CryoLithe: Denoising",
+                "cryolithe_denoising",
+                field_key,
+                base_name,
+            )
+            command = self._join_command_parts(
                 [
-                    "cryolithe reconstruct",
+                    f"{cryolithe_command} reconstruct",
                     *(
-                        [f"--model-dir {self._quote(spec['model_dir'])}"]
+                        [f"{parameter_name('model_dir', '--model-dir')} {self._command_value(spec['model_dir'])}"]
                         if spec["model_dir"]
                         else []
                     ),
-                    f"--proj-file {self._quote(spec['proj_file'])}",
-                    f"--angle-file {self._quote(spec['angle_file'])}",
-                    f"--save-dir {self._quote(spec['save_dir'])}",
-                    f"--save-name {self._quote(spec['save_name'])}",
-                    f"--device {self._quote(spec['device'])}",
-                    f"--n3 {self._quote(spec['n3'])}",
-                    f"--batch-size {self._quote(spec['batch_size'])}",
+                    f"--proj-file {self._command_value(spec['proj_file'])}",
+                    f"--angle-file {self._command_value(spec['angle_file'])}",
+                    f"{parameter_name('save_dir', '--save-dir')} {self._command_value(spec['save_dir'])}",
+                    f"--save-name {self._command_value(spec['save_name'])}",
+                    f"{parameter_name('device', '--device')} {self._command_value(spec['device'])}",
+                    f"{parameter_name('n3', '--n3')} {self._command_value(spec['n3'])}",
+                    f"{parameter_name('batch_size', '--batch-size')} {self._command_value(spec['batch_size'])}",
+                    *self._tomogram_added_parts("CryoLithe: Denoising", "cryolithe_denoising"),
                 ]
             )
             commands.append((dataset, spec, command))
@@ -2021,62 +2072,73 @@ class TomogramsTab(SidebarTab):
                 "tilt_angles": str(tilt_angles),
             }
             command_parts = [
-                "pytom_match_template.py",
-                f"-t {self._quote(template)}",
-                f"-v {self._quote(spec['tomogram'])}",
-                f"-d {self._quote(destination)}",
-                f"-m {self._quote(mask)}",
-                f"-a {self._quote(spec['tilt_angles'])}",
-                f"-g {self._quote(self.pytom_gpu_ids_var.get().strip() or '0')}",
+                resolve_executable_command(self.app.project, PYTOM_MATCH_EXECUTABLE),
+                f"{self._tomogram_parameter_name('PyTom: Template matching', 'pytom_template_matching', 'template', '-t')} {self._command_value(template)}",
+                f"-v {self._command_value(spec['tomogram'])}",
+                f"{self._tomogram_parameter_name('PyTom: Template matching', 'pytom_template_matching', 'destination', '-d')} {self._command_value(destination)}",
+                f"{self._tomogram_parameter_name('PyTom: Template matching', 'pytom_template_matching', 'mask', '-m')} {self._command_value(mask)}",
+                f"-a {self._command_value(spec['tilt_angles'])}",
+                f"{self._tomogram_parameter_name('PyTom: Template matching', 'pytom_template_matching', 'gpu_ids', '-g')} {self._command_value(self.pytom_gpu_ids_var.get().strip() or '0')}",
             ]
             optional_pairs = [
-                ("--particle-diameter", self.pytom_particle_diameter_var.get().strip()),
-                ("--angular-search", self.pytom_angular_search_var.get().strip()),
-                ("--z-axis-rotational-symmetry", self.pytom_z_axis_symmetry_var.get().strip()),
-                ("-s", self.pytom_volume_split_var.get().strip()),
-                ("--search-x", self.pytom_search_x_var.get().strip()),
-                ("--search-y", self.pytom_search_y_var.get().strip()),
-                ("--search-z", self.pytom_search_z_var.get().strip()),
-                ("--voxel-size-angstrom", self.pytom_voxel_size_var.get().strip()),
-                ("--low-pass", self.pytom_low_pass_var.get().strip()),
-                ("--high-pass", self.pytom_high_pass_var.get().strip()),
-                ("--amplitude-contrast", self.pytom_amplitude_contrast_var.get().strip()),
-                ("--spherical-aberration", self.pytom_spherical_aberration_var.get().strip()),
-                ("--voltage", self.pytom_voltage_var.get().strip()),
-                ("--phase-shift", self.pytom_phase_shift_var.get().strip()),
-                ("--defocus-handedness", self.pytom_defocus_handedness_var.get().strip()),
-                ("--rng-seed", self.pytom_rng_seed_var.get().strip()),
-                ("--log", self.pytom_log_var.get().strip()),
+                ("particle_diameter", "--particle-diameter", self.pytom_particle_diameter_var.get().strip()),
+                ("angular_search", "--angular-search", self.pytom_angular_search_var.get().strip()),
+                ("z_axis_rotational_symmetry", "--z-axis-rotational-symmetry", self.pytom_z_axis_symmetry_var.get().strip()),
+                ("volume_split", "-s", self.pytom_volume_split_var.get().strip()),
+                ("search_x", "--search-x", self.pytom_search_x_var.get().strip()),
+                ("search_y", "--search-y", self.pytom_search_y_var.get().strip()),
+                ("search_z", "--search-z", self.pytom_search_z_var.get().strip()),
+                ("voxel_size_angstrom", "--voxel-size-angstrom", self.pytom_voxel_size_var.get().strip()),
+                ("low_pass", "--low-pass", self.pytom_low_pass_var.get().strip()),
+                ("high_pass", "--high-pass", self.pytom_high_pass_var.get().strip()),
+                ("amplitude_contrast", "--amplitude-contrast", self.pytom_amplitude_contrast_var.get().strip()),
+                ("spherical_aberration", "--spherical-aberration", self.pytom_spherical_aberration_var.get().strip()),
+                ("voltage", "--voltage", self.pytom_voltage_var.get().strip()),
+                ("phase_shift", "--phase-shift", self.pytom_phase_shift_var.get().strip()),
+                ("defocus_handedness", "--defocus-handedness", self.pytom_defocus_handedness_var.get().strip()),
+                ("rng_seed", "--rng-seed", self.pytom_rng_seed_var.get().strip()),
+                ("log", "--log", self.pytom_log_var.get().strip()),
             ]
-            for flag, value in optional_pairs:
+            for field_key, flag, value in optional_pairs:
                 if value:
+                    flag = self._tomogram_parameter_name("PyTom: Template matching", "pytom_template_matching", field_key, flag)
                     if flag in {"-s", "--search-x", "--search-y", "--search-z"}:
                         command_parts.append(f"{flag} {value}")
                     else:
-                        command_parts.append(f"{flag} {self._quote(value)}")
+                        command_parts.append(f"{flag} {self._command_value(value)}")
             optional_paths = [
-                ("--tomogram-mask", str(mask_map.get(entry["ts_name"], ""))),
-                ("--dose-accumulation", self.pytom_dose_accumulation_var.get().strip()),
-                ("--defocus", self.pytom_defocus_var.get().strip()),
-                ("--relion5-tomograms-star", self.pytom_relion5_star_var.get().strip()),
-                ("--warp-xml-file", str(warp_xml_path) if warp_xml_path is not None else ""),
+                ("tomogram_mask", "--tomogram-mask", str(mask_map.get(entry["ts_name"], ""))),
+                ("dose_accumulation", "--dose-accumulation", self.pytom_dose_accumulation_var.get().strip()),
+                ("defocus", "--defocus", self.pytom_defocus_var.get().strip()),
+                ("relion5_tomograms_star", "--relion5-tomograms-star", self.pytom_relion5_star_var.get().strip()),
+                ("warp_xml_file", "--warp-xml-file", str(warp_xml_path) if warp_xml_path is not None else ""),
             ]
-            for flag, value in optional_paths:
+            for field_key, flag, value in optional_paths:
+                flag = self._tomogram_parameter_name("PyTom: Template matching", "pytom_template_matching", field_key, flag)
                 if value:
-                    command_parts.append(f"{flag} {self._quote(value)}")
+                    command_parts.append(f"{flag} {self._command_value(value)}")
             if self.pytom_ctf_model_var.get().strip():
-                command_parts.append(f"--tomogram-ctf-model {self._quote(self.pytom_ctf_model_var.get().strip())}")
+                flag = self._tomogram_parameter_name(
+                    "PyTom: Template matching",
+                    "pytom_template_matching",
+                    "tomogram_ctf_model",
+                    "--tomogram-ctf-model",
+                )
+                command_parts.append(f"{flag} {self._command_value(self.pytom_ctf_model_var.get().strip())}")
             bool_flags = [
-                ("--non-spherical-mask", self.pytom_non_spherical_mask_var.get()),
-                ("--per-tilt-weighting", self.pytom_per_tilt_weighting_var.get()),
-                ("--spectral-whitening", self.pytom_spectral_whitening_var.get()),
-                ("-r", self.pytom_random_phase_correction_var.get()),
-                ("--half-precision", self.pytom_half_precision_var.get()),
+                ("non_spherical_mask", "--non-spherical-mask", self.pytom_non_spherical_mask_var.get()),
+                ("per_tilt_weighting", "--per-tilt-weighting", self.pytom_per_tilt_weighting_var.get()),
+                ("spectral_whitening", "--spectral-whitening", self.pytom_spectral_whitening_var.get()),
+                ("random_phase_correction", "-r", self.pytom_random_phase_correction_var.get()),
+                ("half_precision", "--half-precision", self.pytom_half_precision_var.get()),
             ]
-            for flag, enabled in bool_flags:
+            for field_key, flag, enabled in bool_flags:
                 if enabled:
-                    command_parts.append(flag)
-            command = " ".join(command_parts)
+                    command_parts.append(
+                        self._tomogram_parameter_name("PyTom: Template matching", "pytom_template_matching", field_key, flag)
+                    )
+            command_parts.extend(self._tomogram_added_parts("PyTom: Template matching", "pytom_template_matching"))
+            command = self._join_command_parts(command_parts)
             full_spec = {
                 **spec,
                 "manual_input": "true" if self.pytom_manual_input_var.get() else "",
@@ -2168,35 +2230,95 @@ class TomogramsTab(SidebarTab):
                 "plot_bins": self.extract_plot_bins_var.get().strip(),
             }
             command_parts = [
-                "pytom_extract_candidates.py",
-                f"-j {self._quote(spec['job_file'])}",
-                f"-n {self._quote(spec['number_of_particles'])}",
+                resolve_executable_command(self.app.project, PYTOM_EXTRACT_EXECUTABLE),
+                f"-j {self._command_value(spec['job_file'])}",
+                f"{self._tomogram_parameter_name('PyTom: Extract coordinates', 'pytom_extract_coordinates', 'number_of_particles', '-n')} {self._command_value(spec['number_of_particles'])}",
             ]
             if spec["tomogram_mask"]:
-                command_parts.append(f"--tomogram-mask {self._quote(spec['tomogram_mask'])}")
+                flag = self._tomogram_parameter_name(
+                    "PyTom: Extract coordinates",
+                    "pytom_extract_coordinates",
+                    "tomogram_mask",
+                    "--tomogram-mask",
+                )
+                command_parts.append(f"{flag} {self._command_value(spec['tomogram_mask'])}")
             if spec["ignore_tomogram_mask"]:
-                command_parts.append("--ignore_tomogram_mask")
-            if spec["number_of_false_positives"]:
                 command_parts.append(
-                    f"--number-of-false-positives {self._quote(spec['number_of_false_positives'])}"
+                    self._tomogram_parameter_name(
+                        "PyTom: Extract coordinates",
+                        "pytom_extract_coordinates",
+                        "ignore_tomogram_mask",
+                        "--ignore_tomogram_mask",
+                    )
+                )
+            if spec["number_of_false_positives"]:
+                flag = self._tomogram_parameter_name(
+                    "PyTom: Extract coordinates",
+                    "pytom_extract_coordinates",
+                    "number_of_false_positives",
+                    "--number-of-false-positives",
+                )
+                command_parts.append(
+                    f"{flag} {self._command_value(spec['number_of_false_positives'])}"
                 )
             if spec["particle_diameter"]:
-                command_parts.append(f"--particle-diameter {self._quote(spec['particle_diameter'])}")
+                flag = self._tomogram_parameter_name(
+                    "PyTom: Extract coordinates",
+                    "pytom_extract_coordinates",
+                    "particle_diameter",
+                    "--particle-diameter",
+                )
+                command_parts.append(f"{flag} {self._command_value(spec['particle_diameter'])}")
             if spec["cut_off"]:
-                command_parts.append(f"-c {self._quote(spec['cut_off'])}")
+                flag = self._tomogram_parameter_name("PyTom: Extract coordinates", "pytom_extract_coordinates", "cut_off", "-c")
+                command_parts.append(f"{flag} {self._command_value(spec['cut_off'])}")
             if spec["tophat_filter"]:
-                command_parts.append("--tophat-filter")
+                command_parts.append(
+                    self._tomogram_parameter_name(
+                        "PyTom: Extract coordinates",
+                        "pytom_extract_coordinates",
+                        "tophat_filter",
+                        "--tophat-filter",
+                    )
+                )
             if spec["tophat_connectivity"]:
-                command_parts.append(f"--tophat-connectivity {self._quote(spec['tophat_connectivity'])}")
+                flag = self._tomogram_parameter_name(
+                    "PyTom: Extract coordinates",
+                    "pytom_extract_coordinates",
+                    "tophat_connectivity",
+                    "--tophat-connectivity",
+                )
+                command_parts.append(f"{flag} {self._command_value(spec['tophat_connectivity'])}")
             if spec["relion5_compat"]:
-                command_parts.append("--relion5-compat")
+                command_parts.append(
+                    self._tomogram_parameter_name(
+                        "PyTom: Extract coordinates",
+                        "pytom_extract_coordinates",
+                        "relion5_compat",
+                        "--relion5-compat",
+                    )
+                )
             if spec["log"]:
-                command_parts.append(f"--log {self._quote(spec['log'])}")
+                flag = self._tomogram_parameter_name("PyTom: Extract coordinates", "pytom_extract_coordinates", "log", "--log")
+                command_parts.append(f"{flag} {self._command_value(spec['log'])}")
             if spec["tophat_bins"]:
-                command_parts.append(f"--tophat-bins {self._quote(spec['tophat_bins'])}")
+                flag = self._tomogram_parameter_name(
+                    "PyTom: Extract coordinates",
+                    "pytom_extract_coordinates",
+                    "tophat_bins",
+                    "--tophat-bins",
+                )
+                command_parts.append(f"{flag} {self._command_value(spec['tophat_bins'])}")
             if spec["plot_bins"]:
-                command_parts.append(f"--plot-bins {self._quote(spec['plot_bins'])}")
-            commands.append((dataset, spec, " ".join(command_parts)))
+                flag = self._tomogram_parameter_name(
+                    "PyTom: Extract coordinates",
+                    "pytom_extract_coordinates",
+                    "plot_bins",
+                    "--plot-bins",
+                )
+                command_parts.append(f"{flag} {self._command_value(spec['plot_bins'])}")
+            command_parts.extend(self._tomogram_added_parts("PyTom: Extract coordinates", "pytom_extract_coordinates"))
+            commands.append((dataset, spec, self._join_command_parts(command_parts)))
         return commands, errors
 
     def _slabify_specs(self) -> tuple[list[tuple[DatasetRecord | None, dict[str, str], str]], list[str]]:
@@ -2239,33 +2361,39 @@ class TomogramsTab(SidebarTab):
                 "seed": self.slabify_seed_var.get().strip(),
             }
             command_parts = [
-                "slabify",
-                f"--input {self._quote(full_spec['input'])}",
-                f"--output {self._quote(full_spec['output'])}",
+                resolve_executable_command(self.app.project, SLABIFY_EXECUTABLE),
+                f"--input {self._command_value(full_spec['input'])}",
+                f"{self._tomogram_parameter_name('Slabify: Mask creation', 'slabify_mask_creation', 'output_directory', '--output')} {self._command_value(full_spec['output'])}",
             ]
             optional_pairs = [
-                ("--output-masked", full_spec["output_masked"]),
-                ("--border", full_spec["border"]),
-                ("--offset", full_spec["offset"]),
-                ("--angpix", full_spec["angpix"]),
-                ("--points", full_spec["points"]),
-                ("--n-samples", full_spec["n_samples"]),
-                ("--boxsize", full_spec["boxsize"]),
-                ("--z-min", full_spec["z_min"]),
-                ("--z-max", full_spec["z_max"]),
-                ("--iterations", full_spec["iterations"]),
-                ("--thickness", full_spec["thickness"]),
-                ("--percentile", full_spec["percentile"]),
-                ("--seed", full_spec["seed"]),
+                ("output_masked_directory", "--output-masked", full_spec["output_masked"]),
+                ("border", "--border", full_spec["border"]),
+                ("offset", "--offset", full_spec["offset"]),
+                ("angpix", "--angpix", full_spec["angpix"]),
+                ("points", "--points", full_spec["points"]),
+                ("n_samples", "--n-samples", full_spec["n_samples"]),
+                ("boxsize", "--boxsize", full_spec["boxsize"]),
+                ("z_min", "--z-min", full_spec["z_min"]),
+                ("z_max", "--z-max", full_spec["z_max"]),
+                ("iterations", "--iterations", full_spec["iterations"]),
+                ("thickness", "--thickness", full_spec["thickness"]),
+                ("percentile", "--percentile", full_spec["percentile"]),
+                ("seed", "--seed", full_spec["seed"]),
             ]
-            for flag, value in optional_pairs:
+            for field_key, flag, value in optional_pairs:
                 if value:
-                    command_parts.append(f"{flag} {self._quote(value)}")
+                    flag = self._tomogram_parameter_name("Slabify: Mask creation", "slabify_mask_creation", field_key, flag)
+                    command_parts.append(f"{flag} {self._command_value(value)}")
             if self.slabify_measure_var.get():
-                command_parts.append("--measure")
+                command_parts.append(
+                    self._tomogram_parameter_name("Slabify: Mask creation", "slabify_mask_creation", "measure", "--measure")
+                )
             if self.slabify_simple_var.get():
-                command_parts.append("--simple")
-            return full_spec, " ".join(command_parts)
+                command_parts.append(
+                    self._tomogram_parameter_name("Slabify: Mask creation", "slabify_mask_creation", "simple", "--simple")
+                )
+            command_parts.extend(self._tomogram_added_parts("Slabify: Mask creation", "slabify_mask_creation"))
+            return full_spec, self._join_command_parts(command_parts)
 
         if self.slabify_manual_input_var.get():
             input_directory = self.slabify_input_directory_var.get().strip()
@@ -2362,34 +2490,98 @@ class TomogramsTab(SidebarTab):
                 "sliding_window_size": self.membrain_sliding_window_size_var.get().strip(),
             }
             command_parts = [
-                "membrain segment",
-                f"--tomogram-path {self._quote(spec['tomogram_path'])}",
-                f"--ckpt-path {self._quote(spec['ckpt_path'])}",
+                f"{resolve_executable_command(self.app.project, MEMBRAIN_EXECUTABLE)} segment",
+                f"--tomogram-path {self._command_value(spec['tomogram_path'])}",
+                f"{self._tomogram_parameter_name('MemBrain-seg: Segmentation', 'membrain_segmentation', 'ckpt_path', '--ckpt-path')} {self._command_value(spec['ckpt_path'])}",
             ]
             if spec["out_folder"]:
-                command_parts.append(f"--out-folder {self._quote(spec['out_folder'])}")
-            if spec["rescale_patches"]:
-                command_parts.append("--rescale-patches")
-            if spec["in_pixel_size"]:
-                command_parts.append(f"--in-pixel-size {self._quote(spec['in_pixel_size'])}")
-            if spec["out_pixel_size"]:
-                command_parts.append(f"--out-pixel-size {self._quote(spec['out_pixel_size'])}")
-            if spec["store_probabilities"]:
-                command_parts.append("--store-probabilities")
-            if spec["store_connected_components"]:
-                command_parts.append("--store-connected-components")
-            if spec["connected_component_threshold"]:
-                command_parts.append(
-                    f"--connected-component-threshold {self._quote(spec['connected_component_threshold'])}"
+                flag = self._tomogram_parameter_name(
+                    "MemBrain-seg: Segmentation",
+                    "membrain_segmentation",
+                    "out_folder",
+                    "--out-folder",
                 )
+                command_parts.append(f"{flag} {self._command_value(spec['out_folder'])}")
+            if spec["rescale_patches"]:
+                command_parts.append(
+                    self._tomogram_parameter_name(
+                        "MemBrain-seg: Segmentation",
+                        "membrain_segmentation",
+                        "rescale_patches",
+                        "--rescale-patches",
+                    )
+                )
+            if spec["in_pixel_size"]:
+                flag = self._tomogram_parameter_name(
+                    "MemBrain-seg: Segmentation",
+                    "membrain_segmentation",
+                    "in_pixel_size",
+                    "--in-pixel-size",
+                )
+                command_parts.append(f"{flag} {self._command_value(spec['in_pixel_size'])}")
+            if spec["out_pixel_size"]:
+                flag = self._tomogram_parameter_name(
+                    "MemBrain-seg: Segmentation",
+                    "membrain_segmentation",
+                    "out_pixel_size",
+                    "--out-pixel-size",
+                )
+                command_parts.append(f"{flag} {self._command_value(spec['out_pixel_size'])}")
+            if spec["store_probabilities"]:
+                command_parts.append(
+                    self._tomogram_parameter_name(
+                        "MemBrain-seg: Segmentation",
+                        "membrain_segmentation",
+                        "store_probabilities",
+                        "--store-probabilities",
+                    )
+                )
+            if spec["store_connected_components"]:
+                command_parts.append(
+                    self._tomogram_parameter_name(
+                        "MemBrain-seg: Segmentation",
+                        "membrain_segmentation",
+                        "store_connected_components",
+                        "--store-connected-components",
+                    )
+                )
+            if spec["connected_component_threshold"]:
+                flag = self._tomogram_parameter_name(
+                    "MemBrain-seg: Segmentation",
+                    "membrain_segmentation",
+                    "connected_component_threshold",
+                    "--connected-component-threshold",
+                )
+                command_parts.append(
+                    f"{flag} {self._command_value(spec['connected_component_threshold'])}"
+                )
+            tta_flag = self._tomogram_parameter_name(
+                "MemBrain-seg: Segmentation",
+                "membrain_segmentation",
+                "test_time_augmentation",
+                "--test-time-augmentation",
+            )
             command_parts.append(
-                "--test-time-augmentation" if self.membrain_test_time_augmentation_var.get() else "--no-test-time-augmentation"
+                tta_flag if self.membrain_test_time_augmentation_var.get() else "--no-test-time-augmentation"
             )
             if spec["segmentation_threshold"]:
-                command_parts.append(f"--segmentation-threshold {self._quote(spec['segmentation_threshold'])}")
+                flag = self._tomogram_parameter_name(
+                    "MemBrain-seg: Segmentation",
+                    "membrain_segmentation",
+                    "segmentation_threshold",
+                    "--segmentation-threshold",
+                )
+                command_parts.append(f"{flag} {self._command_value(spec['segmentation_threshold'])}")
             if spec["sliding_window_size"]:
-                command_parts.append(f"--sliding-window-size {self._quote(spec['sliding_window_size'])}")
-            return spec, " ".join(command_parts)
+                flag = self._tomogram_parameter_name(
+                    "MemBrain-seg: Segmentation",
+                    "membrain_segmentation",
+                    "sliding_window_size",
+                    "--sliding-window-size",
+                )
+                command_parts.append(f"{flag} {self._command_value(spec['sliding_window_size'])}")
+            command_parts.extend(self._tomogram_added_parts("MemBrain-seg: Segmentation", "membrain_segmentation"))
+            return spec, self._join_command_parts(command_parts)
 
         if self.membrain_manual_input_var.get():
             input_files, manual_errors = self._manual_mrc_files(self.membrain_input_directory_var.get().strip())
@@ -2487,6 +2679,170 @@ class TomogramsTab(SidebarTab):
             dataset.job_history[-1].parameters["execution_environment"] = self.environment_var.get().strip()
         dataset.job_history[-1].parameters.update(self._current_slurm_overrides())
         return dataset.job_history[-1]
+
+    def _processed_ts_items(
+        self,
+        commands: list[tuple[DatasetRecord | None, dict[str, str], str]],
+    ) -> list[dict[str, str]]:
+        items: list[dict[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        for dataset, spec, _command in commands:
+            dataset_name = dataset.dataset_name if dataset is not None else str(spec.get("dataset_name", "")).strip()
+            ts_name = str(spec.get("ts_name", "")).strip()
+            if not dataset_name and not ts_name:
+                continue
+            key = (dataset_name, ts_name)
+            if key in seen:
+                continue
+            seen.add(key)
+            items.append({"dataset_name": dataset_name, "ts_name": ts_name})
+        return items
+
+    def _processed_ts_summary(self, processed_ts: list[dict[str, str]]) -> str:
+        if not processed_ts:
+            return "-"
+        if len(processed_ts) == 1:
+            return processed_ts[0].get("ts_name") or "1 TS selected"
+        return f"{len(processed_ts)} TS selected"
+
+    def _processed_dataset_summary(self, processed_ts: list[dict[str, str]], fallback: str = "") -> str:
+        dataset_names = sorted({item.get("dataset_name", "") for item in processed_ts if item.get("dataset_name", "")})
+        if len(dataset_names) == 1:
+            return dataset_names[0]
+        if len(dataset_names) > 1:
+            return "Multiple datasets"
+        return fallback or "-"
+
+    def _grouped_history_parameters(
+        self,
+        commands: list[tuple[DatasetRecord | None, dict[str, str], str]],
+        ts_summary: str,
+    ) -> dict[str, str]:
+        values_by_key: dict[str, list[str]] = {}
+        for _dataset, spec, _command in commands:
+            for key, value in spec.items():
+                if key in {"job_name", "ts_name"}:
+                    continue
+                if not value:
+                    continue
+                text = str(value)
+                values = values_by_key.setdefault(key, [])
+                if text not in values:
+                    values.append(text)
+
+        parameters: dict[str, str] = {"ts_name": ts_summary}
+        for key in sorted(values_by_key):
+            values = values_by_key[key]
+            parameters[key] = values[0] if len(values) == 1 else f"{len(values)} values"
+        return parameters
+
+    def _record_grouped_job_history(
+        self,
+        commands: list[tuple[DatasetRecord | None, dict[str, str], str]],
+        action: str,
+        command_text: str | None = None,
+    ) -> JobHistoryEntry | None:
+        commands_with_dataset = [item for item in commands if item[0] is not None]
+        if not commands_with_dataset:
+            return None
+        anchor_dataset = commands_with_dataset[0][0]
+        if anchor_dataset is None:
+            return None
+        processed_ts = self._processed_ts_items(commands_with_dataset)
+        ts_summary = self._processed_ts_summary(processed_ts)
+        dataset_summary = self._processed_dataset_summary(processed_ts, anchor_dataset.dataset_name)
+        first_spec = commands_with_dataset[0][1]
+        parameters = self._grouped_history_parameters(commands_with_dataset, ts_summary)
+        entry = JobHistoryEntry(
+            timestamp=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            action=action,
+            group="Tomograms",
+            job_name=first_spec.get("job_name", "Tomogram job"),
+            command=command_text if command_text is not None else "\n".join(command for _dataset, _spec, command in commands),
+            processing_tab="Processing: TS jobs",
+            dataset_name=dataset_summary,
+            execution_mode="slurm" if self.execution_mode_var.get() == "Submit to Slurm" else "local",
+            slurm_profile=self.slurm_profile_var.get().strip(),
+            environment_title=self.environment_var.get().strip() if self.execution_mode_var.get() == "Run locally" else "",
+            parameters=parameters,
+            artifacts={"processed_ts": processed_ts},
+        )
+        if self.execution_mode_var.get() == "Run locally" and self.environment_var.get().strip():
+            entry.parameters["execution_environment"] = self.environment_var.get().strip()
+        entry.parameters.update(self._current_slurm_overrides())
+        for dataset in self._history_datasets_for_processed_ts(processed_ts, anchor_dataset):
+            if not any(existing.entry_id == entry.entry_id for existing in dataset.job_history):
+                dataset.job_history.append(entry)
+        return entry
+
+    def _history_datasets_for_processed_ts(
+        self,
+        processed_ts: list[dict[str, str]],
+        fallback: DatasetRecord,
+    ) -> list[DatasetRecord]:
+        dataset_map = self._dataset_map()
+        datasets: list[DatasetRecord] = []
+        seen_names: set[str] = set()
+        for item in processed_ts:
+            dataset_name = str(item.get("dataset_name", "")).strip()
+            dataset = dataset_map.get(dataset_name)
+            if dataset is None or dataset.dataset_name in seen_names:
+                continue
+            datasets.append(dataset)
+            seen_names.add(dataset.dataset_name)
+        if not datasets:
+            datasets.append(fallback)
+        return datasets
+
+    def _sync_history_entry_copies(self, source: JobHistoryEntry) -> None:
+        for dataset in self.app.project.datasets:
+            for entry in dataset.job_history:
+                if entry is source or entry.entry_id != source.entry_id:
+                    continue
+                entry.timestamp = source.timestamp
+                entry.action = source.action
+                entry.group = source.group
+                entry.job_name = source.job_name
+                entry.command = source.command
+                entry.processing_tab = source.processing_tab
+                entry.dataset_name = source.dataset_name
+                entry.execution_mode = source.execution_mode
+                entry.slurm_profile = source.slurm_profile
+                entry.slurm_job_id = source.slurm_job_id
+                entry.slurm_script_path = source.slurm_script_path
+                entry.parameters = dict(source.parameters)
+                entry.artifacts = deepcopy(source.artifacts)
+
+    def _processed_ts_detail_rows(self, entry: JobHistoryEntry) -> list[tuple[str, str]]:
+        processed_payload = entry.artifacts.get("processed_ts", [])
+        rows: list[tuple[str, str]] = []
+        if isinstance(processed_payload, list):
+            for item in processed_payload:
+                if not isinstance(item, dict):
+                    continue
+                dataset_name = str(item.get("dataset_name", "")).strip()
+                ts_name = str(item.get("ts_name", "")).strip()
+                if dataset_name or ts_name:
+                    rows.append((dataset_name or "-", ts_name or "-"))
+        if rows:
+            return rows
+        ts_name = entry.parameters.get("ts_name", "").strip()
+        if ts_name:
+            return [(entry.dataset_name or "-", ts_name)]
+        return [("Processed TS", "-")]
+
+    def _entry_matches_dataset_filter(self, entry: JobHistoryEntry, dataset_filter: str) -> bool:
+        if not dataset_filter or dataset_filter == "All datasets":
+            return True
+        if entry.dataset_name == dataset_filter:
+            return True
+        processed_payload = entry.artifacts.get("processed_ts", [])
+        if not isinstance(processed_payload, list):
+            return False
+        return any(
+            isinstance(item, dict) and str(item.get("dataset_name", "")) == dataset_filter
+            for item in processed_payload
+        )
 
     def _preview_commands_from_widget(
         self,
@@ -2745,7 +3101,16 @@ class TomogramsTab(SidebarTab):
             **extra_parameters,
         }
         self._record_job_history(pseudo_dataset, spec, "scheduled", command_preview, scheduled=True)
-        pseudo_dataset.job_history[-1].dataset_name = dataset_name
+        entry = pseudo_dataset.job_history[-1]
+        entry.dataset_name = dataset_name
+        processed_ts = [
+            {"dataset_name": item.get("dataset_name", ""), "ts_name": item.get("ts_name", "")}
+            for item in self.selected_entries
+            if item.get("dataset_name") or item.get("ts_name")
+        ]
+        if processed_ts:
+            entry.artifacts["processed_ts"] = processed_ts
+            entry.parameters["ts_name"] = self._processed_ts_summary(processed_ts)
 
     def _preview_widget_for_job(self, job_name: str) -> tk.Text | None:
         mapping: dict[str, tk.Text] = {
@@ -3097,8 +3462,7 @@ class TomogramsTab(SidebarTab):
         preview = "\n".join(command for _dataset, _spec, command in commands)
         self.frame.clipboard_clear()
         self.frame.clipboard_append(preview)
-        for dataset, spec, command in commands:
-            self._record_job_history(dataset, spec, "copied", command)
+        self._record_grouped_job_history(commands, "copied", preview)
         self.app.on_project_changed("tomograms", "custom")
         self.app.status_var.set("CryoLithe commands copied to clipboard")
 
@@ -3132,14 +3496,11 @@ class TomogramsTab(SidebarTab):
         )
         if not commands:
             return
-        running_entries = [
-            self._record_job_history(dataset, spec, "ran", command)
-            for dataset, spec, command in commands
-            if dataset is not None
-        ]
-        self.app.mark_history_entries_running([entry.entry_id for entry in running_entries])
+        running_entry = self._record_grouped_job_history(commands, "ran")
+        running_entry_ids = [running_entry.entry_id] if running_entry is not None else []
+        self.app.mark_history_entries_running(running_entry_ids)
         self.app.on_project_changed("tomograms", "custom")
-        self._run_command_sequence(commands, "CryoLithe", [entry.entry_id for entry in running_entries])
+        self._run_command_sequence(commands, "CryoLithe", running_entry_ids, running_entry)
 
     def _copy_pytom_commands(self) -> None:
         commands, errors = self._pytom_specs()
@@ -3152,8 +3513,7 @@ class TomogramsTab(SidebarTab):
         preview = "\n".join(command for _dataset, _spec, command in commands)
         self.frame.clipboard_clear()
         self.frame.clipboard_append(preview)
-        for dataset, spec, command in commands:
-            self._record_job_history(dataset, spec, "copied", command)
+        self._record_grouped_job_history(commands, "copied", preview)
         self.app.on_project_changed("tomograms", "custom")
         self.app.status_var.set("PyTom commands copied to clipboard")
 
@@ -3216,14 +3576,11 @@ class TomogramsTab(SidebarTab):
         )
         if not commands:
             return
-        running_entries = [
-            self._record_job_history(dataset, spec, "ran", command)
-            for dataset, spec, command in commands
-            if dataset is not None
-        ]
-        self.app.mark_history_entries_running([entry.entry_id for entry in running_entries])
+        running_entry = self._record_grouped_job_history(commands, "ran")
+        running_entry_ids = [running_entry.entry_id] if running_entry is not None else []
+        self.app.mark_history_entries_running(running_entry_ids)
         self.app.on_project_changed("tomograms", "custom")
-        self._run_command_sequence(commands, "PyTom", [entry.entry_id for entry in running_entries])
+        self._run_command_sequence(commands, "PyTom", running_entry_ids, running_entry)
 
     def _copy_extract_commands(self) -> None:
         commands, errors = self._extract_specs()
@@ -3236,10 +3593,7 @@ class TomogramsTab(SidebarTab):
         preview = "\n".join(command for _dataset, _spec, command in commands)
         self.frame.clipboard_clear()
         self.frame.clipboard_append(preview)
-        for dataset, spec, command in commands:
-            if dataset is None:
-                continue
-            self._record_job_history(dataset, spec, "copied", command)
+        self._record_grouped_job_history(commands, "copied", preview)
         self.app.on_project_changed("tomograms", "custom")
         self.app.status_var.set("PyTom extract commands copied to clipboard")
 
@@ -3278,14 +3632,11 @@ class TomogramsTab(SidebarTab):
         )
         if not commands:
             return
-        running_entries = [
-            self._record_job_history(dataset, spec, "ran", command)
-            for dataset, spec, command in commands
-            if dataset is not None
-        ]
-        self.app.mark_history_entries_running([entry.entry_id for entry in running_entries])
+        running_entry = self._record_grouped_job_history(commands, "ran")
+        running_entry_ids = [running_entry.entry_id] if running_entry is not None else []
+        self.app.mark_history_entries_running(running_entry_ids)
         self.app.on_project_changed("tomograms", "custom")
-        self._run_command_sequence(commands, "PyTom extract", [entry.entry_id for entry in running_entries])
+        self._run_command_sequence(commands, "PyTom extract", running_entry_ids, running_entry)
 
     def _copy_slabify_commands(self) -> None:
         commands, errors = self._slabify_specs()
@@ -3298,10 +3649,7 @@ class TomogramsTab(SidebarTab):
         preview = "\n".join(command for _dataset, _spec, command in commands)
         self.frame.clipboard_clear()
         self.frame.clipboard_append(preview)
-        for dataset, spec, command in commands:
-            if dataset is None:
-                continue
-            self._record_job_history(dataset, spec, "copied", command)
+        self._record_grouped_job_history(commands, "copied", preview)
         self.app.on_project_changed("tomograms", "custom")
         self.app.status_var.set("Slabify commands copied to clipboard")
 
@@ -3348,14 +3696,11 @@ class TomogramsTab(SidebarTab):
         )
         if not commands:
             return
-        running_entries = [
-            self._record_job_history(dataset, spec, "ran", command)
-            for dataset, spec, command in commands
-            if dataset is not None
-        ]
-        self.app.mark_history_entries_running([entry.entry_id for entry in running_entries])
+        running_entry = self._record_grouped_job_history(commands, "ran")
+        running_entry_ids = [running_entry.entry_id] if running_entry is not None else []
+        self.app.mark_history_entries_running(running_entry_ids)
         self.app.on_project_changed("tomograms", "custom")
-        self._run_command_sequence(commands, "Slabify", [entry.entry_id for entry in running_entries])
+        self._run_command_sequence(commands, "Slabify", running_entry_ids, running_entry)
 
     def _copy_membrain_commands(self) -> None:
         commands, errors = self._membrain_specs()
@@ -3368,10 +3713,7 @@ class TomogramsTab(SidebarTab):
         preview = "\n".join(command for _dataset, _spec, command in commands)
         self.frame.clipboard_clear()
         self.frame.clipboard_append(preview)
-        for dataset, spec, command in commands:
-            if dataset is None:
-                continue
-            self._record_job_history(dataset, spec, "copied", command)
+        self._record_grouped_job_history(commands, "copied", preview)
         self.app.on_project_changed("tomograms", "custom")
         self.app.status_var.set("MemBrain commands copied to clipboard")
 
@@ -3413,19 +3755,23 @@ class TomogramsTab(SidebarTab):
         )
         if not commands:
             return
-        running_entries = [
-            self._record_job_history(dataset, spec, "ran", command)
-            for dataset, spec, command in commands
-            if dataset is not None
-        ]
-        self.app.mark_history_entries_running([entry.entry_id for entry in running_entries])
+        running_entry = self._record_grouped_job_history(commands, "ran")
+        running_entry_ids = [running_entry.entry_id] if running_entry is not None else []
+        self.app.mark_history_entries_running(running_entry_ids)
         self.app.on_project_changed("tomograms", "custom")
-        self._run_command_sequence(commands, "MemBrain-seg", [entry.entry_id for entry in running_entries])
+        self._run_command_sequence(commands, "MemBrain-seg", running_entry_ids, running_entry)
 
-    def _run_command_sequence(self, commands, label: str, running_entry_ids: list[str]) -> None:
+    def _run_command_sequence(
+        self,
+        commands,
+        label: str,
+        running_entry_ids: list[str],
+        history_entry: JobHistoryEntry | None = None,
+    ) -> None:
         use_slurm = self.execution_mode_var.get() == "Submit to Slurm"
         profile_name = self.slurm_profile_var.get().strip()
         if use_slurm and not profile_name and not self.app.is_debug_mode_enabled():
+            self.app.clear_history_entries_running(running_entry_ids)
             messagebox.showerror("Slurm profile missing", "Please select a Slurm profile first.")
             return
 
@@ -3442,9 +3788,15 @@ class TomogramsTab(SidebarTab):
                 )
             except Exception as exc:
                 self.app.clear_abort_request()
+                self.app.clear_history_entries_running(running_entry_ids)
                 self.app.status_var.set(f"{label} submission failed: {exc}")
                 return
-            self._mark_command_sequence_submissions(commands, result, profile_name)
+            if history_entry is not None:
+                self._mark_command_sequence_submission(history_entry, result, profile_name)
+            else:
+                self._mark_command_sequence_submissions(commands, result, profile_name)
+            self.app.clear_history_entries_running(running_entry_ids)
+            self._refresh_history()
             self.app.on_project_changed("tomograms", "custom")
             self.app.status_var.set(f"Submitted {label} for {len(commands)} TS")
             return
@@ -3482,11 +3834,7 @@ class TomogramsTab(SidebarTab):
             use_slurm=False,
             profile_name=profile_name,
             overrides=self._slurm_override_payload(self._current_slurm_overrides()),
-            on_submitted=lambda item, result: self._mark_command_sequence_submission(
-                item.get("dataset"),
-                result,
-                profile_name,
-            ),
+            on_submitted=None,
             on_completed=None,
             on_finished=lambda count, failures: self._finish_command_sequence(
                 label,
@@ -3502,18 +3850,16 @@ class TomogramsTab(SidebarTab):
 
     def _mark_command_sequence_submission(
         self,
-        dataset: DatasetRecord | None,
+        entry: JobHistoryEntry,
         result: SlurmSubmissionResult,
         profile_name: str,
     ) -> None:
-        if dataset is None or not dataset.job_history:
-            return
-        entry = dataset.job_history[-1]
         entry.action = "submitted"
         entry.execution_mode = "slurm"
         entry.slurm_profile = profile_name
         entry.slurm_job_id = result.job_id
         entry.slurm_script_path = result.script_path
+        self._sync_history_entry_copies(entry)
 
     def _finish_command_sequence(
         self,
@@ -3535,10 +3881,15 @@ class TomogramsTab(SidebarTab):
 
     def _history_entries(self) -> list[tuple[DatasetRecord, JobHistoryEntry]]:
         entries: list[tuple[DatasetRecord, JobHistoryEntry]] = []
+        seen_entry_ids: set[str] = set()
         for dataset in self.app.project.datasets:
             for entry in dataset.job_history:
-                if entry.group == "Tomograms":
-                    entries.append((dataset, entry))
+                if entry.group != "Tomograms":
+                    continue
+                if entry.entry_id in seen_entry_ids:
+                    continue
+                seen_entry_ids.add(entry.entry_id)
+                entries.append((dataset, entry))
         return entries
 
     def _history_sort_value(self, entry: JobHistoryEntry, column: str):
@@ -3565,7 +3916,11 @@ class TomogramsTab(SidebarTab):
         dataset_filter = self.history_dataset_var.get()
         entries = self._history_entries()
         if dataset_filter and dataset_filter != "All datasets":
-            entries = [(dataset, entry) for dataset, entry in entries if dataset.dataset_name == dataset_filter]
+            entries = [
+                (dataset, entry)
+                for dataset, entry in entries
+                if self._entry_matches_dataset_filter(entry, dataset_filter)
+            ]
         if not entries:
             self.history_entry_refs = {}
         if self.history_sort_column == "timestamp":
@@ -3622,6 +3977,10 @@ class TomogramsTab(SidebarTab):
                 "Parameters",
                 [(key, value) for key, value in entry.parameters.items()] or [("Parameters", "-")],
             ),
+            (
+                "Processed TS",
+                self._processed_ts_detail_rows(entry),
+            ),
         ]
         show_detail_dialog(self.frame, "Job details", sections, command=entry.command or "-")
 
@@ -3631,7 +3990,11 @@ class TomogramsTab(SidebarTab):
             messagebox.showinfo("Remove job", "Please select a job history entry first.")
             return
         dataset, entry = selected
-        dataset.job_history = [item for item in dataset.job_history if item is not entry]
+        entry_id = entry.entry_id
+        for project_dataset in self.app.project.datasets:
+            project_dataset.job_history = [
+                item for item in project_dataset.job_history if item.entry_id != entry_id
+            ]
         self.app.on_project_changed("tomograms", "custom")
         self._refresh_history()
         self.app.status_var.set("Removed selected tomogram job from history")
@@ -3640,7 +4003,11 @@ class TomogramsTab(SidebarTab):
         dataset_filter = self.history_dataset_var.get()
         entries = self._history_entries()
         if dataset_filter and dataset_filter != "All datasets":
-            entries = [(dataset, entry) for dataset, entry in entries if dataset.dataset_name == dataset_filter]
+            entries = [
+                (dataset, entry)
+                for dataset, entry in entries
+                if self._entry_matches_dataset_filter(entry, dataset_filter)
+            ]
         return [(dataset, entry) for dataset, entry in entries if is_scheduled_history_entry(entry)]
 
     def _resolved_scheduled_entry_commands(
@@ -3946,6 +4313,7 @@ class TomogramsTab(SidebarTab):
         entry.execution_mode = "local"
         entry.slurm_job_id = ""
         entry.slurm_script_path = ""
+        self._sync_history_entry_copies(entry)
         self._refresh_history()
         self.app.on_project_changed("tomograms", "custom")
 
@@ -3964,6 +4332,7 @@ class TomogramsTab(SidebarTab):
         entry.slurm_profile = profile_name
         entry.slurm_job_id = result.job_id
         entry.slurm_script_path = result.script_path
+        self._sync_history_entry_copies(entry)
         self._refresh_history()
         self.app.on_project_changed("tomograms", "custom")
 
@@ -4010,6 +4379,7 @@ class TomogramsTab(SidebarTab):
         self._refresh_history()
         self._refresh_slurm_profiles()
         self._on_job_type_changed()
+        self._update_active_preview()
 
     def sync_to_project(self, project: ProjectData) -> None:
         self.workflow_pane.write_to_project(project)

@@ -8,6 +8,8 @@ import threading
 import tkinter as tk
 from tkinter import ttk
 
+from cryoet_organizer.dialogs import technical_font_name
+
 
 class ProcessLogWindow:
     """Floating window that streams stdout/stderr from a subprocess in real time."""
@@ -39,7 +41,7 @@ class ProcessLogWindow:
             text_frame,
             wrap="word",
             state="disabled",
-            font="TkDefaultFont",
+            font=technical_font_name(),
             background="#1e1e1e",
             foreground="#d4d4d4",
             insertbackground="#d4d4d4",

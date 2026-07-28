@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from copy import deepcopy
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,19 @@ from cryoet_organizer.warptools_catalog import WarpToolFlag, jobs_by_group
 
 
 DEFAULTS_METADATA_KEY = "job_default_overrides"
+CUSTOM_FIELD_PREFIX = "custom__"
+FIELD_METADATA_KEYS = {
+    "enabled",
+    "value",
+    "parameter",
+    "removed",
+    "custom",
+    "label",
+    "widget",
+    "default",
+    "description",
+    "options",
+}
 
 
 @dataclass(frozen=True)
@@ -30,6 +44,7 @@ class JobDefaultField:
     default_value: str
     description: str = ""
     options: tuple[str, ...] = field(default_factory=tuple)
+    parameter_name: str = ""
 
 
 @dataclass(frozen=True)
@@ -48,6 +63,7 @@ def _warp_flag_to_field(flag: WarpToolFlag) -> JobDefaultField:
         widget=flag.widget,
         default_value=flag.default_value,
         description=flag.description,
+        parameter_name=flag.name,
     )
 
 
@@ -58,6 +74,7 @@ def _mtool_flag_to_field(flag: MToolFlag) -> JobDefaultField:
         widget=flag.widget,
         default_value=flag.default_value,
         description=flag.description,
+        parameter_name=flag.name,
     )
 
 
@@ -69,6 +86,7 @@ def _catalog_field_to_default(field: CatalogField) -> JobDefaultField:
         default_value=field.default_value,
         description=field.description,
         options=field.options,
+        parameter_name=f"--{field.key.replace('_', '-')}",
     )
 
 
@@ -92,6 +110,7 @@ def _execution_environment_field() -> JobDefaultField:
     )
 
 
+@lru_cache(maxsize=1)
 def build_job_default_registry() -> list[JobDefaultDefinition]:
     registry: list[JobDefaultDefinition] = []
 
@@ -213,6 +232,7 @@ def build_job_default_registry() -> list[JobDefaultDefinition]:
     return registry
 
 
+@lru_cache(maxsize=1)
 def registry_lookup() -> dict[tuple[str, str, str], JobDefaultDefinition]:
     return {
         (item.namespace, item.group, item.job_key): item
@@ -232,11 +252,22 @@ def get_project_job_default_overrides(project: ProjectData) -> dict[str, dict[st
                 continue
             enabled = settings.get("enabled", False)
             value = settings.get("value", "")
+            parameter = str(settings.get("parameter", "") or "").strip()
+            cleaned_settings: dict[str, str] = {}
             if enabled:
-                cleaned_fields[field_key] = {
-                    "enabled": "true",
-                    "value": "" if value is None else str(value),
-                }
+                cleaned_settings["enabled"] = "true"
+                cleaned_settings["value"] = "" if value is None else str(value)
+            if parameter:
+                cleaned_settings["parameter"] = parameter
+            for key in FIELD_METADATA_KEYS - {"enabled", "value", "parameter"}:
+                raw_value = settings.get(key)
+                if raw_value is None:
+                    continue
+                value_text = str(raw_value).strip()
+                if value_text:
+                    cleaned_settings[key] = value_text
+            if cleaned_settings:
+                cleaned_fields[field_key] = cleaned_settings
         if cleaned_fields:
             cleaned[job_path] = cleaned_fields
     return cleaned
@@ -253,6 +284,113 @@ def job_override_key(namespace: str, group: str, job_key: str) -> str:
     return f"{namespace}/{group}/{job_key}"
 
 
+def _job_settings(
+    project: ProjectData,
+    namespace: str,
+    group: str,
+    job_key: str,
+) -> dict[str, dict[str, str]]:
+    overrides = get_project_job_default_overrides(project)
+    return overrides.get(job_override_key(namespace, group, job_key), {})
+
+
+def is_job_default_field_removed(
+    project: ProjectData,
+    namespace: str,
+    group: str,
+    job_key: str,
+    field_key: str,
+) -> bool:
+    field_settings = _job_settings(project, namespace, group, job_key).get(field_key, {})
+    return field_settings.get("removed", "").lower() in {"1", "true", "yes", "on"}
+
+
+def _settings_field(
+    field_key: str,
+    settings: dict[str, str],
+    base: JobDefaultField | None = None,
+) -> JobDefaultField:
+    options = tuple(
+        item.strip()
+        for item in settings.get("options", "").split("\n")
+        if item.strip()
+    )
+    has_enabled_value = settings.get("enabled", "") == "true"
+    default_value = settings.get("value", settings.get("default", "")) if has_enabled_value else settings.get("default", "")
+    if base is not None and not default_value and not has_enabled_value:
+        default_value = base.default_value
+    return JobDefaultField(
+        key=field_key,
+        label=settings.get("label", base.label if base is not None else field_key),
+        widget=settings.get("widget", base.widget if base is not None else "text"),
+        default_value=default_value,
+        description=settings.get("description", base.description if base is not None else ""),
+        options=options or (base.options if base is not None else ()),
+        parameter_name=settings.get(
+            "parameter",
+            base.parameter_name if base is not None else "",
+        ),
+    )
+
+
+def effective_job_default_definition(
+    project: ProjectData,
+    definition: JobDefaultDefinition,
+) -> JobDefaultDefinition:
+    settings = _job_settings(project, definition.namespace, definition.group, definition.job_key)
+    fields: list[JobDefaultField] = []
+    base_keys = {field.key for field in definition.fields}
+    for field in definition.fields:
+        field_settings = settings.get(field.key, {})
+        if field_settings.get("removed", "").lower() in {"1", "true", "yes", "on"}:
+            continue
+        fields.append(_settings_field(field.key, field_settings, field))
+    for field_key, field_settings in settings.items():
+        if field_key in base_keys:
+            continue
+        if field_settings.get("removed", "").lower() in {"1", "true", "yes", "on"}:
+            continue
+        if field_settings.get("custom", "").lower() in {"1", "true", "yes", "on"}:
+            fields.append(_settings_field(field_key, field_settings))
+    return JobDefaultDefinition(
+        namespace=definition.namespace,
+        group=definition.group,
+        job_key=definition.job_key,
+        title=definition.title,
+        fields=tuple(fields),
+    )
+
+
+def effective_job_default_fields(
+    project: ProjectData,
+    namespace: str,
+    group: str,
+    job_key: str,
+) -> tuple[JobDefaultField, ...]:
+    definition = registry_lookup().get((namespace, group, job_key))
+    if definition is None:
+        return ()
+    return effective_job_default_definition(project, definition).fields
+
+
+def added_job_default_fields(
+    project: ProjectData,
+    namespace: str,
+    group: str,
+    job_key: str,
+) -> tuple[JobDefaultField, ...]:
+    definition = registry_lookup().get((namespace, group, job_key))
+    if definition is None:
+        base_keys: set[str] = set()
+    else:
+        base_keys = {field.key for field in definition.fields}
+    return tuple(
+        field
+        for field in effective_job_default_fields(project, namespace, group, job_key)
+        if field.key not in base_keys and field.key != "execution_environment"
+    )
+
+
 def resolve_job_default(
     project: ProjectData,
     namespace: str,
@@ -261,12 +399,53 @@ def resolve_job_default(
     field_key: str,
     base_value: str,
 ) -> str:
-    overrides = get_project_job_default_overrides(project)
-    job_settings = overrides.get(job_override_key(namespace, group, job_key), {})
+    job_settings = _job_settings(project, namespace, group, job_key)
     field_settings = job_settings.get(field_key)
     if not field_settings:
         return base_value
+    if field_settings.get("removed", "").lower() in {"1", "true", "yes", "on"}:
+        return ""
+    if field_settings.get("enabled", "") != "true":
+        return base_value
     return field_settings.get("value", "")
+
+
+def resolve_job_parameter_name(
+    project: ProjectData,
+    namespace: str,
+    group: str,
+    job_key: str,
+    field_key: str,
+    base_name: str,
+) -> str:
+    job_settings = _job_settings(project, namespace, group, job_key)
+    field_settings = job_settings.get(field_key)
+    if not field_settings:
+        return base_name
+    if field_settings.get("removed", "").lower() in {"1", "true", "yes", "on"}:
+        return ""
+    parameter = field_settings.get("parameter", "").strip()
+    return parameter or base_name
+
+
+def command_parts_for_added_job_defaults(
+    project: ProjectData,
+    namespace: str,
+    group: str,
+    job_key: str,
+) -> list[str]:
+    parts: list[str] = []
+    for field in added_job_default_fields(project, namespace, group, job_key):
+        parameter = field.parameter_name.strip()
+        value = field.default_value.strip()
+        if not parameter:
+            continue
+        if field.widget == "bool":
+            if value.lower() in {"1", "true", "yes", "on"}:
+                parts.append(parameter)
+        elif value:
+            parts.append(f"{parameter} {value}")
+    return parts
 
 
 def export_job_defaults(path: str | Path, overrides: dict[str, dict[str, dict[str, str]]]) -> Path:

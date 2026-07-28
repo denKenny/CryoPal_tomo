@@ -4,7 +4,7 @@ from copy import deepcopy
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
-from cryoet_organizer.dialogs import bind_scrollable_canvas, make_copy_name
+from cryoet_organizer.dialogs import bind_scrollable_canvas, create_scrollable_frame, make_copy_name
 from cryoet_organizer.slurm import (
     SlurmHeaderField,
     SlurmProfile,
@@ -35,6 +35,7 @@ class SlurmProfilesDialog:
             self.window.protocol("WM_DELETE_WINDOW", self.window.destroy)
         self.content_row = 0 if self.embedded else 1
         self.footer_row = self.content_row + 1
+        self.window.columnconfigure(0, weight=0, minsize=260)
         self.window.columnconfigure(1, weight=1)
         self.window.rowconfigure(self.content_row, weight=1)
 
@@ -55,34 +56,40 @@ class SlurmProfilesDialog:
             toolbar.grid(row=0, column=0, columnspan=2, sticky="ew")
             toolbar.columnconfigure(0, weight=1)
 
-        left = ttk.LabelFrame(self.window, text="Profiles", padding=12)
+        left = ttk.LabelFrame(self.window, text="Profiles", padding=12, width=260)
         left.grid(row=self.content_row, column=0, sticky="nsw", padx=(12, 8), pady=(0, 12))
+        left.grid_propagate(False)
         left.columnconfigure(0, weight=1)
         left.rowconfigure(0, weight=1)
-        self.profile_list = tk.Listbox(left, exportselection=False, height=20)
+        self.profile_list = tk.Listbox(left, exportselection=False, height=20, width=24)
         self.profile_list.grid(row=0, column=0, sticky="nsew")
         left_scroll = ttk.Scrollbar(left, orient="vertical", command=self.profile_list.yview)
         left_scroll.grid(row=0, column=1, sticky="ns")
         self.profile_list.configure(yscrollcommand=left_scroll.set)
         self.profile_list.bind("<<ListboxSelect>>", self._on_profile_selected)
         actions = ttk.Frame(left)
-        actions.grid(row=1, column=0, sticky="ew", pady=(8, 0))
+        actions.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        actions.columnconfigure(0, weight=1)
         ttk.Button(actions, text="Add profile", command=self._add_profile).grid(row=0, column=0, sticky="w")
-        ttk.Button(actions, text="Clone entry", command=self._clone_selected).grid(row=0, column=1, sticky="w", padx=(8, 0))
-        ttk.Button(actions, text="Remove selected", command=self._remove_selected).grid(row=0, column=2, sticky="w", padx=(8, 0))
+        ttk.Button(actions, text="Clone entry", command=self._clone_selected).grid(row=1, column=0, sticky="w", pady=(6, 0))
+        ttk.Button(actions, text="Remove selected", command=self._remove_selected).grid(row=2, column=0, sticky="w", pady=(6, 0))
 
         right = ttk.LabelFrame(self.window, text="Profile details", padding=12)
         right.grid(row=self.content_row, column=1, sticky="nsew", padx=(0, 12), pady=(0, 12))
         right.columnconfigure(0, weight=1)
-        right.rowconfigure(3, weight=1)
+        right.rowconfigure(0, weight=1)
 
-        header = ttk.Frame(right)
+        details_host, details_body, self.details_canvas = create_scrollable_frame(right, allow_horizontal=False)
+        details_host.grid(row=0, column=0, sticky="nsew")
+        details_body.columnconfigure(0, weight=1)
+
+        header = ttk.Frame(details_body)
         header.grid(row=0, column=0, sticky="ew")
         header.columnconfigure(1, weight=1)
         ttk.Label(header, text="Profile name").grid(row=0, column=0, sticky="w", pady=(0, 4))
         ttk.Entry(header, textvariable=self.name_var).grid(row=0, column=1, sticky="ew", pady=(0, 8))
 
-        fields_box = ttk.LabelFrame(right, text="Header fields", padding=12)
+        fields_box = ttk.LabelFrame(details_body, text="Header fields", padding=12)
         fields_box.grid(row=1, column=0, sticky="nsew", pady=(0, 12))
         fields_box.columnconfigure(0, weight=1)
         fields_box.rowconfigure(1, weight=1)
@@ -92,7 +99,7 @@ class SlurmProfilesDialog:
         fields_toolbar.columnconfigure(0, weight=1)
         ttk.Button(fields_toolbar, text="Add field", command=self._add_field_row).grid(row=0, column=1, sticky="e")
 
-        self.fields_canvas = tk.Canvas(fields_box, highlightthickness=0)
+        self.fields_canvas = tk.Canvas(fields_box, highlightthickness=0, height=220)
         self.fields_canvas.grid(row=1, column=0, sticky="nsew")
         yscroll = ttk.Scrollbar(fields_box, orient="vertical", command=self.fields_canvas.yview)
         yscroll.grid(row=1, column=1, sticky="ns")
@@ -109,9 +116,10 @@ class SlurmProfilesDialog:
         ttk.Label(self.fields_frame, text="Description").grid(row=0, column=1, sticky="w", padx=(0, 8))
         ttk.Label(self.fields_frame, text="Value").grid(row=0, column=2, sticky="w", padx=(0, 8))
 
-        footer_box = ttk.LabelFrame(right, text="Environment", padding=12)
+        footer_box = ttk.LabelFrame(details_body, text="Environment", padding=12)
         footer_box.grid(row=2, column=0, sticky="ew")
         footer_box.columnconfigure(1, weight=1)
+        footer_box.rowconfigure(2, weight=1)
         ttk.Label(footer_box, text="Conda activate").grid(row=0, column=0, sticky="w", pady=(0, 4))
         ttk.Entry(footer_box, textvariable=self.conda_activate_var).grid(row=0, column=1, sticky="ew", pady=(0, 8))
         ttk.Label(footer_box, text="Modules (one per line)").grid(row=1, column=0, sticky="nw", pady=(0, 4))
@@ -217,6 +225,7 @@ class SlurmProfilesDialog:
             self._new_field_row(field)
         if not profile.header_fields:
             self._add_field_row()
+        self.details_canvas.yview_moveto(0)
 
     def _clear_form(self) -> None:
         self.name_var.set("")

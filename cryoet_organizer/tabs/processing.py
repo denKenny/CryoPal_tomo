@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-import shlex
 import subprocess
 import tkinter as tk
 from pathlib import Path
@@ -9,6 +8,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from cryoet_organizer.dialogs import bind_scrollable_canvas, fit_outer_canvas_to_viewport, show_detail_dialog
 from cryoet_organizer.environments import environment_titles
+from cryoet_organizer.executables import WARPTOOLS_EXECUTABLE, resolve_executable_command
 from cryoet_organizer.job_execution import (
     build_slurm_override_metadata,
     create_history_entry,
@@ -17,7 +17,12 @@ from cryoet_organizer.job_execution import (
     is_scheduled_history_entry,
     slurm_override_payload,
 )
-from cryoet_organizer.job_defaults import resolve_job_default
+from cryoet_organizer.job_defaults import (
+    added_job_default_fields,
+    is_job_default_field_removed,
+    resolve_job_default,
+    resolve_job_parameter_name,
+)
 from cryoet_organizer.project import DatasetRecord, JobHistoryEntry, ProjectData
 from cryoet_organizer.resizable_sections import ResizableSectionStack, VerticalSplitPane
 from cryoet_organizer.scheduled_slurm_dialog import CollectiveSlurmSubmissionDialog, ask_scheduled_slurm_mode
@@ -31,7 +36,7 @@ from cryoet_organizer.warp_settings import parse_warp_settings
 class ProcessingTab(SidebarTab):
     tab_id = "processing"
     title = "Processing: WARP"
-    refresh_domains = ("processing", "datasets", "defaults", "slurm", "environments")
+    refresh_domains = ("processing", "datasets", "defaults", "executables", "slurm", "environments")
 
     def build(self) -> None:
         self.frame.columnconfigure(0, weight=1)
@@ -332,7 +337,7 @@ class ProcessingTab(SidebarTab):
 
         self.command_text = tk.Text(command_box, height=6, wrap="word", font="TkDefaultFont")
         self.command_text.grid(row=3, column=0, sticky="nsew")
-        self.command_text.insert("1.0", "WarpTools")
+        self.command_text.insert("1.0", resolve_executable_command(self.app.project, WARPTOOLS_EXECUTABLE))
 
         parameter_box = ttk.LabelFrame(self.parameter_fields_frame, text="Parameters", padding=12)
         parameter_box.grid(row=0, column=0, sticky="nsew")
@@ -570,7 +575,7 @@ class ProcessingTab(SidebarTab):
         if self.current_job is None:
             return values
 
-        for flag in self.current_job.flags:
+        for flag in self._active_job_flags():
             variable = self.parameter_vars.get(flag.name)
             if variable is None:
                 continue
@@ -600,6 +605,57 @@ class ProcessingTab(SidebarTab):
         )
         available = set(environment_titles(self.app.project))
         return value if value in available else "None"
+
+    def _parameter_name(self, field_key: str, base_name: str) -> str:
+        if self.current_job is None:
+            return base_name
+        return resolve_job_parameter_name(
+            self.app.project,
+            "Processing",
+            self.current_job.group,
+            self.current_job.command,
+            field_key,
+            base_name,
+        )
+
+    def _parameter_base_name(self, flag: WarpToolFlag) -> str:
+        return "" if flag.name.startswith("custom__") else flag.name
+
+    def _display_parameter_name(self, flag: WarpToolFlag) -> str:
+        return self._parameter_name(flag.name, self._parameter_base_name(flag))
+
+    def _active_job_flags(self) -> tuple[WarpToolFlag, ...]:
+        if self.current_job is None:
+            return ()
+        flags: list[WarpToolFlag] = [
+            flag
+            for flag in self.current_job.flags
+            if not is_job_default_field_removed(
+                self.app.project,
+                "Processing",
+                self.current_job.group,
+                self.current_job.command,
+                flag.name,
+            )
+        ]
+        for field in added_job_default_fields(
+            self.app.project,
+            "Processing",
+            self.current_job.group,
+            self.current_job.command,
+        ):
+            flags.append(
+                WarpToolFlag(
+                    name=field.key,
+                    aliases=(),
+                    description=field.description or field.label,
+                    required=False,
+                    default_value=field.default_value,
+                    widget=field.widget,
+                    browse_mode="dir" if field.widget == "path" else "file",
+                )
+            )
+        return tuple(flags)
 
     def _record_history_entry(self, action: str, scheduled: bool = False) -> JobHistoryEntry | None:
         if self.current_dataset is None or self.current_job is None:
@@ -796,25 +852,27 @@ class ProcessingTab(SidebarTab):
         if self._suspend_command_preview_updates:
             return
         if self.current_job is None:
-            self._set_command_text("WarpTools")
+            self._set_command_text(resolve_executable_command(self.app.project, WARPTOOLS_EXECUTABLE))
             return
 
-        parts = [f"WarpTools {self.current_job.command}"]
-        for flag in self.current_job.flags:
+        parts = [f"{resolve_executable_command(self.app.project, WARPTOOLS_EXECUTABLE)} {self.current_job.command}"]
+        for flag in self._active_job_flags():
             variable = self.parameter_vars.get(flag.name)
             if variable is None:
                 continue
+            parameter_name = self._display_parameter_name(flag)
             if self.current_job.command == "ts_export_particles" and flag.name == "--output_star":
                 value = self._combined_export_output_path()
                 if value:
-                    parts.append(f"{flag.name} {shlex.quote(value)}")
+                    parts.append(f"{parameter_name} {value}")
                 continue
             value = variable.get()
             if flag.widget == "bool":
-                if value:
-                    parts.append(flag.name)
+                if value and parameter_name:
+                    parts.append(parameter_name)
             elif str(value).strip():
-                parts.append(f"{flag.name} {shlex.quote(str(value).strip())}")
+                value_text = str(value).strip()
+                parts.append(f"{parameter_name} {value_text}" if parameter_name else value_text)
         self._set_command_text(" ".join(parts))
         self.sync_to_project(self.app.project)
 
@@ -1211,7 +1269,7 @@ class ProcessingTab(SidebarTab):
         variable = tk.BooleanVar(value=default_value)
         check = ttk.Checkbutton(
             parent,
-            text=f"{flag.name}{' *' if flag.required else ''}",
+            text=f"{self._display_parameter_name(flag) or flag.name}{' *' if flag.required else ''}",
             variable=variable,
             command=self._update_command_preview,
         )
@@ -1244,7 +1302,7 @@ class ProcessingTab(SidebarTab):
 
         ttk.Label(
             block,
-            text=f"{flag.name}{' *' if flag.required else ''}",
+            text=f"{self._display_parameter_name(flag) or flag.name}{' *' if flag.required else ''}",
         ).grid(row=0, column=0, sticky="w", pady=(0, 2))
 
         variable = tk.StringVar(value=default_value)
@@ -1389,13 +1447,13 @@ class ProcessingTab(SidebarTab):
             check_widget = row["check_widget"]
             if check_widget is not None:
                 check_widget.configure(
-                    text=f"{flag.name}{' *' if flag.required else ''}",
+                    text=f"{self._display_parameter_name(flag) or flag.name}{' *' if flag.required else ''}",
                 )
             assert isinstance(value_var, tk.BooleanVar)
             value_var.set(default_value.lower() in {"1", "true", "yes", "on"})
         elif desired_kind == "export_output":
             label_widget.grid()
-            label_widget.config(text=f"{flag.name}{' *' if flag.required else ''}")
+            label_widget.config(text=f"{self._display_parameter_name(flag) or flag.name}{' *' if flag.required else ''}")
             assert isinstance(value_var, tk.StringVar)
             path_value = Path(default_value.strip()) if default_value.strip() else Path("")
             if path_value.suffix:
@@ -1407,7 +1465,7 @@ class ProcessingTab(SidebarTab):
                     self.export_output_name_var.set("Output.star")
         else:
             label_widget.grid()
-            label_widget.config(text=f"{flag.name}{' *' if flag.required else ''}")
+            label_widget.config(text=f"{self._display_parameter_name(flag) or flag.name}{' *' if flag.required else ''}")
             assert isinstance(value_var, tk.StringVar)
             value_var.set(default_value)
 
@@ -1436,7 +1494,7 @@ class ProcessingTab(SidebarTab):
         self.processing_pane.set_section_visible("parameters", True)
         required_flags: list[WarpToolFlag] = []
         advanced_flags: list[WarpToolFlag] = []
-        for flag in self.current_job.flags:
+        for flag in self._active_job_flags():
             if (
                 self.current_job.command == "create_settings"
                 and self.current_job.group == "Frame series"
@@ -1517,7 +1575,7 @@ class ProcessingTab(SidebarTab):
             self.history_box.grid_remove()
             self.parameters_box.grid_remove()
             self.processing_pane.set_section_visible("parameters", False)
-            self._set_command_text("WarpTools")
+            self._set_command_text(resolve_executable_command(self.app.project, WARPTOOLS_EXECUTABLE))
             self.dataset_summary.config(text="")
 
     def _on_job_selected(self, _event=None) -> None:
@@ -1569,6 +1627,7 @@ class ProcessingTab(SidebarTab):
                 )
         else:
             self._on_dataset_selected()
+        self._update_command_preview()
 
     def reset_window_sizes(self) -> None:
         self.processing_pane.reset_to_defaults()

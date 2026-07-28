@@ -3,7 +3,13 @@ from __future__ import annotations
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
-from cryoet_organizer.preferences import project_preference, project_preference_enabled, project_preference_int
+from cryoet_organizer.preferences import (
+    DISPLAY_PROFILE_LABELS,
+    DISPLAY_PROFILE_OPTIONS,
+    project_preference,
+    project_preference_enabled,
+    project_preference_int,
+)
 from cryoet_organizer.dialogs import bind_scrollable_canvas
 from cryoet_organizer.settings_shell import decorate_settings_window
 
@@ -37,7 +43,10 @@ class PreferencesDialog:
 
         ttk.Label(
             container,
-            text="Define how CryoPal_tomo should behave for saved particle plots, window layout, and tomogram gallery handling.",
+            text=(
+                "Define how CryoPal_tomo should behave for interface display, saved particle plots, "
+                "window layout, and tomogram gallery handling."
+            ),
             wraplength=780,
             justify="left",
         ).grid(row=0, column=0, sticky="w", pady=(0, 12))
@@ -47,8 +56,37 @@ class PreferencesDialog:
         sections.columnconfigure(0, weight=1)
         container.rowconfigure(1, weight=1)
 
+        display_box = ttk.LabelFrame(sections, text="Interface display", padding=12)
+        display_box.grid(row=0, column=0, sticky="ew")
+        display_box.columnconfigure(0, weight=1)
+        self.display_profile_var = tk.StringVar(value=app.current_display_profile_setting())
+        ttk.Label(
+            display_box,
+            text=(
+                "Choose a tested display profile for this workstation. "
+                "Auto is recommended and selects one of CryoPal_tomo's predefined sizes for the current screen."
+            ),
+            wraplength=720,
+            justify="left",
+        ).grid(row=0, column=0, sticky="w")
+        choices = ttk.Frame(display_box)
+        choices.grid(row=1, column=0, sticky="w", pady=(10, 0))
+        for column, profile in enumerate(DISPLAY_PROFILE_OPTIONS):
+            ttk.Radiobutton(
+                choices,
+                text=DISPLAY_PROFILE_LABELS[profile],
+                value=profile,
+                variable=self.display_profile_var,
+            ).grid(row=0, column=column, sticky="w", padx=(0, 16))
+        ttk.Label(
+            display_box,
+            text="This setting is global and reused across projects. A restart gives the cleanest full layout refresh.",
+            wraplength=720,
+            justify="left",
+        ).grid(row=2, column=0, sticky="w", pady=(8, 0))
+
         plotting_box = ttk.LabelFrame(sections, text="Particle plotting", padding=12)
-        plotting_box.grid(row=0, column=0, sticky="ew")
+        plotting_box.grid(row=1, column=0, sticky="ew", pady=(12, 0))
         plotting_box.columnconfigure(0, weight=1)
         self.save_particle_plots_var = tk.BooleanVar(
             value=project_preference_enabled(app.project, "save_particle_plots", default=False)
@@ -66,7 +104,7 @@ class PreferencesDialog:
         ).grid(row=1, column=0, sticky="w", pady=(6, 0))
 
         layout_box = ttk.LabelFrame(sections, text="Window layout", padding=12)
-        layout_box.grid(row=1, column=0, sticky="ew", pady=(12, 0))
+        layout_box.grid(row=2, column=0, sticky="ew", pady=(12, 0))
         layout_box.columnconfigure(0, weight=1)
         ttk.Label(
             layout_box,
@@ -84,7 +122,7 @@ class PreferencesDialog:
         ).grid(row=1, column=0, sticky="w", pady=(12, 0))
 
         gallery_box = ttk.LabelFrame(sections, text="Tomogram gallery", padding=12)
-        gallery_box.grid(row=2, column=0, sticky="ew", pady=(12, 0))
+        gallery_box.grid(row=3, column=0, sticky="ew", pady=(12, 0))
         gallery_box.columnconfigure(1, weight=1)
         gallery_box.columnconfigure(3, weight=1)
 
@@ -139,7 +177,8 @@ class PreferencesDialog:
         cancel_label = "Revert section" if self.embedded else "Cancel"
         save_label = "Save section" if self.embedded else "Save"
         ttk.Button(footer, text=cancel_label, command=self._cancel).grid(row=0, column=0, padx=(0, 8))
-        ttk.Button(footer, text=save_label, command=self._save).grid(row=0, column=1)
+        ttk.Button(footer, text="Apply", command=self._apply).grid(row=0, column=1, padx=(0, 8))
+        ttk.Button(footer, text=save_label, command=self._save).grid(row=0, column=2)
 
         if not self.embedded:
             decorate_settings_window(self, "preferences")
@@ -153,6 +192,8 @@ class PreferencesDialog:
         )
 
     def has_unsaved_changes(self) -> bool:
+        current_display_profile = self.display_profile_var.get().strip()
+        saved_display_profile = self.app.saved_display_profile_setting()
         current = "true" if self.save_particle_plots_var.get() else "false"
         saved = "true" if project_preference_enabled(self.app.project, "save_particle_plots", default=False) else "false"
         current_downscaled = "true" if self.use_downscaled_thumbnails_var.get() else "false"
@@ -175,6 +216,7 @@ class PreferencesDialog:
         )
         return any(
             (
+                current_display_profile != saved_display_profile,
                 current != saved,
                 current_downscaled != saved_downscaled,
                 current_location != saved_location,
@@ -184,6 +226,7 @@ class PreferencesDialog:
         )
 
     def save_section(self, *, close_window: bool = False) -> bool:
+        display_profile = self.display_profile_var.get().strip() or "auto"
         location = self.thumbnail_cache_location_var.get().strip() or "dataset/thumbnail-cache"
         try:
             size = int(self.thumbnail_cache_size_var.get().strip() or "256")
@@ -218,6 +261,8 @@ class PreferencesDialog:
         self.app.project.state.preferences["thumbnail_cache_location"] = location
         self.app.project.state.preferences["thumbnail_cache_size"] = str(size)
         self.app.project.state.preferences["gallery_page_size"] = str(page_size)
+        if display_profile != self.app.saved_display_profile_setting():
+            self.app.apply_display_profile_setting(display_profile, persist=True)
         self.app.on_project_changed("preferences")
         self.app.status_var.set("Preferences updated")
         if close_window:
@@ -225,6 +270,9 @@ class PreferencesDialog:
         return True
 
     def _cancel(self) -> None:
+        saved_display_profile = self.app.saved_display_profile_setting()
+        self.display_profile_var.set(saved_display_profile)
+        self.app.apply_display_profile_setting(saved_display_profile, persist=False)
         self.save_particle_plots_var.set(
             project_preference_enabled(self.app.project, "save_particle_plots", default=False)
         )
@@ -243,6 +291,9 @@ class PreferencesDialog:
 
     def _save(self) -> None:
         self.save_section(close_window=False)
+
+    def _apply(self) -> None:
+        self.app.apply_display_profile_setting(self.display_profile_var.get().strip() or "auto", persist=False)
 
     def _browse_cache_folder(self) -> None:
         initial = self.thumbnail_cache_location_var.get().strip()

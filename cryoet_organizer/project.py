@@ -15,7 +15,7 @@ from typing import Any
 PROJECT_SUFFIX = ".cryopal.json"
 SETTINGS_SUFFIX = ".cryopal.settings"
 TS_NAME_DELIMITERS = "_-. "
-PROJECT_SCHEMA_VERSION = 5
+PROJECT_SCHEMA_VERSION = 6
 
 
 def _string_keyed_dict(payload: Any) -> dict[str, Any]:
@@ -75,6 +75,7 @@ class ProjectState:
     viewer_defaults: dict[str, Any] | None = None
     slurm_profiles: list[dict[str, str]] = field(default_factory=list)
     environments: list[dict[str, str]] = field(default_factory=list)
+    executable_overrides: dict[str, str] = field(default_factory=dict)
     job_default_overrides: dict[str, dict[str, dict[str, str]]] = field(default_factory=dict)
     file_registry_patterns: dict[str, dict[str, Any]] = field(default_factory=dict)
     file_registry_role_order: list[str] = field(default_factory=list)
@@ -98,6 +99,7 @@ class ProjectState:
             viewer_defaults=deepcopy(dict(payload.get("viewer_defaults", {}))) if isinstance(payload.get("viewer_defaults"), dict) else None,
             slurm_profiles=_string_string_dict_list(payload.get("slurm_profiles", [])),
             environments=_string_string_dict_list(payload.get("environments", [])),
+            executable_overrides=_string_string_dict(payload.get("executable_overrides", {})),
             job_default_overrides=_triple_string_dict(payload.get("job_default_overrides", {})),
             file_registry_patterns=_double_any_dict(payload.get("file_registry_patterns", {})),
             file_registry_role_order=_string_keyed_list(payload.get("file_registry_role_order", [])),
@@ -620,6 +622,7 @@ def migrate_project_payload(payload: dict[str, Any]) -> dict[str, Any]:
     legacy_state_keys = {
         "appearance",
         "slurm_profiles",
+        "executable_overrides",
         "job_default_overrides",
         "file_registry_patterns",
         "file_registry_role_order",
@@ -640,6 +643,9 @@ def migrate_project_payload(payload: dict[str, Any]) -> dict[str, Any]:
         schema_version = 4
     if schema_version < 5:
         migrated = _migrate_v4_to_v5(migrated)
+        schema_version = 5
+    if schema_version < 6:
+        migrated = _migrate_v5_to_v6(migrated)
     migrated["schema_version"] = PROJECT_SCHEMA_VERSION
     return migrated
 
@@ -703,6 +709,7 @@ def _migrate_v2_to_v3(payload: dict[str, Any]) -> dict[str, Any]:
 
     move("appearance", {})
     move("slurm_profiles", [])
+    move("executable_overrides", {})
     move("job_default_overrides", {})
     move("file_registry_patterns", {})
     move("file_registry_role_order", [])
@@ -730,4 +737,14 @@ def _migrate_v4_to_v5(payload: dict[str, Any]) -> dict[str, Any]:
         state = {}
         migrated["state"] = state
     state.setdefault("shortcuts", [])
+    return migrated
+
+
+def _migrate_v5_to_v6(payload: dict[str, Any]) -> dict[str, Any]:
+    migrated = deepcopy(payload)
+    state = migrated.setdefault("state", {})
+    if not isinstance(state, dict):
+        state = {}
+        migrated["state"] = state
+    state.setdefault("executable_overrides", {})
     return migrated

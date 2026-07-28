@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tkinter as tk
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
@@ -23,6 +24,15 @@ from cryoet_organizer.resizable_sections import ResizableSectionStack
 from cryoet_organizer.tabs.base import LabeledEntry, LabeledPathEntry, SidebarTab
 from cryoet_organizer.warp_settings import WarpSettingsSummary, parse_warp_settings
 from cryoet_organizer.dialogs import bind_scrollable_canvas, fit_outer_canvas_to_viewport
+
+
+_UNSAFE_DATASET_FOLDER_CHARS = re.compile(r"[^A-Za-z0-9._-]+")
+
+
+def _sanitize_dataset_folder_name(dataset_name: str) -> str:
+    cleaned = _UNSAFE_DATASET_FOLDER_CHARS.sub("_", dataset_name.strip())
+    cleaned = re.sub(r"_+", "_", cleaned).strip("._-")
+    return cleaned or "dataset"
 
 
 class ProjectOverviewTab(SidebarTab):

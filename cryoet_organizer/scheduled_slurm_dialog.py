@@ -4,7 +4,7 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 from typing import Callable
 
-from cryoet_organizer.dialogs import show_detail_dialog
+from cryoet_organizer.dialogs import show_detail_dialog, ui_font_name
 from cryoet_organizer.slurm_override_ui import SlurmOverrideUI
 
 
@@ -67,7 +67,7 @@ def ask_scheduled_slurm_mode(parent: tk.Misc) -> str | None:
     ttk.Label(
         body,
         text="Submit scheduled jobs to Slurm",
-        font=("TkDefaultFont", 12, "bold"),
+        font=ui_font_name("CryoPalDialogHeadingFont", "CryoPalHeadingFont", "TkDefaultFont"),
     ).grid(row=0, column=0, sticky="w")
     ttk.Label(
         body,

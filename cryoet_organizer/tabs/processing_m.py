@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-import shlex
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 from cryoet_organizer.dialogs import bind_scrollable_canvas, fit_outer_canvas_to_viewport, show_detail_dialog
 from cryoet_organizer.environments import environment_titles
+from cryoet_organizer.executables import MTOOLS_EXECUTABLE, resolve_executable_command
 from cryoet_organizer.job_execution import (
     build_slurm_override_metadata,
     create_history_entry,
@@ -16,7 +16,12 @@ from cryoet_organizer.job_execution import (
     is_scheduled_history_entry,
     slurm_override_payload,
 )
-from cryoet_organizer.job_defaults import resolve_job_default
+from cryoet_organizer.job_defaults import (
+    added_job_default_fields,
+    is_job_default_field_removed,
+    resolve_job_default,
+    resolve_job_parameter_name,
+)
 from cryoet_organizer.m_population import parse_population_file
 from cryoet_organizer.mtools_catalog import MToolCommand, MToolFlag, M_GROUPS, m_jobs_by_group
 from cryoet_organizer.project import JobHistoryEntry, MPopulationRecord, ProjectData
@@ -30,7 +35,7 @@ from cryoet_organizer.tabs.base import SidebarTab
 class ProcessingMTab(SidebarTab):
     tab_id = "processing_m"
     title = "Processing: M"
-    refresh_domains = ("processing_m", "m_populations", "defaults", "slurm", "environments")
+    refresh_domains = ("processing_m", "m_populations", "defaults", "executables", "slurm", "environments")
 
     def build(self) -> None:
         self.frame.columnconfigure(0, weight=1)
@@ -373,7 +378,7 @@ class ProcessingMTab(SidebarTab):
 
         self.command_text = tk.Text(command_box, height=6, wrap="word", font="TkDefaultFont")
         self.command_text.grid(row=3, column=0, sticky="nsew")
-        self.command_text.insert("1.0", "MTools")
+        self.command_text.insert("1.0", resolve_executable_command(self.app.project, MTOOLS_EXECUTABLE))
 
         parameter_box = ttk.LabelFrame(self.parameter_fields_frame, text="Parameters", padding=12)
         parameter_box.grid(row=0, column=0, sticky="nsew")
@@ -479,12 +484,13 @@ class ProcessingMTab(SidebarTab):
     def _create_population_command(self) -> str:
         directory = self.create_directory_var.get().strip()
         name = self.create_name_var.get().strip()
-        parts = ["MTools", "create_population"]
+        executable = resolve_executable_command(self.app.project, MTOOLS_EXECUTABLE)
+        parts = ["create_population"]
         if directory:
             parts.extend(["--directory", directory])
         if name:
             parts.extend(["--name", name])
-        return shlex.join(parts)
+        return f"{executable} {' '.join(parts)}"
 
     def _update_create_command_preview(self) -> None:
         command = self._create_population_command()
@@ -974,7 +980,7 @@ class ProcessingMTab(SidebarTab):
         values: dict[str, str] = {}
         if self.current_job is None:
             return values
-        for flag in self.current_job.flags:
+        for flag in self._active_job_flags():
             variable = self.parameter_vars.get(flag.name)
             if variable is None:
                 continue
@@ -999,6 +1005,56 @@ class ProcessingMTab(SidebarTab):
         )
         available = set(environment_titles(self.app.project))
         return value if value in available else "None"
+
+    def _parameter_name(self, field_key: str, base_name: str) -> str:
+        if self.current_job is None:
+            return base_name
+        return resolve_job_parameter_name(
+            self.app.project,
+            "Processing: M",
+            self.current_job.group,
+            self.current_job.command,
+            field_key,
+            base_name,
+        )
+
+    def _parameter_base_name(self, flag: MToolFlag) -> str:
+        return "" if flag.name.startswith("custom__") else flag.name
+
+    def _display_parameter_name(self, flag: MToolFlag) -> str:
+        return self._parameter_name(flag.name, self._parameter_base_name(flag))
+
+    def _active_job_flags(self) -> tuple[MToolFlag, ...]:
+        if self.current_job is None:
+            return ()
+        flags: list[MToolFlag] = [
+            flag
+            for flag in self.current_job.flags
+            if not is_job_default_field_removed(
+                self.app.project,
+                "Processing: M",
+                self.current_job.group,
+                self.current_job.command,
+                flag.name,
+            )
+        ]
+        for field in added_job_default_fields(
+            self.app.project,
+            "Processing: M",
+            self.current_job.group,
+            self.current_job.command,
+        ):
+            flags.append(
+                MToolFlag(
+                    name=field.key,
+                    required=False,
+                    description=field.description or field.label,
+                    widget=field.widget,
+                    default_value=field.default_value,
+                    browse_mode="dir" if field.widget == "path" else "file",
+                )
+            )
+        return tuple(flags)
 
     def _record_history_entry(self, action: str, scheduled: bool = False) -> JobHistoryEntry | None:
         population = self._selected_population()
@@ -1086,24 +1142,28 @@ class ProcessingMTab(SidebarTab):
         if self._suspend_command_preview_updates:
             return
         if self.current_job is None:
-            self._set_command_text("MTools")
+            self._set_command_text(resolve_executable_command(self.app.project, MTOOLS_EXECUTABLE))
             return
 
-        parts = [self.current_job.executable]
+        executable = resolve_executable_command(self.app.project, self.current_job.executable)
+        parts = []
         if self.current_job.command != self.current_job.executable:
             parts.append(self.current_job.command)
-        for flag in self.current_job.flags:
+        for flag in self._active_job_flags():
             variable = self.parameter_vars.get(flag.name)
             if variable is None:
                 continue
             value = variable.get()
+            parameter_name = self._display_parameter_name(flag)
             if flag.widget == "bool":
-                if value:
-                    parts.append(flag.name)
+                if value and parameter_name:
+                    parts.append(parameter_name)
             elif str(value).strip():
-                parts.append(flag.name)
+                if parameter_name:
+                    parts.append(parameter_name)
                 parts.append(str(value).strip())
-        self._set_command_text(shlex.join(parts))
+        command_suffix = " ".join(parts)
+        self._set_command_text(f"{executable} {command_suffix}" if command_suffix else executable)
         self._update_population_summary()
 
     def _copy_command(self) -> None:
@@ -1392,7 +1452,7 @@ class ProcessingMTab(SidebarTab):
         variable = tk.BooleanVar(value=default_value)
         check = ttk.Checkbutton(
             parent,
-            text=f"{flag.name}{' *' if flag.required else ''}",
+            text=f"{self._display_parameter_name(flag) or flag.name}{' *' if flag.required else ''}",
             variable=variable,
             command=self._update_command_preview,
         )
@@ -1411,7 +1471,7 @@ class ProcessingMTab(SidebarTab):
         block.grid(row=row, column=0, sticky="ew", pady=(0, 10))
         block.columnconfigure(0, weight=1)
 
-        ttk.Label(block, text=f"{flag.name}{' *' if flag.required else ''}").grid(
+        ttk.Label(block, text=f"{self._display_parameter_name(flag) or flag.name}{' *' if flag.required else ''}").grid(
             row=0,
             column=0,
             sticky="w",
@@ -1535,12 +1595,12 @@ class ProcessingMTab(SidebarTab):
             label_widget.grid_remove()
             check_widget = row["check_widget"]
             if check_widget is not None:
-                check_widget.configure(text=f"{flag.name}{' *' if flag.required else ''}")
+                check_widget.configure(text=f"{self._display_parameter_name(flag) or flag.name}{' *' if flag.required else ''}")
             assert isinstance(value_var, tk.BooleanVar)
             value_var.set(default_value.lower() in {"1", "true", "yes", "on"})
         else:
             label_widget.grid()
-            label_widget.config(text=f"{flag.name}{' *' if flag.required else ''}")
+            label_widget.config(text=f"{self._display_parameter_name(flag) or flag.name}{' *' if flag.required else ''}")
             assert isinstance(value_var, tk.StringVar)
             value_var.set(default_value)
 
@@ -1586,7 +1646,7 @@ class ProcessingMTab(SidebarTab):
         assert isinstance(combo, ttk.Combobox)
 
         label_widget.grid()
-        label_widget.config(text=f"{flag.name}{' *' if flag.required else ''}")
+        label_widget.config(text=f"{self._display_parameter_name(flag) or flag.name}{' *' if flag.required else ''}")
 
         field_name = "--species" if "species" in flag.name else "--source"
         options = self._population_choice_options(self.current_population, field_name)
@@ -1633,7 +1693,7 @@ class ProcessingMTab(SidebarTab):
             self.parameters_box.grid_remove()
             self.processing_pane.set_section_visible("parameters", False)
             self._suspend_command_preview_updates = False
-            self._set_command_text("MTools")
+            self._set_command_text(resolve_executable_command(self.app.project, MTOOLS_EXECUTABLE))
             self.processing_advanced_button.grid_remove()
             self.processing_advanced_frame.grid_remove()
             self._hide_unused_parameter_rows(self._required_param_rows, 0)
@@ -1642,8 +1702,9 @@ class ProcessingMTab(SidebarTab):
 
         self.parameters_box.grid()
         self.processing_pane.set_section_visible("parameters", True)
-        required_flags = [flag for flag in self.current_job.flags if flag.required]
-        advanced_flags = [flag for flag in self.current_job.flags if not flag.required]
+        active_flags = self._active_job_flags()
+        required_flags = [flag for flag in active_flags if flag.required]
+        advanced_flags = [flag for flag in active_flags if not flag.required]
 
         for row, flag in enumerate(required_flags):
             default_value = self._population_derived_default(flag, self.current_population)
@@ -1727,6 +1788,8 @@ class ProcessingMTab(SidebarTab):
         self._refresh_processing_selection()
         self._update_population_ui()
         self.create_environment_var.set(self._create_population_environment_default())
+        self._update_create_command_preview()
+        self._update_command_preview()
 
     def sync_to_project(self, project: ProjectData) -> None:
         self.processing_pane.write_to_project(project)

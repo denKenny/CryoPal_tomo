@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import shlex
 import tkinter as tk
 from datetime import datetime, timezone
 from pathlib import Path
@@ -12,7 +11,7 @@ from cryoet_organizer.custom_jobs import (
     get_project_custom_jobs,
     set_project_custom_jobs,
 )
-from cryoet_organizer.dialogs import bind_scrollable_canvas, fit_outer_canvas_to_viewport
+from cryoet_organizer.dialogs import bind_scrollable_canvas, fit_outer_canvas_to_viewport, technical_font_name
 from cryoet_organizer.environments import environment_titles
 from cryoet_organizer.file_resolver import resolve_dataset_file
 from cryoet_organizer.file_resolver import file_role_order, role_title
@@ -20,6 +19,12 @@ from cryoet_organizer.job_execution import (
     build_slurm_override_metadata,
     execute_command_sequence,
     slurm_override_payload,
+)
+from cryoet_organizer.parameter_editor import (
+    ENVIRONMENT_ROW_KEY,
+    ParameterEditorDialog,
+    ParameterEditorRow,
+    ParameterSummaryTable,
 )
 from cryoet_organizer.project import (
     JobHistoryEntry,
@@ -233,29 +238,25 @@ class CustomTab(SidebarTab):
         ttk.Label(builder_meta, text="Job name").grid(row=0, column=0, sticky="w", pady=(0, 4))
         ttk.Entry(builder_meta, textvariable=self.builder_name_var).grid(row=0, column=1, sticky="ew", pady=(0, 8))
 
-        ttk.Label(builder_meta, text="Default local environment").grid(row=1, column=0, sticky="w", pady=(0, 4))
-        self.builder_environment_combo = ttk.Combobox(
-            builder_meta,
-            textvariable=self.builder_environment_var,
-            state="readonly",
-            values=environment_titles(self.app.project),
-        )
-        self.builder_environment_combo.grid(row=1, column=1, sticky="ew", pady=(0, 8))
-
-        ttk.Label(builder_meta, text="Description").grid(row=2, column=0, sticky="nw", pady=(0, 4))
+        ttk.Label(builder_meta, text="Description").grid(row=1, column=0, sticky="nw", pady=(0, 4))
         self.builder_description_text = tk.Text(builder_meta, height=5, wrap="word")
-        self.builder_description_text.grid(row=2, column=1, sticky="ew", pady=(0, 8))
+        self.builder_description_text.grid(row=1, column=1, sticky="ew", pady=(0, 8))
 
-        ttk.Label(builder_meta, text="Command template").grid(row=3, column=0, sticky="nw", pady=(0, 4))
-        self.builder_command_text = tk.Text(builder_meta, height=3, wrap="word", font="TkDefaultFont")
-        self.builder_command_text.grid(row=3, column=1, sticky="ew")
+        ttk.Label(builder_meta, text="Command template").grid(row=2, column=0, sticky="nw", pady=(0, 4))
+        self.builder_command_text = tk.Text(
+            builder_meta,
+            height=3,
+            wrap="word",
+            font=technical_font_name(),
+        )
+        self.builder_command_text.grid(row=2, column=1, sticky="ew")
 
         ttk.Label(
             builder_meta,
             text="The command template is the fixed base command. Flags and values from the table below are appended automatically.",
             wraplength=720,
             justify="left",
-        ).grid(row=4, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(8, 0))
 
         ttk.Label(
             builder_meta,
@@ -263,34 +264,23 @@ class CustomTab(SidebarTab):
             style="Error.TLabel",
             wraplength=720,
             justify="left",
-        ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        ).grid(row=4, column=0, columnspan=2, sticky="w", pady=(8, 0))
 
         params_box = ttk.LabelFrame(self.builder_params_frame, text="Custom parameters", padding=12)
         params_box.grid(row=0, column=0, sticky="nsew")
         params_box.columnconfigure(0, weight=1)
         params_box.rowconfigure(0, weight=1)
 
-        self.params_canvas = tk.Canvas(params_box, highlightthickness=0)
-        self.params_canvas.grid(row=0, column=0, sticky="nsew")
-        params_scroll = ttk.Scrollbar(params_box, orient="vertical", command=self.params_canvas.yview)
-        params_scroll.grid(row=0, column=1, sticky="ns")
-        params_xscroll = ttk.Scrollbar(params_box, orient="horizontal", command=self.params_canvas.xview)
-        params_xscroll.grid(row=1, column=0, sticky="ew")
-        self.params_canvas.configure(yscrollcommand=params_scroll.set)
-        self.params_canvas.configure(xscrollcommand=params_xscroll.set)
-        self.params_rows_frame = ttk.Frame(self.params_canvas)
-        for column in range(4):
-            self.params_rows_frame.columnconfigure(column, weight=1 if column in {0, 1, 3} else 0)
-        self.params_window = self.params_canvas.create_window((0, 0), window=self.params_rows_frame, anchor="nw")
-        bind_scrollable_canvas(self.params_canvas, self.params_window, self.params_rows_frame, allow_horizontal=True)
+        self.builder_params_table = ParameterSummaryTable(params_box, self.app)
+        self.builder_params_table.grid(row=0, column=0, sticky="nsew")
 
         builder_actions = ttk.Frame(params_box)
         builder_actions.grid(row=2, column=0, sticky="ew", pady=(12, 0))
         builder_actions.columnconfigure(0, weight=1)
-        ttk.Button(builder_actions, text="Add parameter row", command=self._add_builder_row).grid(row=0, column=0, sticky="w")
+        ttk.Button(builder_actions, text="Edit job entries", command=self._edit_builder_rows).grid(row=0, column=0, sticky="w")
         ttk.Button(builder_actions, text="Save custom job type", command=self._save_custom_job).grid(row=0, column=1, padx=(8, 0))
 
-        self._add_builder_row()
+        self._rebuild_builder_rows()
 
     def _build_runtime_ui(self) -> None:
         self.runtime_command_text = self._build_command_section(self.runtime_command_pane, 0)
@@ -324,7 +314,7 @@ class CustomTab(SidebarTab):
         self.runtime_canvas.configure(yscrollcommand=runtime_scroll.set)
         self.runtime_canvas.configure(xscrollcommand=runtime_xscroll.set)
         self.runtime_params_frame = ttk.Frame(self.runtime_canvas)
-        self.runtime_params_frame.columnconfigure(1, weight=1)
+        self.runtime_params_frame.columnconfigure(0, weight=1)
         self.runtime_window = self.runtime_canvas.create_window((0, 0), window=self.runtime_params_frame, anchor="nw")
         bind_scrollable_canvas(
             self.runtime_canvas,
@@ -392,7 +382,7 @@ class CustomTab(SidebarTab):
         self.slurm_overrides_frame = ttk.Frame(box)
         self.slurm_overrides_frame.grid(row=2, column=0, sticky="ew", pady=(0, 8))
         self.slurm_overrides_ui.register_frame(self.slurm_overrides_frame)
-        text = tk.Text(box, height=6, wrap="word", font="TkDefaultFont")
+        text = tk.Text(box, height=6, wrap="word", font=technical_font_name())
         text.grid(row=3, column=0, sticky="nsew")
         self._toggle_slurm_controls()
         return text
@@ -422,65 +412,7 @@ class CustomTab(SidebarTab):
             variable.set(path)
 
     def _rebuild_builder_rows(self) -> None:
-        for child in self.params_rows_frame.winfo_children():
-            child.destroy()
-        headings = ("Description", "Flag", "Input type", "Default", "")
-        for column, heading in enumerate(headings):
-            ttk.Label(self.params_rows_frame, text=heading).grid(row=0, column=column, sticky="w", padx=(0, 8))
-        for row_index, row in enumerate(self.parameter_rows, start=1):
-            ttk.Entry(self.params_rows_frame, textvariable=row["label"]).grid(row=row_index, column=0, sticky="ew", padx=(0, 8), pady=4)
-            ttk.Entry(self.params_rows_frame, textvariable=row["flag"]).grid(row=row_index, column=1, sticky="ew", padx=(0, 8), pady=4)
-            combo = ttk.Combobox(
-                self.params_rows_frame,
-                textvariable=row["widget"],
-                state="readonly",
-                values=runtime_input_type_options(self.app.project),
-                width=34,
-            )
-            combo.grid(row=row_index, column=2, sticky="ew", padx=(0, 8), pady=4)
-            combo.bind("<<ComboboxSelected>>", lambda _event, current=row: self._on_builder_type_changed(current))
-
-            default_cell = ttk.Frame(self.params_rows_frame)
-            default_cell.grid(row=row_index, column=3, sticky="ew", padx=(0, 8), pady=4)
-            default_cell.columnconfigure(0, weight=1)
-            widget = self._stored_input_type(str(row["widget"].get()))
-            if widget == "text":
-                ttk.Entry(default_cell, textvariable=row["default_text"]).grid(row=0, column=0, sticky="ew")
-            elif widget == "path":
-                ttk.Entry(default_cell, textvariable=row["default_text"]).grid(row=0, column=0, sticky="ew")
-                ttk.Button(
-                    default_cell,
-                    text="Browse dir",
-                    command=lambda current=row["default_text"]: self._browse_builder_default(current, "path"),
-                ).grid(row=0, column=1, padx=(8, 0))
-            elif widget == "file":
-                ttk.Entry(default_cell, textvariable=row["default_text"]).grid(row=0, column=0, sticky="ew")
-                ttk.Button(
-                    default_cell,
-                    text="Browse file",
-                    command=lambda current=row["default_text"]: self._browse_builder_default(current, "file"),
-                ).grid(row=0, column=1, padx=(8, 0))
-            elif widget == "bool":
-                ttk.Checkbutton(default_cell, variable=row["default_bool"]).grid(row=0, column=0, sticky="w")
-            elif widget.startswith("ts_"):
-                ttk.Label(default_cell, text="From TS processing list").grid(row=0, column=0, sticky="w")
-            elif widget == "all_files_custom_pattern":
-                ttk.Entry(default_cell, textvariable=row["default_text"]).grid(row=0, column=0, sticky="ew")
-                ttk.Button(
-                    default_cell,
-                    text="Browse dir",
-                    command=lambda current=row["default_text"]: self._browse_builder_default(current, "all_files"),
-                ).grid(row=0, column=1, padx=(8, 0))
-                ttk.Label(default_cell, text="Pattern").grid(row=0, column=2, padx=(8, 4), sticky="w")
-                ttk.Entry(default_cell, textvariable=row["pattern_text"], width=18).grid(row=0, column=3, padx=(0, 0))
-            else:
-                ttk.Entry(default_cell, textvariable=row["default_text"]).grid(row=0, column=0, sticky="ew")
-                ttk.Button(
-                    default_cell,
-                    text="Browse dir",
-                    command=lambda current=row["default_text"]: self._browse_builder_default(current, "all_files"),
-                ).grid(row=0, column=1, padx=(8, 0))
-            ttk.Button(self.params_rows_frame, text="Remove", command=lambda current=row: self._remove_builder_row(current)).grid(row=row_index, column=4, sticky="w", pady=4)
+        self.builder_params_table.set_rows(self._builder_editor_rows())
         self._update_builder_validation()
 
     def _on_builder_type_changed(self, _row: dict[str, tk.Variable]) -> None:
@@ -492,6 +424,90 @@ class CustomTab(SidebarTab):
 
     def _remove_builder_row(self, row: dict[str, tk.Variable]) -> None:
         self.parameter_rows = [item for item in self.parameter_rows if item is not row]
+        self._rebuild_builder_rows()
+
+    def _builder_editor_rows(self) -> list[ParameterEditorRow]:
+        rows = [
+            ParameterEditorRow(
+                key=ENVIRONMENT_ROW_KEY,
+                flag="Default local environment",
+                input_type="environment",
+                default=self.builder_environment_var.get().strip() or "None",
+                description="Optional environment to activate before running this custom job locally.",
+                removable=False,
+                editable_flag=False,
+                editable_input_type=False,
+            )
+        ]
+        for index, row in enumerate(self.parameter_rows, start=1):
+            widget = self._stored_input_type(str(row["widget"].get()).strip() or "text")
+            default = "true" if widget == "bool" and bool(row["default_bool"].get()) else str(row["default_text"].get()).strip()
+            if widget.startswith("ts_"):
+                default = ""
+            rows.append(
+                ParameterEditorRow(
+                    key=f"param_{index}",
+                    flag=str(row["flag"].get()).strip(),
+                    input_type=widget,
+                    default=default,
+                    description=str(row["label"].get()).strip(),
+                    extra={"pattern": str(row["pattern_text"].get()).strip()} if widget == "all_files_custom_pattern" and str(row["pattern_text"].get()).strip() else {},
+                    custom=True,
+                )
+            )
+        return rows
+
+    def _set_builder_rows_from_editor(self, rows: list[ParameterEditorRow]) -> None:
+        new_rows: list[dict[str, tk.Variable]] = []
+        for row in rows:
+            if row.removed:
+                continue
+            if row.key == ENVIRONMENT_ROW_KEY:
+                self.builder_environment_var.set(row.default or "None")
+                continue
+            if not (row.description or row.flag or row.default):
+                continue
+            item = self._new_parameter_row()
+            item["label"].set(row.description)
+            item["flag"].set(row.flag)
+            item["widget"].set(self._display_input_type(row.input_type))
+            if row.input_type == "bool":
+                item["default_bool"].set(str(row.default).lower() in {"1", "true", "yes", "on"})
+                item["default_text"].set("")
+            else:
+                item["default_text"].set(row.default)
+                item["default_bool"].set(False)
+            if row.input_type == "all_files_custom_pattern":
+                item["pattern_text"].set(row.extra.get("pattern", ""))
+            new_rows.append(item)
+        self.parameter_rows = new_rows
+
+    def _builder_editor_validation_message(self, rows: list[ParameterEditorRow]) -> str:
+        widgets = [
+            row.input_type
+            for row in rows
+            if row.key != ENVIRONMENT_ROW_KEY and not row.removed and (row.description or row.flag or row.default)
+        ]
+        ts_count = sum(widget.startswith("ts_") for widget in widgets)
+        all_files_count = sum(widget.startswith("all_files_") for widget in widgets)
+        if ts_count and all_files_count:
+            return "TS selection parameters cannot be combined with 'All files that...' parameters in the same custom job type."
+        if all_files_count > 1:
+            return "Only one 'All files that...' parameter is currently supported in a custom job type."
+        return ""
+
+    def _edit_builder_rows(self) -> None:
+        dialog = ParameterEditorDialog(
+            self.app,
+            self.frame,
+            "Edit custom job entries",
+            self._builder_editor_rows(),
+            validation_callback=self._builder_editor_validation_message,
+        )
+        rows = dialog.show()
+        if rows is None:
+            return
+        self._set_builder_rows_from_editor(rows)
         self._rebuild_builder_rows()
 
     def _builder_parameter_widgets(self) -> list[str]:
@@ -527,7 +543,6 @@ class CustomTab(SidebarTab):
         self.job_combo.configure(values=values)
         environment_values = environment_titles(self.app.project)
         available_environments = set(environment_values)
-        self.builder_environment_combo.configure(values=environment_values)
         if self.builder_environment_var.get() not in available_environments:
             self.builder_environment_var.set("None")
         if self.job_type_var.get() not in values:
@@ -575,8 +590,8 @@ class CustomTab(SidebarTab):
 
     def _scroll_active_view_to_top(self, *, builder: bool = False) -> None:
         if builder:
-            self.params_canvas.yview_moveto(0)
-            self.params_canvas.xview_moveto(0)
+            self.builder_params_table.canvas.yview_moveto(0)
+            self.builder_params_table.canvas.xview_moveto(0)
             return
         self.runtime_canvas.yview_moveto(0)
         self.runtime_canvas.xview_moveto(0)
@@ -629,20 +644,27 @@ class CustomTab(SidebarTab):
         for parameter in job.parameters:
             state: dict[str, tk.Variable] = {}
             input_type = parameter.widget
+            flag_label = parameter.flag or parameter.label or parameter.key
+            description = parameter.label.strip()
+            ttk.Label(
+                self.runtime_params_frame,
+                text=flag_label,
+                style="Monospace.TLabel",
+            ).grid(row=row, column=0, sticky="w", pady=(0, 3))
+            editor_row = row + 1
+            description_row = row + 2
             if input_type == "bool":
                 value_var: tk.Variable = tk.BooleanVar(value=parameter.default.lower() in {"1", "true", "yes", "on"})
                 ttk.Checkbutton(
                     self.runtime_params_frame,
-                    text=parameter.label or parameter.key,
                     variable=value_var,
                     command=self._update_preview,
-                ).grid(row=row, column=0, columnspan=2, sticky="w", pady=(0, 8))
+                ).grid(row=editor_row, column=0, sticky="w", pady=(0, 3))
                 state["value"] = value_var
             elif input_type in {"text", "path", "file"}:
                 value_var = tk.StringVar(value=parameter.default)
-                ttk.Label(self.runtime_params_frame, text=parameter.label or parameter.key).grid(row=row, column=0, sticky="w", pady=(0, 4))
                 editor = ttk.Frame(self.runtime_params_frame)
-                editor.grid(row=row, column=1, sticky="ew", pady=(0, 8))
+                editor.grid(row=editor_row, column=0, sticky="ew", pady=(0, 3))
                 editor.columnconfigure(0, weight=1)
                 ttk.Entry(editor, textvariable=value_var).grid(row=0, column=0, sticky="ew")
                 if input_type == "path":
@@ -661,13 +683,12 @@ class CustomTab(SidebarTab):
             elif input_type.startswith("ts_"):
                 ttk.Label(
                     self.runtime_params_frame,
-                    text=f"{parameter.label or parameter.key}: resolved from the global TS processing list",
-                ).grid(row=row, column=0, columnspan=2, sticky="w", pady=(0, 8))
+                    text="Resolved from the global TS processing list",
+                ).grid(row=editor_row, column=0, sticky="w", pady=(0, 3))
             else:
                 directory_var = tk.StringVar(value=parameter.default)
-                ttk.Label(self.runtime_params_frame, text=parameter.label or parameter.key).grid(row=row, column=0, sticky="w", pady=(0, 4))
                 editor = ttk.Frame(self.runtime_params_frame)
-                editor.grid(row=row, column=1, sticky="ew", pady=(0, 8))
+                editor.grid(row=editor_row, column=0, sticky="ew", pady=(0, 3))
                 editor.columnconfigure(0, weight=1)
                 ttk.Entry(editor, textvariable=directory_var).grid(row=0, column=0, sticky="ew")
                 ttk.Button(
@@ -681,10 +702,16 @@ class CustomTab(SidebarTab):
                     ttk.Label(editor, text="Pattern").grid(row=0, column=2, padx=(8, 4), sticky="w")
                     ttk.Entry(editor, textvariable=pattern_var, width=18).grid(row=0, column=3, padx=(0, 0))
                     state["pattern"] = pattern_var
+            ttk.Label(
+                self.runtime_params_frame,
+                text=description or "-",
+                wraplength=780,
+                justify="left",
+            ).grid(row=description_row, column=0, sticky="ew", pady=(0, 12))
             for variable in state.values():
                 variable.trace_add("write", lambda *_args: self._update_preview())
             self.runtime_state[parameter.key] = state
-            row += 1
+            row += 3
         self._update_preview()
 
     def _browse_runtime_input(self, variable: tk.Variable, input_type: str) -> None:
@@ -802,7 +829,7 @@ class CustomTab(SidebarTab):
             return
         if flag:
             parts.append(flag)
-        parts.append(shlex.quote(value))
+        parts.append(value)
 
     def _build_commands(self) -> tuple[list[tuple[str, str, str]], list[str]]:
         if self.current_job is None:

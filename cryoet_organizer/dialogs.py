@@ -7,12 +7,26 @@ from tkinter import ttk
 from typing import Any
 
 
+def ui_font_name(*candidates: str) -> str:
+    for candidate in candidates:
+        try:
+            tkfont.nametofont(candidate)
+            return candidate
+        except tk.TclError:
+            continue
+    return "TkDefaultFont"
+
+
+def body_font_name() -> str:
+    return ui_font_name("CryoPalBodyFont", "TkDefaultFont")
+
+
+def heading_font_name() -> str:
+    return ui_font_name("CryoPalHeadingFont", "TkDefaultFont")
+
+
 def technical_font_name() -> str:
-    try:
-        tkfont.nametofont("TkDefaultFont")
-        return "TkDefaultFont"
-    except tk.TclError:
-        return "TkFixedFont"
+    return ui_font_name("CryoPalTechnicalFont", "TkDefaultFont", "TkFixedFont")
 
 
 def technical_row_height(*, minimum: int = 24, padding: int = 10) -> int:

@@ -10,6 +10,7 @@ import tempfile
 import threading
 import time
 import tkinter as tk
+import tkinter.font as tkfont
 from copy import deepcopy
 from datetime import date
 from pathlib import Path
@@ -35,6 +36,15 @@ from cryoet_organizer.project import (
     ProjectData,
     load_project,
     save_project,
+)
+from cryoet_organizer.preferences import (
+    DISPLAY_PROFILE_LABELS,
+    display_profile_metrics,
+    global_preference,
+    load_global_preferences,
+    normalize_display_profile,
+    resolve_display_profile,
+    save_global_preferences,
 )
 from cryoet_organizer.preferences_dialog import PreferencesDialog
 from cryoet_organizer.recent_projects import add_recent_project, load_recent_projects
@@ -77,6 +87,8 @@ class _LogoSplash:
         title: str,
         subtitle: str = "",
         background: str = "#f6f8fb",
+        title_font: str = "TkDefaultFont",
+        subtitle_font: str = "TkDefaultFont",
     ) -> None:
         self.window = tk.Toplevel(root)
         self.window.withdraw()
@@ -124,7 +136,7 @@ class _LogoSplash:
         tk.Label(
             outer,
             textvariable=self.title_var,
-            font=("TkDefaultFont", 14, "bold"),
+            font=title_font,
             background=background,
             foreground="#1f2933",
         ).grid(row=1, column=0, sticky="ew")
@@ -133,7 +145,7 @@ class _LogoSplash:
             tk.Label(
                 outer,
                 textvariable=self.subtitle_var,
-                font=("TkDefaultFont", 10),
+                font=subtitle_font,
                 background=background,
                 foreground="#52606d",
             ).grid(row=2, column=0, sticky="ew", pady=(8, 0))
@@ -212,8 +224,13 @@ class CryoETOrganizerApp:
         self._base_sidebar_width = 220
         self._base_sidebar_logo_width = 180
         self._ui_scale_factor = 1.0
-        self.root.geometry(f"{self._base_window_size[0]}x{self._base_window_size[1]}")
-        self.root.minsize(*self._base_window_minsize)
+        self._display_fonts: dict[str, tkfont.Font] = {}
+        self.global_preferences = load_global_preferences()
+        self._display_profile_setting = normalize_display_profile(
+            global_preference(self.global_preferences, "display_profile", "auto")
+        )
+        self._resolved_display_profile = "normal"
+        self._display_profile_label = DISPLAY_PROFILE_LABELS["auto"]
         self.logo_image: tk.PhotoImage | None = None
         self.logo_label: ttk.Label | None = None
         self._lifecycle_splash: _LogoSplash | None = None
@@ -252,7 +269,11 @@ class CryoETOrganizerApp:
         self._pending_tab_refreshes: set[str] = set()
         self._queued_refresh_targets: set[str] = set()
         self._queued_refresh_after_id: str | None = None
+        self._style = ttk.Style()
+        self._settings_shell: SettingsShellWindow | None = None
+        self._current_appearance = AppearanceConfig()
 
+        self._apply_display_profile(initial=True)
         self._show_logo_splash(
             "Waking up CryoPal",
             "Preparing the workspace and loading the interface.",
@@ -270,15 +291,204 @@ class CryoETOrganizerApp:
     def _scale_pixels(self, value: int) -> int:
         return max(1, int(round(value * self._ui_scale_factor)))
 
+    def ui_font(self, role: str) -> str:
+        font = self._display_fonts.get(role)
+        return str(font) if font is not None else "TkDefaultFont"
+
+    def current_display_profile_setting(self) -> str:
+        return self._display_profile_setting
+
+    def saved_display_profile_setting(self) -> str:
+        return normalize_display_profile(
+            global_preference(self.global_preferences, "display_profile", "auto")
+        )
+
+    def display_profile_label(self) -> str:
+        return self._display_profile_label
+
+    def _screen_dpi(self) -> float:
+        try:
+            return float(self.root.winfo_fpixels("1i"))
+        except tk.TclError:
+            return 96.0
+
+    def _resolve_display_profile(self, setting: str | None = None) -> str:
+        return resolve_display_profile(
+            setting or self._display_profile_setting,
+            screen_dpi=self._screen_dpi(),
+            screen_width=self.root.winfo_screenwidth(),
+            screen_height=self.root.winfo_screenheight(),
+        )
+
+    def _ensure_display_fonts(self) -> None:
+        resolved = self._resolved_display_profile
+        metrics = display_profile_metrics(resolved)
+        self._display_fonts.clear()
+        body_font = tkfont.nametofont("TkDefaultFont")
+        technical_font = tkfont.nametofont("TkDefaultFont")
+        try:
+            menu_font = tkfont.nametofont("TkMenuFont")
+        except tk.TclError:
+            menu_font = body_font
+
+        if resolved == "normal":
+            self._display_fonts["body"] = body_font
+            self._display_fonts["technical"] = technical_font
+            self._display_fonts["menu"] = menu_font
+            self._display_fonts["small"] = body_font
+            base_font = body_font
+            base_actual = base_font.actual()
+            family = str(base_actual.get("family", "TkDefaultFont"))
+            slant = str(base_actual.get("slant", "roman"))
+            default_size = int(base_actual.get("size", 10) or 10)
+            derived_metrics = dict(metrics)
+            derived_metrics["heading_size"] = max(default_size + 4, int(metrics["heading_size"]))
+            derived_metrics["dialog_heading_size"] = max(default_size + 2, int(metrics["dialog_heading_size"]))
+            derived_metrics["status_icon_size"] = max(default_size + 16, int(metrics["status_icon_size"]))
+            derived_metrics["debug_banner_size"] = max(default_size, int(metrics["debug_banner_size"]))
+            derived_metrics["shortcut_tile_size"] = max(default_size + 1, int(metrics["shortcut_tile_size"]))
+            derived_metrics["shortcut_plus_size"] = max(default_size + 24, int(metrics["shortcut_plus_size"]))
+            derived_metrics["splash_title_size"] = max(default_size + 4, int(metrics["splash_title_size"]))
+            derived_metrics["splash_subtitle_size"] = max(default_size, int(metrics["splash_subtitle_size"]))
+            metrics = derived_metrics
+        else:
+            base_font = body_font
+            base_actual = base_font.actual()
+            family = str(base_actual.get("family", "TkDefaultFont"))
+            slant = str(base_actual.get("slant", "roman"))
+
+        font_specs: dict[str, tuple[str, int, str]] = {
+            "small": ("CryoPalSmallFont", int(metrics["small_size"]), "normal"),
+            "heading": ("CryoPalHeadingFont", int(metrics["heading_size"]), "bold"),
+            "dialog_heading": ("CryoPalDialogHeadingFont", int(metrics["dialog_heading_size"]), "bold"),
+            "status_icon": ("CryoPalStatusIconFont", int(metrics["status_icon_size"]), "bold"),
+            "debug_banner": ("CryoPalDebugBannerFont", int(metrics["debug_banner_size"]), "bold"),
+            "shortcut_tile": ("CryoPalShortcutTileFont", int(metrics["shortcut_tile_size"]), "bold"),
+            "shortcut_plus": ("CryoPalShortcutPlusFont", int(metrics["shortcut_plus_size"]), "bold"),
+            "splash_title": ("CryoPalSplashTitleFont", int(metrics["splash_title_size"]), "bold"),
+            "splash_subtitle": ("CryoPalSplashSubtitleFont", int(metrics["splash_subtitle_size"]), "normal"),
+        }
+
+        if resolved != "normal":
+            font_specs["body"] = ("CryoPalBodyFont", int(metrics["body_size"]), "normal")
+            font_specs["technical"] = ("CryoPalTechnicalFont", int(metrics["body_size"]), "normal")
+            font_specs["menu"] = ("CryoPalMenuFont", int(metrics["body_size"]), "normal")
+
+        for role, (font_name, size, weight) in font_specs.items():
+            try:
+                font = tkfont.nametofont(font_name)
+            except tk.TclError:
+                font = tkfont.Font(
+                    root=self.root,
+                    name=font_name,
+                    family=family,
+                    size=size,
+                    weight=weight,
+                    slant=slant,
+                )
+            else:
+                font.configure(family=family, size=size, weight=weight, slant=slant)
+            self._display_fonts[role] = font
+
+    def _apply_widget_font_defaults(self) -> None:
+        body_font = self.ui_font("body")
+        technical_font = self.ui_font("technical")
+        menu_font = self.ui_font("menu")
+        self.root.option_add("*Font", body_font)
+        self.root.option_add("*Text.font", technical_font)
+        self.root.option_add("*Listbox.font", body_font)
+        self.root.option_add("*Menu.font", menu_font)
+
+        for menu in (self._file_menu, self._recent_menu, self._settings_menu):
+            if menu is None:
+                continue
+            try:
+                menu.configure(font=menu_font)
+            except tk.TclError:
+                continue
+
+    def _apply_display_profile(self, *, initial: bool = False) -> None:
+        self._resolved_display_profile = self._resolve_display_profile(self._display_profile_setting)
+        self._display_profile_label = DISPLAY_PROFILE_LABELS.get(
+            self._display_profile_setting,
+            DISPLAY_PROFILE_LABELS["auto"],
+        )
+        metrics = display_profile_metrics(self._resolved_display_profile)
+        self._ui_scale_factor = float(metrics["layout_scale"])
+        self._ensure_display_fonts()
+        self._apply_widget_font_defaults()
+
+        width = self._scale_pixels(self._base_window_size[0])
+        height = self._scale_pixels(self._base_window_size[1])
+        min_width = self._scale_pixels(self._base_window_minsize[0])
+        min_height = self._scale_pixels(self._base_window_minsize[1])
+        self.root.minsize(min_width, min_height)
+        if initial:
+            self.root.geometry(f"{width}x{height}")
+        elif self.root.winfo_exists():
+            current_width = max(self.root.winfo_width(), min_width)
+            current_height = max(self.root.winfo_height(), min_height)
+            self.root.geometry(f"{max(current_width, width)}x{max(current_height, height)}")
+
+        if hasattr(self, "_style"):
+            self._configure_style()
+        if self.logo_label is not None:
+            self._build_sidebar_logo()
+        if self.main_pane is not None:
+            self.root.after_idle(self._initialize_main_pane)
+        if self._settings_shell is not None:
+            try:
+                self._settings_shell.window.minsize(self._scale_pixels(980), self._scale_pixels(620))
+            except tk.TclError:
+                pass
+
+    def apply_display_profile_setting(self, profile: str, *, persist: bool = False) -> None:
+        normalized = normalize_display_profile(profile)
+        self._display_profile_setting = normalized
+        if persist:
+            self.global_preferences["display_profile"] = normalized
+            self.global_preferences = save_global_preferences(self.global_preferences)
+            status_text = (
+                f"Display profile set to {DISPLAY_PROFILE_LABELS.get(normalized, normalized)}"
+            )
+        else:
+            status_text = (
+                f"Previewing display profile: {DISPLAY_PROFILE_LABELS.get(normalized, normalized)}"
+            )
+        self._apply_display_profile(initial=False)
+        self.status_var.set(status_text)
+
+    def set_display_profile(self, profile: str) -> None:
+        self.apply_display_profile_setting(profile, persist=True)
+
     def _configure_style(self) -> None:
         try:
             self._style.theme_use("clam")
         except tk.TclError:
             pass
-        self._style.configure("Heading.TLabel", font=("TkDefaultFont", 14, "bold"))
+        self._style.configure(".", font=self.ui_font("body"))
+        self._style.configure("TLabel", font=self.ui_font("body"))
+        self._style.configure("TButton", font=self.ui_font("body"))
+        self._style.configure("TCheckbutton", font=self.ui_font("body"))
+        self._style.configure("TRadiobutton", font=self.ui_font("body"))
+        self._style.configure("TEntry", font=self.ui_font("body"))
+        self._style.configure("TCombobox", font=self.ui_font("body"))
+        self._style.configure("TLabelframe.Label", font=self.ui_font("body"))
+        technical_linespace = tkfont.nametofont(self.ui_font("technical")).metrics("linespace")
+        technical_rowheight = max(self._scale_pixels(24), technical_linespace + self._scale_pixels(10))
+        self._style.configure("Treeview", font=self.ui_font("technical"), rowheight=technical_rowheight)
+        self._style.configure(
+            "Treeview.Heading",
+            font=self.ui_font("body"),
+        )
+        self._style.configure(
+            "Technical.Treeview",
+            font=self.ui_font("technical"),
+            rowheight=technical_rowheight,
+        )
+        self._style.configure("Heading.TLabel", font=self.ui_font("heading"))
         self._style.configure("Error.TLabel", foreground="#aa1f1f")
-        self._style.configure("Monospace.TLabel", font="TkDefaultFont")
-        self._style.configure("Technical.Treeview", font="TkDefaultFont")
+        self._style.configure("Monospace.TLabel", font=self.ui_font("technical"))
         self.apply_appearance_config(self._current_appearance)
 
     def _build_menu(self) -> None:
@@ -432,6 +642,8 @@ class CryoETOrganizerApp:
                 title=title,
                 subtitle=subtitle,
                 background=self._current_appearance.main_background,
+                title_font=self.ui_font("splash_title"),
+                subtitle_font=self.ui_font("splash_subtitle"),
             )
         except tk.TclError:
             self._lifecycle_splash = None
@@ -502,6 +714,7 @@ class CryoETOrganizerApp:
         self.version_label = tk.Label(
             self.sidebar,
             text=f"v{__version__} | {date.today().year}",
+            font=self.ui_font("small"),
             background=self._current_appearance.sidebar_background,
             foreground=self._current_appearance.sidebar_button_foreground,
             anchor="w",
@@ -1224,6 +1437,7 @@ class CryoETOrganizerApp:
         self.on_project_changed(
             "preferences",
             "defaults",
+            "executables",
             "slurm",
             "environments",
             "custom",
@@ -1522,7 +1736,6 @@ class CryoETOrganizerApp:
         main_fg = config.main_foreground
         button_pad_x = self._scale_pixels(12)
         button_pad_y = self._scale_pixels(10)
-        debug_size = 10
 
         active_sidebar_bg = _shift_hex_color(sidebar_button_bg, -18)
 
@@ -1538,7 +1751,7 @@ class CryoETOrganizerApp:
             "DebugBanner.TLabel",
             background="#9c2f2f",
             foreground="#ffffff",
-            font=("TkDefaultFont", debug_size, "bold"),
+            font=self.ui_font("debug_banner"),
         )
 
         self._style.configure("Sidebar.TFrame", background=sidebar_bg)

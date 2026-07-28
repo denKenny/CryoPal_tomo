@@ -103,7 +103,7 @@ class ShortcutsTab(SidebarTab):
             foreground="#000000",
             justify="center",
             wraplength=112,
-            font=("TkDefaultFont", 11, "bold"),
+            font=self.app.ui_font("shortcut_tile"),
         )
         label.place(relx=0.5, rely=0.5, anchor="center")
 
@@ -124,7 +124,7 @@ class ShortcutsTab(SidebarTab):
             bd=0,
         )
         tile.create_oval(40, 40, 140, 140, fill="#ffffff", outline="#8b97a3", width=2)
-        tile.create_text(90, 90, text="+", fill="#5f6b75", font=("TkDefaultFont", 36, "bold"))
+        tile.create_text(90, 90, text="+", fill="#5f6b75", font=self.app.ui_font("shortcut_plus"))
         tile.bind("<Double-Button-1>", lambda _event: self._create_shortcut())
         return tile
 

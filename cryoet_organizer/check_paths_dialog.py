@@ -5,6 +5,7 @@ from collections import defaultdict
 from tkinter import ttk
 
 from cryoet_organizer.check_paths import PathCheckEntry, collect_project_path_report
+from cryoet_organizer.dialogs import ui_font_name
 
 
 class CheckPathsDialog:
@@ -46,7 +47,7 @@ class CheckPathsDialog:
             summary,
             text=icon,
             fg=icon_color,
-            font=("TkDefaultFont", 26, "bold"),
+            font=ui_font_name("CryoPalStatusIconFont", "CryoPalHeadingFont", "TkDefaultFont"),
         ).grid(row=0, column=0, sticky="nw", padx=(0, 12))
         ttk.Label(
             summary,

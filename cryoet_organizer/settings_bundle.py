@@ -9,6 +9,7 @@ from typing import Any, Callable, TypeVar
 from cryoet_organizer.appearance import get_project_appearance
 from cryoet_organizer.custom_jobs import CustomJobDefinition, get_project_custom_jobs, set_project_custom_jobs
 from cryoet_organizer.environments import EnvironmentDefinition, get_project_environments, set_project_environments
+from cryoet_organizer.executables import get_project_executable_overrides, set_project_executable_overrides
 from cryoet_organizer.file_resolver import essential_file_roles, file_role_config, set_file_role_config
 from cryoet_organizer.job_defaults import build_job_default_registry, get_project_job_default_overrides
 from cryoet_organizer.preferences import DEFAULT_PREFERENCES
@@ -22,6 +23,7 @@ SETTINGS_CATEGORY_LABELS: dict[str, str] = {
     "preferences": "Set preferences",
     "viewer_defaults": "Configure viewer defaults",
     "default_parameters": "Set default parameters",
+    "executables": "Manage Executables",
     "slurm_profiles": "Slurm submission",
     "environments": "Manage environments",
     "custom_job_types": "Manage custom job types",
@@ -33,6 +35,7 @@ SETTINGS_CATEGORY_ORDER: tuple[str, ...] = (
     "preferences",
     "viewer_defaults",
     "default_parameters",
+    "executables",
     "slurm_profiles",
     "environments",
     "custom_job_types",
@@ -110,6 +113,7 @@ def exportable_settings_groups(project: ProjectData) -> list[SettingsSelectionGr
         _singular_item("preferences", "General preferences"),
         _singular_item("viewer_defaults", "Viewer defaults"),
         _job_default_groups(project),
+        _singular_item("executables", "Executable command overrides"),
         SettingsSelectionGroup(
             key="slurm_profiles",
             label=SETTINGS_CATEGORY_LABELS["slurm_profiles"],
@@ -188,6 +192,8 @@ def build_settings_export_payload(project: ProjectData, selected_item_keys: list
             "job_default_overrides": filtered_overrides,
             "file_registry_patterns": default_patterns,
         }
+    if "executables::executables" in selected:
+        categories["executables"] = get_project_executable_overrides(project)
 
     selected_slurm_names = {_item_name(key) for key in selected if key.startswith("slurm_profiles::")}
     if selected_slurm_names:
@@ -248,6 +254,8 @@ def load_settings_bundle(path: str | Path) -> dict[str, Any]:
                 "job_default_overrides": deepcopy(payload.get("job_default_overrides", {})),
                 "file_registry_patterns": deepcopy(payload.get("file_registry_patterns", {})),
             }
+        if isinstance(payload.get("executable_overrides"), dict):
+            legacy_categories["executables"] = deepcopy(payload.get("executable_overrides", {}))
         return {"version": 1, "categories": legacy_categories}
     return {"version": 1, "categories": {}}
 
@@ -285,6 +293,8 @@ def importable_settings_groups(payload: dict[str, Any]) -> list[SettingsSelectio
             label=SETTINGS_CATEGORY_LABELS["default_parameters"],
             items=tuple(items),
         )
+    if isinstance(categories.get("executables"), dict):
+        groups_by_key["executables"] = _singular_item("executables", "Executable command overrides")
     for category, cls_key, label_key in (
         ("slurm_profiles", "name", "slurm_profiles"),
         ("environments", "title", "environments"),
@@ -322,6 +332,8 @@ def conflicting_import_items(project: ProjectData, selected_item_keys: list[str]
         elif key.startswith("default_parameters::job::") and key.removeprefix("default_parameters::job::") in existing_default_overrides:
             conflicts.append(key)
         elif key.startswith("default_parameters::file_registry::") and key.removeprefix("default_parameters::file_registry::") in project.state.file_registry_patterns:
+            conflicts.append(key)
+        elif key.startswith("executables::") and get_project_executable_overrides(project):
             conflicts.append(key)
         elif key.startswith("slurm_profiles::"):
             if any(profile.name == _item_name(key) for profile in get_project_slurm_profiles(project)):
@@ -413,6 +425,13 @@ def apply_settings_import(
                 temp_project = ProjectData(state=ProjectState(file_registry_patterns={role: config_payload}))
                 set_file_role_config(project, role, file_role_config(temp_project, role))
                 applied.append(item_key)
+
+    if "executables::executables" in selected and isinstance(categories.get("executables"), dict):
+        if get_project_executable_overrides(project) and not overwrite_existing:
+            skipped.append("executables::executables")
+        else:
+            set_project_executable_overrides(project, deepcopy(categories["executables"]))
+            applied.append("executables::executables")
 
     if isinstance(categories.get("slurm_profiles"), list):
         selected_names = {_item_name(key) for key in selected if key.startswith("slurm_profiles::")}

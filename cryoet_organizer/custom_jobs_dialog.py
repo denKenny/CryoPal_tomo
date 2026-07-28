@@ -4,7 +4,7 @@ from copy import deepcopy
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
-from cryoet_organizer.dialogs import bind_scrollable_canvas, choose_items_dialog, make_copy_name
+from cryoet_organizer.dialogs import choose_items_dialog, make_copy_name
 from cryoet_organizer.custom_jobs import (
     CUSTOM_JOBS_SUFFIX,
     CustomJobDefinition,
@@ -15,8 +15,13 @@ from cryoet_organizer.custom_jobs import (
     set_project_custom_jobs,
 )
 from cryoet_organizer.environments import environment_titles
+from cryoet_organizer.parameter_editor import (
+    ENVIRONMENT_ROW_KEY,
+    ParameterEditorDialog,
+    ParameterEditorRow,
+    ParameterSummaryTable,
+)
 from cryoet_organizer.tabs.custom import (
-    runtime_input_type_options,
     display_input_type,
     stored_input_type,
 )
@@ -38,12 +43,13 @@ class CustomJobsDialog:
         if not self.embedded:
             self.window.title("Manage custom job types")
             self.window.geometry("1100x720")
-            self.window.minsize(820, 520)
+            self.window.minsize(980, 560)
             self.window.transient(app.root)
             self.window.grab_set()
             self.window.protocol("WM_DELETE_WINDOW", self.window.destroy)
         content_row = 0 if self.embedded else 1
         footer_row = content_row + 1
+        self.window.columnconfigure(0, weight=0, minsize=360)
         self.window.columnconfigure(1, weight=1)
         self.window.rowconfigure(content_row, weight=1)
 
@@ -56,7 +62,7 @@ class CustomJobsDialog:
         left.grid(row=content_row, column=0, sticky="nsw", padx=(12, 8), pady=(0, 12))
         left.columnconfigure(0, weight=1)
         left.rowconfigure(0, weight=1)
-        self.listbox = tk.Listbox(left, selectmode="extended", exportselection=False, width=34)
+        self.listbox = tk.Listbox(left, selectmode="extended", exportselection=False, width=44)
         self.listbox.grid(row=0, column=0, sticky="nsew")
         left_scroll = ttk.Scrollbar(left, orient="vertical", command=self.listbox.yview)
         left_scroll.grid(row=0, column=1, sticky="ns")
@@ -64,8 +70,9 @@ class CustomJobsDialog:
         left_actions = ttk.Frame(left)
         left_actions.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(8, 0))
         left_actions.columnconfigure(0, weight=1)
-        ttk.Button(left_actions, text="Clone entry", command=self._clone_selected).grid(row=0, column=0, sticky="w")
-        ttk.Button(left_actions, text="Remove selected", command=self._remove_selected).grid(row=0, column=1, sticky="w", padx=(8, 0))
+        ttk.Button(left_actions, text="New custom job", command=self._new_custom_job).grid(row=0, column=0, sticky="w")
+        ttk.Button(left_actions, text="Clone entry", command=self._clone_selected).grid(row=0, column=1, sticky="w", padx=(8, 0))
+        ttk.Button(left_actions, text="Remove selected", command=self._remove_selected).grid(row=0, column=2, sticky="w", padx=(8, 0))
         self.listbox.bind("<<ListboxSelect>>", self._on_selection_changed)
 
         right = ttk.LabelFrame(self.window, text="Edit selected custom job type", padding=12)
@@ -80,27 +87,19 @@ class CustomJobsDialog:
         ttk.Label(top, text="Job name").grid(row=0, column=0, sticky="w", pady=(0, 4))
         ttk.Entry(top, textvariable=self.name_var).grid(row=0, column=1, sticky="ew", pady=(0, 8))
         self.name_entry = top.grid_slaves(row=0, column=1)[0]
-        ttk.Label(top, text="Default local environment").grid(row=1, column=0, sticky="w", pady=(0, 4))
-        self.environment_combo = ttk.Combobox(
-            top,
-            textvariable=self.environment_var,
-            state="readonly",
-            values=environment_titles(self.app.project),
-        )
-        self.environment_combo.grid(row=1, column=1, sticky="ew", pady=(0, 8))
-        ttk.Label(top, text="Description").grid(row=2, column=0, sticky="nw", pady=(0, 4))
+        ttk.Label(top, text="Description").grid(row=1, column=0, sticky="nw", pady=(0, 4))
         self.description_text = tk.Text(top, height=4, wrap="word")
-        self.description_text.grid(row=2, column=1, sticky="ew", pady=(0, 8))
-        ttk.Label(top, text="Command template").grid(row=3, column=0, sticky="nw", pady=(0, 4))
+        self.description_text.grid(row=1, column=1, sticky="ew", pady=(0, 8))
+        ttk.Label(top, text="Command template").grid(row=2, column=0, sticky="nw", pady=(0, 4))
         self.command_text = tk.Text(top, height=3, wrap="word")
-        self.command_text.grid(row=3, column=1, sticky="ew")
+        self.command_text.grid(row=2, column=1, sticky="ew")
         ttk.Label(
             top,
             textvariable=self.validation_var,
             style="Error.TLabel",
             wraplength=720,
             justify="left",
-        ).grid(row=4, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(8, 0))
         self.empty_hint_var = tk.StringVar(value="")
         ttk.Label(
             top,
@@ -108,30 +107,20 @@ class CustomJobsDialog:
             style="Error.TLabel",
             wraplength=720,
             justify="left",
-        ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        ).grid(row=4, column=0, columnspan=2, sticky="w", pady=(8, 0))
 
         params_box = ttk.LabelFrame(right, text="Custom parameters", padding=12)
         params_box.grid(row=1, column=0, sticky="nsew", pady=(12, 0))
         params_box.columnconfigure(0, weight=1)
         params_box.rowconfigure(0, weight=1)
-        self.params_canvas = tk.Canvas(params_box, highlightthickness=0)
-        self.params_canvas.grid(row=0, column=0, sticky="nsew")
-        params_scroll = ttk.Scrollbar(params_box, orient="vertical", command=self.params_canvas.yview)
-        params_scroll.grid(row=0, column=1, sticky="ns")
-        params_xscroll = ttk.Scrollbar(params_box, orient="horizontal", command=self.params_canvas.xview)
-        params_xscroll.grid(row=1, column=0, sticky="ew")
-        self.params_canvas.configure(yscrollcommand=params_scroll.set)
-        self.params_canvas.configure(xscrollcommand=params_xscroll.set)
-        self.params_frame = ttk.Frame(self.params_canvas)
-        for column in range(4):
-            self.params_frame.columnconfigure(column, weight=1 if column in {0, 1, 3} else 0)
-        self.params_window = self.params_canvas.create_window((0, 0), window=self.params_frame, anchor="nw")
-        bind_scrollable_canvas(self.params_canvas, self.params_window, self.params_frame, allow_horizontal=True)
+        self.params_table = ParameterSummaryTable(params_box, self.app)
+        self.params_table.grid(row=0, column=0, sticky="nsew")
 
         actions = ttk.Frame(right)
         actions.grid(row=2, column=0, sticky="ew", pady=(12, 0))
         actions.columnconfigure(0, weight=1)
-        ttk.Button(actions, text="Add parameter row", command=self._add_row).grid(row=0, column=0, sticky="w")
+        self.edit_entries_button = ttk.Button(actions, text="Edit job entries", command=self._edit_parameter_rows)
+        self.edit_entries_button.grid(row=0, column=0, sticky="w")
         ttk.Button(actions, text="Apply edits", command=self._apply_current).grid(row=0, column=1, padx=(8, 0))
 
         buttons = ttk.Frame(self.window, padding=(12, 0, 12, 12))
@@ -178,48 +167,10 @@ class CustomJobsDialog:
         }
 
     def _render_rows(self) -> None:
-        for child in self.params_frame.winfo_children():
-            child.destroy()
-        headings = ("Description", "Flag", "Input type", "Default", "")
-        for column, heading in enumerate(headings):
-            ttk.Label(self.params_frame, text=heading).grid(row=0, column=column, sticky="w", padx=(0, 8))
-        for row_index, row in enumerate(self.parameter_rows, start=1):
-            ttk.Entry(self.params_frame, textvariable=row["label"]).grid(row=row_index, column=0, sticky="ew", padx=(0, 8), pady=4)
-            ttk.Entry(self.params_frame, textvariable=row["flag"]).grid(row=row_index, column=1, sticky="ew", padx=(0, 8), pady=4)
-            combo = ttk.Combobox(
-                self.params_frame,
-                textvariable=row["widget"],
-                state="readonly",
-                values=runtime_input_type_options(self.app.project),
-                width=34,
-            )
-            combo.grid(row=row_index, column=2, sticky="ew", padx=(0, 8), pady=4)
-            combo.bind("<<ComboboxSelected>>", lambda _event, current=row: self._on_row_type_changed(current))
-            default_cell = ttk.Frame(self.params_frame)
-            default_cell.grid(row=row_index, column=3, sticky="ew", padx=(0, 8), pady=4)
-            default_cell.columnconfigure(0, weight=1)
-            widget = self._stored_input_type(str(row["widget"].get()))
-            if widget == "text":
-                ttk.Entry(default_cell, textvariable=row["default_text"]).grid(row=0, column=0, sticky="ew")
-            elif widget == "path":
-                ttk.Entry(default_cell, textvariable=row["default_text"]).grid(row=0, column=0, sticky="ew")
-                ttk.Button(default_cell, text="Browse dir", command=lambda current=row["default_text"]: self._browse_default(current, "dir")).grid(row=0, column=1, padx=(8, 0))
-            elif widget == "file":
-                ttk.Entry(default_cell, textvariable=row["default_text"]).grid(row=0, column=0, sticky="ew")
-                ttk.Button(default_cell, text="Browse file", command=lambda current=row["default_text"]: self._browse_default(current, "file")).grid(row=0, column=1, padx=(8, 0))
-            elif widget == "bool":
-                ttk.Checkbutton(default_cell, variable=row["default_bool"]).grid(row=0, column=0, sticky="w")
-            elif widget.startswith("ts_"):
-                ttk.Label(default_cell, text="From TS processing list").grid(row=0, column=0, sticky="w")
-            elif widget == "all_files_custom_pattern":
-                ttk.Entry(default_cell, textvariable=row["default_text"]).grid(row=0, column=0, sticky="ew")
-                ttk.Button(default_cell, text="Browse dir", command=lambda current=row["default_text"]: self._browse_default(current, "dir")).grid(row=0, column=1, padx=(8, 0))
-                ttk.Label(default_cell, text="Pattern").grid(row=0, column=2, padx=(8, 4), sticky="w")
-                ttk.Entry(default_cell, textvariable=row["pattern_text"], width=18).grid(row=0, column=3, padx=(0, 0))
-            else:
-                ttk.Entry(default_cell, textvariable=row["default_text"]).grid(row=0, column=0, sticky="ew")
-                ttk.Button(default_cell, text="Browse dir", command=lambda current=row["default_text"]: self._browse_default(current, "dir")).grid(row=0, column=1, padx=(8, 0))
-            ttk.Button(self.params_frame, text="Remove", command=lambda current=row: self._remove_row(current)).grid(row=row_index, column=4, sticky="w", pady=4)
+        if self.current_index is None:
+            self.params_table.clear()
+        else:
+            self.params_table.set_rows(self._editor_rows_from_current())
         self._update_validation()
         self._update_editor_state()
 
@@ -237,6 +188,93 @@ class CustomJobsDialog:
 
     def _remove_row(self, row: dict[str, tk.Variable]) -> None:
         self.parameter_rows = [item for item in self.parameter_rows if item is not row]
+        self._render_rows()
+
+    def _editor_rows_from_current(self) -> list[ParameterEditorRow]:
+        rows = [
+            ParameterEditorRow(
+                key=ENVIRONMENT_ROW_KEY,
+                flag="Default local environment",
+                input_type="environment",
+                default=self.environment_var.get().strip() or "None",
+                description="Optional environment to activate before running this custom job locally.",
+                removable=False,
+                editable_flag=False,
+                editable_input_type=False,
+            )
+        ]
+        for index, row in enumerate(self.parameter_rows, start=1):
+            widget = self._stored_input_type(str(row["widget"].get()).strip() or "text")
+            default = "true" if widget == "bool" and bool(row["default_bool"].get()) else str(row["default_text"].get()).strip()
+            if widget.startswith("ts_"):
+                default = ""
+            rows.append(
+                ParameterEditorRow(
+                    key=f"param_{index}",
+                    flag=str(row["flag"].get()).strip(),
+                    input_type=widget,
+                    default=default,
+                    description=str(row["label"].get()).strip(),
+                    extra={"pattern": str(row["pattern_text"].get()).strip()} if widget == "all_files_custom_pattern" and str(row["pattern_text"].get()).strip() else {},
+                    custom=True,
+                )
+            )
+        return rows
+
+    def _set_rows_from_editor(self, rows: list[ParameterEditorRow]) -> None:
+        new_rows: list[dict[str, tk.Variable]] = []
+        for row in rows:
+            if row.removed:
+                continue
+            if row.key == ENVIRONMENT_ROW_KEY:
+                self.environment_var.set(row.default or "None")
+                continue
+            if not (row.description or row.flag or row.default):
+                continue
+            item = self._new_row()
+            item["label"].set(row.description)
+            item["flag"].set(row.flag)
+            item["widget"].set(self._display_input_type(row.input_type))
+            if row.input_type == "bool":
+                item["default_bool"].set(str(row.default).lower() in {"1", "true", "yes", "on"})
+                item["default_text"].set("")
+            else:
+                item["default_text"].set(row.default)
+                item["default_bool"].set(False)
+            if row.input_type == "all_files_custom_pattern":
+                item["pattern_text"].set(row.extra.get("pattern", ""))
+            new_rows.append(item)
+        self.parameter_rows = new_rows
+
+    def _editor_validation_message(self, rows: list[ParameterEditorRow]) -> str:
+        widgets = [
+            row.input_type
+            for row in rows
+            if row.key != ENVIRONMENT_ROW_KEY and not row.removed and (row.description or row.flag or row.default)
+        ]
+        ts_count = sum(widget.startswith("ts_") for widget in widgets)
+        all_files_count = sum(widget.startswith("all_files_") for widget in widgets)
+        if ts_count and all_files_count:
+            return "TS selection parameters cannot be combined with 'All files that...' parameters in the same custom job type."
+        if all_files_count > 1:
+            return "Only one 'All files that...' parameter is currently supported in a custom job type."
+        return ""
+
+    def _edit_parameter_rows(self) -> None:
+        if self.current_index is None:
+            messagebox.showinfo("Edit job entries", "Please select exactly one custom job type first.")
+            return
+        dialog = ParameterEditorDialog(
+            self.app,
+            self.window,
+            "Edit custom job entries",
+            self._editor_rows_from_current(),
+            validation_callback=self._editor_validation_message,
+        )
+        rows = dialog.show()
+        if rows is None:
+            return
+        self._set_rows_from_editor(rows)
         self._render_rows()
 
     def _validation_message(self) -> str:
@@ -303,7 +341,7 @@ class CustomJobsDialog:
         self.description_text.insert("1.0", job.description)
         self.command_text.delete("1.0", "end")
         self.command_text.insert("1.0", job.command_template)
-        self.parameter_rows = [self._new_row(parameter) for parameter in job.parameters] or [self._new_row()]
+        self.parameter_rows = [self._new_row(parameter) for parameter in job.parameters]
         self._render_rows()
         self._update_editor_state()
 
@@ -326,6 +364,29 @@ class CustomJobsDialog:
         self.current_index = None
         self._refresh_list()
         self._update_editor_state()
+
+    def _new_custom_job(self) -> None:
+        if self.current_index is not None:
+            message = self._validation_message()
+            if message:
+                self.validation_var.set(message)
+                return
+            self._persist_current_from_editor()
+        name = make_copy_name([job.name for job in self.jobs], "New custom job")
+        job = CustomJobDefinition(
+            name=name,
+            description="",
+            command_template="",
+            environment_title="None",
+            parameters=[],
+        )
+        self.jobs.append(job)
+        self.current_index = len(self.jobs) - 1
+        self._refresh_list()
+        self.listbox.selection_clear(0, "end")
+        self.listbox.selection_set(self.current_index)
+        self._load_selected_job(self.current_index)
+        self.name_entry.focus_set()
 
     def _clone_selected(self) -> None:
         indices = list(self.listbox.curselection())
@@ -362,22 +423,13 @@ class CustomJobsDialog:
     def _update_editor_state(self) -> None:
         enabled = self.current_index is not None and 0 <= self.current_index < len(self.jobs)
         state = "normal" if enabled else "disabled"
-        combo_state = "readonly" if enabled else "disabled"
         try:
             self.name_entry.configure(state=state)
         except Exception:
             pass
-        self.environment_combo.configure(state=combo_state)
         self.description_text.configure(state=state)
         self.command_text.configure(state=state)
-        for child in self.params_frame.winfo_children():
-            try:
-                if isinstance(child, ttk.Combobox):
-                    child.configure(state=combo_state)
-                elif isinstance(child, (ttk.Entry, ttk.Button, ttk.Checkbutton)):
-                    child.configure(state=state)
-            except Exception:
-                pass
+        self.edit_entries_button.configure(state=state)
         self.empty_hint_var.set("" if enabled else "Please select a custom job type or create a new one.")
 
     def _import_jobs(self) -> None:
