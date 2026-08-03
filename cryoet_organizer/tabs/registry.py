@@ -1,6 +1,7 @@
 from cryoet_organizer.tabs.custom import CustomTab
 from cryoet_organizer.tabs.file_registry import FileRegistryTab
 from cryoet_organizer.tabs.gallery import GalleryTab
+from cryoet_organizer.tabs.job_list import JobListTab
 from cryoet_organizer.tabs.particles import ParticlesTab
 from cryoet_organizer.tabs.processing import ProcessingTab
 from cryoet_organizer.tabs.processing_m import ProcessingMTab
@@ -13,6 +14,7 @@ def get_tab_classes() -> list[type]:
     return [
         ProjectOverviewTab,
         GalleryTab,
+        JobListTab,
         ProcessingTab,
         ProcessingMTab,
         TomogramsTab,

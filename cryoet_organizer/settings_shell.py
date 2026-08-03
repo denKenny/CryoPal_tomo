@@ -13,6 +13,7 @@ SETTINGS_SHELL_ORDER: tuple[str, ...] = (
     "slurm_profiles",
     "environments",
     "custom_job_types",
+    "workflows",
     "shortcuts",
     "appearance",
 )

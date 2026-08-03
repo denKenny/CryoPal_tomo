@@ -17,6 +17,7 @@ from cryoet_organizer.project import ProjectData, ProjectState, SETTINGS_SUFFIX
 from cryoet_organizer.shortcuts import ShortcutDefinition, get_project_shortcuts, set_project_shortcuts
 from cryoet_organizer.slurm import SlurmProfile, get_project_slurm_profiles, set_project_slurm_profiles
 from cryoet_organizer.viewer_defaults import get_effective_viewer_defaults, set_project_viewer_defaults
+from cryoet_organizer.workflows import normalize_workflow, project_workflows, workflow_label
 
 
 SETTINGS_CATEGORY_LABELS: dict[str, str] = {
@@ -27,6 +28,7 @@ SETTINGS_CATEGORY_LABELS: dict[str, str] = {
     "slurm_profiles": "Slurm submission",
     "environments": "Manage environments",
     "custom_job_types": "Manage custom job types",
+    "workflows": "Manage workflows",
     "shortcuts": "Manage shortcuts",
     "appearance": "Appearance",
 }
@@ -39,6 +41,7 @@ SETTINGS_CATEGORY_ORDER: tuple[str, ...] = (
     "slurm_profiles",
     "environments",
     "custom_job_types",
+    "workflows",
     "shortcuts",
     "appearance",
 )
@@ -142,6 +145,19 @@ def exportable_settings_groups(project: ProjectData) -> list[SettingsSelectionGr
             or (SettingsSelectionItem(key="custom_job_types::__empty__", label="(no custom jobs yet)"),),
         ),
         SettingsSelectionGroup(
+            key="workflows",
+            label=SETTINGS_CATEGORY_LABELS["workflows"],
+            items=tuple(
+                SettingsSelectionItem(
+                    key=f"workflows::{str(workflow.get('workflow_id', '')).strip()}",
+                    label=workflow_label(workflow),
+                )
+                for workflow in project_workflows(project)
+                if isinstance(workflow, dict) and str(workflow.get("workflow_id", "")).strip()
+            )
+            or (SettingsSelectionItem(key="workflows::__empty__", label="(no workflows yet)"),),
+        ),
+        SettingsSelectionGroup(
             key="shortcuts",
             label=SETTINGS_CATEGORY_LABELS["shortcuts"],
             items=tuple(
@@ -225,6 +241,14 @@ def build_settings_export_payload(project: ProjectData, selected_item_keys: list
             item.to_dict()
             for item in get_project_shortcuts(project)
             if item.title in selected_shortcut_names
+        ]
+
+    selected_workflow_ids = {_item_name(key) for key in selected if key.startswith("workflows::")}
+    if selected_workflow_ids:
+        categories["workflows"] = [
+            normalize_workflow(workflow)
+            for workflow in project_workflows(project)
+            if isinstance(workflow, dict) and str(workflow.get("workflow_id", "")).strip() in selected_workflow_ids
         ]
 
     if "appearance::appearance" in selected:
@@ -318,6 +342,20 @@ def importable_settings_groups(payload: dict[str, Any]) -> list[SettingsSelectio
             )
     if isinstance(categories.get("appearance"), dict):
         groups_by_key["appearance"] = _singular_item("appearance", "Project appearance")
+    if isinstance(categories.get("workflows"), list):
+        items = tuple(
+            SettingsSelectionItem(
+                key=f"workflows::{str(item.get('workflow_id', '')).strip()}",
+                label=workflow_label(item),
+            )
+            for item in categories["workflows"]
+            if isinstance(item, dict) and str(item.get("workflow_id", "")).strip()
+        )
+        groups_by_key["workflows"] = SettingsSelectionGroup(
+            key="workflows",
+            label=SETTINGS_CATEGORY_LABELS["workflows"],
+            items=items,
+        )
     return [groups_by_key[key] for key in SETTINGS_CATEGORY_ORDER if key in groups_by_key]
 
 
@@ -343,6 +381,9 @@ def conflicting_import_items(project: ProjectData, selected_item_keys: list[str]
                 conflicts.append(key)
         elif key.startswith("custom_job_types::"):
             if any(job.name == _item_name(key) for job in get_project_custom_jobs(project)):
+                conflicts.append(key)
+        elif key.startswith("workflows::"):
+            if any(str(workflow.get("workflow_id", "")).strip() == _item_name(key) for workflow in project_workflows(project)):
                 conflicts.append(key)
         elif key.startswith("shortcuts::"):
             if any(item.title == _item_name(key) for item in get_project_shortcuts(project)):
@@ -497,6 +538,30 @@ def apply_settings_import(
         for item in imported_items:
             key = f"shortcuts::{item.title}"
             if any(existing_item.title == item.title for existing_item in existing) and not overwrite_existing:
+                skipped.append(key)
+            else:
+                applied.append(key)
+
+    if isinstance(categories.get("workflows"), list):
+        selected_ids = {_item_name(key) for key in selected if key.startswith("workflows::")}
+        imported_items = [
+            normalize_workflow(item)
+            for item in categories["workflows"]
+            if isinstance(item, dict) and str(item.get("workflow_id", "")).strip() in selected_ids
+        ]
+        existing = [normalize_workflow(workflow) for workflow in project_workflows(project)]
+        merged = _merge_named_items(
+            existing,
+            imported_items,
+            lambda item: str(item.get("workflow_id", "")).strip(),
+            overwrite_existing,
+        )
+        project.state.workflows = merged
+        existing_ids = {str(item.get("workflow_id", "")).strip() for item in existing}
+        for item in imported_items:
+            workflow_id = str(item.get("workflow_id", "")).strip()
+            key = f"workflows::{workflow_id}"
+            if workflow_id in existing_ids and not overwrite_existing:
                 skipped.append(key)
             else:
                 applied.append(key)

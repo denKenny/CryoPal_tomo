@@ -98,6 +98,74 @@ class FileRegistryTests(unittest.TestCase):
             self.assertEqual(resolved.path, str(expected))
             self.assertEqual(resolved.source, "automatic")
 
+    def test_tomogram_matching_does_not_reuse_numbered_sibling_for_base_ts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            tomostar = root / "tomostar"
+            tomostar.mkdir()
+            tomograms = root / "tomograms"
+            tomograms.mkdir()
+            for ts_name in ("Position_18", "Position_18_2", "Position_18_3"):
+                (tomostar / f"{ts_name}.tomostar").write_text("ts", encoding="utf-8")
+
+            base = tomograms / "Position_18_bin4.mrc"
+            sibling = tomograms / "Position_18_2_bin4.mrc"
+            base.write_text("base", encoding="utf-8")
+            sibling.write_text("sibling", encoding="utf-8")
+            sibling.touch()
+
+            dataset = DatasetRecord(
+                dataset_name="DS",
+                sample="S",
+                pixel_size=1.0,
+                exposure=1.0,
+                tomogram_x=1,
+                tomogram_y=1,
+                tomogram_z=1,
+                raw_frames_folder="",
+                mdocs_folder="",
+                tilt_series_data_folder=str(tomostar),
+                tomogram_folder=str(tomograms),
+            )
+            project = ProjectData(datasets=[dataset])
+
+            resolved_base = resolve_dataset_file(project, dataset, "Position_18", "tomogram")
+            resolved_sibling = resolve_dataset_file(project, dataset, "Position_18_2", "tomogram")
+
+            self.assertEqual(Path(resolved_base.path).name, "Position_18_bin4.mrc")
+            self.assertEqual(Path(resolved_sibling.path).name, "Position_18_2_bin4.mrc")
+
+    def test_tomogram_matching_leaves_base_ts_missing_when_only_numbered_sibling_exists(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            tomostar = root / "tomostar"
+            tomostar.mkdir()
+            tomograms = root / "tomograms"
+            tomograms.mkdir()
+            for ts_name in ("Position_18", "Position_18_2"):
+                (tomostar / f"{ts_name}.tomostar").write_text("ts", encoding="utf-8")
+            (tomograms / "Position_18_2.mrc").write_text("sibling", encoding="utf-8")
+
+            dataset = DatasetRecord(
+                dataset_name="DS",
+                sample="S",
+                pixel_size=1.0,
+                exposure=1.0,
+                tomogram_x=1,
+                tomogram_y=1,
+                tomogram_z=1,
+                raw_frames_folder="",
+                mdocs_folder="",
+                tilt_series_data_folder=str(tomostar),
+                tomogram_folder=str(tomograms),
+            )
+            project = ProjectData(datasets=[dataset])
+
+            resolved = resolve_dataset_file(project, dataset, "Position_18", "tomogram")
+
+            self.assertEqual(resolved.path, "")
+            self.assertEqual(resolved.source, "missing")
+
     def test_unified_mdoc_role_uses_prepared_mapping(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

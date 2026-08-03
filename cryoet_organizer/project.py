@@ -83,6 +83,7 @@ class ProjectState:
     custom_job_types: list[dict[str, Any]] = field(default_factory=list)
     shortcuts: list[dict[str, str]] = field(default_factory=list)
     tomograms_selection: list[dict[str, str]] = field(default_factory=list)
+    workflows: list[dict[str, Any]] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, payload: dict | None) -> "ProjectState":
@@ -107,6 +108,11 @@ class ProjectState:
             custom_job_types=custom_jobs,
             shortcuts=_string_string_dict_list(payload.get("shortcuts", [])),
             tomograms_selection=_string_string_dict_list(payload.get("tomograms_selection", [])),
+            workflows=[
+                deepcopy(dict(item))
+                for item in payload.get("workflows", [])
+                if isinstance(item, dict)
+            ],
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -549,16 +555,25 @@ def best_matching_ts_name(target_stem: str, ts_names: list[str]) -> str:
     return best_name
 
 
-def best_matching_path_for_ts(paths: list[Path], ts_name: str) -> Path | None:
-    top_paths = best_matching_paths_for_ts(paths, ts_name)
+def best_matching_path_for_ts(paths: list[Path], ts_name: str, ts_names: list[str] | None = None) -> Path | None:
+    top_paths = best_matching_paths_for_ts(paths, ts_name, ts_names)
     if len(top_paths) == 1:
         return top_paths[0]
     return None
 
 
-def best_matching_paths_for_ts(paths: list[Path], ts_name: str) -> list[Path]:
+def best_matching_paths_for_ts(paths: list[Path], ts_name: str, ts_names: list[str] | None = None) -> list[Path]:
+    ts_key = ts_name.casefold()
+    exact_stem_matches = [path for path in paths if path.stem.casefold() == ts_key]
+    if exact_stem_matches:
+        return exact_stem_matches
+    known_ts_names = [name for name in (ts_names or []) if str(name).strip()]
     ranked: list[tuple[tuple[int, int], Path]] = []
     for path in paths:
+        if known_ts_names:
+            best_owner = best_matching_ts_name(path.stem, known_ts_names)
+            if best_owner and best_owner.casefold() != ts_key:
+                continue
         score = ts_name_match_score(path.stem, ts_name)
         if score is None:
             continue
@@ -568,11 +583,6 @@ def best_matching_paths_for_ts(paths: list[Path], ts_name: str) -> list[Path]:
     ranked.sort(key=lambda item: (item[0][0], item[0][1], -len(item[1].name)), reverse=True)
     top_score = ranked[0][0]
     top_paths = [path for score, path in ranked if score == top_score]
-    if len(top_paths) == 1:
-        return top_paths
-    exact_stem_matches = [path for path in top_paths if path.stem.casefold() == ts_name.casefold()]
-    if len(exact_stem_matches) == 1:
-        return exact_stem_matches
     return top_paths
 
 

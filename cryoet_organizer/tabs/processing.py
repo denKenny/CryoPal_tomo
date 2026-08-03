@@ -190,7 +190,7 @@ class ProcessingTab(SidebarTab):
 
         history_actions = ttk.Frame(self.history_box)
         history_actions.grid(row=1, column=0, sticky="ew", pady=(8, 0))
-        history_actions.columnconfigure(5, weight=1)
+        history_actions.columnconfigure(3, weight=1)
         ttk.Button(
             history_actions,
             text="Show selected job details",
@@ -208,21 +208,16 @@ class ProcessingTab(SidebarTab):
         ).grid(row=0, column=2, sticky="w", padx=(8, 0))
         ttk.Button(
             history_actions,
-            text="Run scheduled jobs",
-            command=self._run_scheduled_jobs,
-        ).grid(row=0, column=3, sticky="w", padx=(8, 0))
-        ttk.Button(
-            history_actions,
-            text="Submit scheduled jobs to Slurm",
-            command=self._submit_scheduled_jobs_to_slurm,
-        ).grid(row=0, column=4, sticky="w", padx=(8, 0))
+            text="Global Job List",
+            command=self.app.open_global_job_list,
+        ).grid(row=0, column=4, sticky="e", padx=(8, 0))
         abort_button = ttk.Button(
             history_actions,
             text="Abort",
             command=self.app.abort_running_commands,
             state="disabled",
         )
-        abort_button.grid(row=0, column=6, sticky="e", padx=(8, 0))
+        abort_button.grid(row=0, column=5, sticky="e", padx=(8, 0))
         self.app.attach_abort_button(abort_button)
         self.history_table.bind("<Double-1>", self._show_selected_history_details)
         self.history_box.grid_remove()
@@ -497,6 +492,9 @@ class ProcessingTab(SidebarTab):
         if selected is None:
             return
         _index, entry = selected
+        self.show_history_entry_details(entry)
+
+    def show_history_entry_details(self, entry: JobHistoryEntry, parent: tk.Misc | None = None) -> None:
         sections = [
             (
                 "Overview",
@@ -512,7 +510,7 @@ class ProcessingTab(SidebarTab):
                 [(key, value) for key, value in entry.parameters.items()] or [("Parameters", "-")],
             ),
         ]
-        show_detail_dialog(self.frame, "Job details", sections, command=entry.command or "-")
+        show_detail_dialog(parent or self.frame, "Job details", sections, command=entry.command or "-")
 
     def _copy_history_job_parameters(self) -> None:
         selection = self.history_table.selection()

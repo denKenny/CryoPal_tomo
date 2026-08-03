@@ -76,6 +76,7 @@ from cryoet_organizer.tabs import SidebarTab, get_tab_classes
 from cryoet_organizer.ts_metadata import clear_ts_metadata_cache, collect_ts_metadata
 from cryoet_organizer.viewer_defaults import resolve_viewer_command
 from cryoet_organizer.viewer_defaults_dialog import ViewerDefaultsDialog
+from cryoet_organizer.workflow_editor import WorkflowEditorDialog
 
 
 class _LogoSplash:
@@ -517,6 +518,7 @@ class CryoETOrganizerApp:
         settings_menu.add_command(label="Slurm submission", command=self.open_slurm_profiles_dialog)
         settings_menu.add_command(label="Manage environments", command=self.open_environments_dialog)
         settings_menu.add_command(label="Manage custom job types", command=self.open_custom_jobs_dialog)
+        settings_menu.add_command(label="Manage workflows", command=self.open_workflows_dialog)
         settings_menu.add_command(label="Manage shortcuts", command=self.open_shortcuts_dialog)
         settings_menu.add_separator()
         settings_menu.add_command(label="Export .cryopal.settings-file", command=self.export_settings_bundle_dialog)
@@ -736,6 +738,10 @@ class CryoETOrganizerApp:
         except Exception:
             pass
         self.status_var.set(f"Active tab: {self.tabs[tab_id].title}")
+
+    def open_global_job_list(self) -> None:
+        if "job_list" in self.tabs:
+            self._show_tab("job_list")
 
     def _build_refresh_domain_map(self) -> None:
         mapping: dict[str, list[str]] = {}
@@ -1229,7 +1235,7 @@ class CryoETOrganizerApp:
         self._refresh_history_views()
 
     def _refresh_history_views(self) -> None:
-        self.on_project_changed("processing", "processing_m", "tomograms", "custom", "particles")
+        self.on_project_changed("processing", "processing_m", "tomograms", "custom", "particles", "job_queue")
 
     def request_scheduled_batch_start(
         self,
@@ -1326,6 +1332,9 @@ class CryoETOrganizerApp:
     def open_custom_jobs_dialog(self) -> None:
         self.settings_shell().open_section("custom_job_types")
 
+    def open_workflows_dialog(self) -> None:
+        self.settings_shell().open_section("workflows")
+
     def open_shortcuts_dialog(self) -> None:
         self.settings_shell().open_section("shortcuts")
 
@@ -1353,6 +1362,8 @@ class CryoETOrganizerApp:
             return EnvironmentsDialog(self, host=host)
         if section_key == "custom_job_types":
             return CustomJobsDialog(self, host=host)
+        if section_key == "workflows":
+            return WorkflowEditorDialog(self, host, host=host)
         if section_key == "shortcuts":
             return ManageShortcutsDialog(self, host=host)
         if section_key == "appearance":

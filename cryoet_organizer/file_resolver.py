@@ -402,7 +402,13 @@ def _matching_candidates(dataset: DatasetRecord, ts_name: str, config: FileRoleC
             candidates.append(item)
     candidates.sort(key=lambda item: item.name.casefold())
     if config.apply_ts_matching:
-        candidates = best_matching_paths_for_ts(candidates, ts_name)
+        known_ts_names = dataset_ts_names(dataset)
+        if dataset.thumbnails:
+            thumbnail_ts_names = [record.ts_name for record in dataset.thumbnails if record.ts_name]
+            known_ts_names = sorted(set(known_ts_names + thumbnail_ts_names), key=str.casefold)
+        if ts_name and not any(name.casefold() == ts_name.casefold() for name in known_ts_names):
+            known_ts_names.append(ts_name)
+        candidates = best_matching_paths_for_ts(candidates, ts_name, known_ts_names)
     return candidates
 
 

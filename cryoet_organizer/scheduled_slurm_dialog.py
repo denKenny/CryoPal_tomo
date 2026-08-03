@@ -107,17 +107,23 @@ class CollectiveSlurmSubmissionDialog:
         initial_profile: str,
         initial_overrides: dict[str, str],
         script_builder: Callable[[str, dict[str, str]], str],
+        window_title: str = "Collective Slurm submission",
+        intro_text: str = "Which Slurm profile should be used for the joined submission?",
+        submit_label: str = "Submit job",
     ) -> None:
         self.app = app
         self.parent = parent
         self.script_builder = script_builder
+        self.window_title = window_title
+        self.intro_text = intro_text
+        self.submit_label = submit_label
         self.profile_var = tk.StringVar(value=initial_profile)
         self.override_ui = SlurmOverrideUI(app, self.profile_var)
         self._result: tuple[str, dict[str, str]] | None = None
         self._initial_overrides = dict(initial_overrides)
 
         self.window = tk.Toplevel(parent)
-        self.window.title("Collective Slurm submission")
+        self.window.title(self.window_title)
         self.window.geometry("980x520")
         self.window.transient(parent.winfo_toplevel())
         self.window.grab_set()
@@ -130,7 +136,7 @@ class CollectiveSlurmSubmissionDialog:
     def _build(self) -> None:
         ttk.Label(
             self.window,
-            text="Which Slurm profile should be used for the joined submission?",
+            text=self.intro_text,
             wraplength=900,
             justify="left",
             padding=(16, 16, 16, 8),
@@ -164,7 +170,7 @@ class CollectiveSlurmSubmissionDialog:
         buttons.columnconfigure(1, weight=1)
         ttk.Button(buttons, text="Cancel", command=self.window.destroy).grid(row=0, column=0)
         ttk.Button(buttons, text="Preview submission", command=self._preview).grid(row=0, column=1, sticky="w", padx=(8, 0))
-        ttk.Button(buttons, text="Submit job", command=self._submit).grid(row=0, column=2, sticky="e", padx=(8, 0))
+        ttk.Button(buttons, text=self.submit_label, command=self._submit).grid(row=0, column=2, sticky="e", padx=(8, 0))
 
     def _preview(self) -> None:
         profile_name = self.profile_var.get().strip()
