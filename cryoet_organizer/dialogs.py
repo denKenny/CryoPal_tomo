@@ -196,12 +196,14 @@ def show_detail_dialog(
         command_box.grid(row=next_row, column=0, columnspan=2, sticky="nsew", pady=(12, 0))
         command_box.columnconfigure(0, weight=1)
         command_box.rowconfigure(0, weight=1)
-        command_text = tk.Text(command_box, height=command_height, wrap="word", font=technical_font_name())
+        command_text = tk.Text(command_box, height=command_height, wrap="none", font=technical_font_name())
         command_text.grid(row=0, column=0, sticky="nsew")
         command_text.insert("1.0", command)
         command_scroll = ttk.Scrollbar(command_box, orient="vertical", command=command_text.yview)
         command_scroll.grid(row=0, column=1, sticky="ns")
-        command_text.configure(yscrollcommand=command_scroll.set)
+        command_xscroll = ttk.Scrollbar(command_box, orient="horizontal", command=command_text.xview)
+        command_xscroll.grid(row=1, column=0, sticky="ew")
+        command_text.configure(yscrollcommand=command_scroll.set, xscrollcommand=command_xscroll.set)
         next_row += 1
 
     footer = ttk.Frame(container)

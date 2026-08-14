@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import shlex
 import subprocess
 import tkinter as tk
 from pathlib import Path
@@ -546,11 +547,12 @@ class ProcessingTab(SidebarTab):
         self.execution_mode_var.set("Submit to Slurm" if entry.execution_mode == "slurm" else "Run locally")
         self.environment_var.set(entry.environment_title or entry.parameters.get("execution_environment", self._job_environment_default()))
 
-        for flag_name, variable in self.parameter_vars.items():
-            if flag_name not in entry.parameters:
+        for flag in self._active_job_flags():
+            variable = self.parameter_vars.get(flag.name)
+            if variable is None:
                 continue
-            value = entry.parameters[flag_name]
-            if self.current_job is not None and self.current_job.command == "ts_export_particles" and flag_name == "--output_star":
+            value = self._history_parameter_value(entry, flag)
+            if self.current_job is not None and self.current_job.command == "ts_export_particles" and flag.name == "--output_star":
                 path_value = Path(str(value).strip()) if str(value).strip() else Path("")
                 if path_value.suffix:
                     variable.set(str(path_value.parent) if str(path_value.parent) != "." else "")
@@ -584,11 +586,35 @@ class ProcessingTab(SidebarTab):
                 continue
             current = variable.get()
             if flag.widget == "bool":
-                if current:
-                    values[flag.name] = "true"
-            elif str(current).strip():
+                values[flag.name] = "true" if current else "false"
+            else:
                 values[flag.name] = str(current).strip()
         return values
+
+    def _history_parameter_value(self, entry: JobHistoryEntry, flag: WarpToolFlag) -> str:
+        if flag.name in entry.parameters:
+            return entry.parameters[flag.name]
+        parameter_names = self._history_parameter_names(flag)
+        tokens = self._history_command_tokens(entry.command)
+        if flag.widget == "bool":
+            return "true" if any(name and name in tokens for name in parameter_names) else "false"
+        for index, token in enumerate(tokens):
+            if token not in parameter_names:
+                continue
+            if index + 1 < len(tokens):
+                return tokens[index + 1]
+            return ""
+        return ""
+
+    def _history_parameter_names(self, flag: WarpToolFlag) -> set[str]:
+        names = {flag.name, self._display_parameter_name(flag), *flag.aliases}
+        return {name for name in names if name}
+
+    def _history_command_tokens(self, command: str) -> list[str]:
+        try:
+            return shlex.split(command)
+        except ValueError:
+            return command.split()
 
     def _job_environment_default(self) -> str:
         if self.current_job is None:

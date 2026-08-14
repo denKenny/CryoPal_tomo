@@ -48,6 +48,7 @@ from cryoet_organizer.preferences import (
 )
 from cryoet_organizer.preferences_dialog import PreferencesDialog
 from cryoet_organizer.recent_projects import add_recent_project, load_recent_projects
+from cryoet_organizer.relion_projects_dialog import RelionProjectsDialog
 from cryoet_organizer.resizable_sections import clear_layout_preferences
 from cryoet_organizer.custom_jobs_dialog import CustomJobsDialog
 from cryoet_organizer.shortcuts_dialog import ManageShortcutsDialog
@@ -519,6 +520,7 @@ class CryoETOrganizerApp:
         settings_menu.add_command(label="Manage environments", command=self.open_environments_dialog)
         settings_menu.add_command(label="Manage custom job types", command=self.open_custom_jobs_dialog)
         settings_menu.add_command(label="Manage workflows", command=self.open_workflows_dialog)
+        settings_menu.add_command(label="Manage Relion projects", command=self.open_relion_projects_dialog)
         settings_menu.add_command(label="Manage shortcuts", command=self.open_shortcuts_dialog)
         settings_menu.add_separator()
         settings_menu.add_command(label="Export .cryopal.settings-file", command=self.export_settings_bundle_dialog)
@@ -670,7 +672,7 @@ class CryoETOrganizerApp:
     def _load_tabs(self) -> None:
         start_row = 1 if self.logo_label is not None else 0
         current_row = start_row
-        separator_before = {"processing", "shortcuts", "tomograms"}
+        separator_before = {"processing", "tomograms", "relion_projects"}
         bottom_tab_cls = None
         for tab_cls in get_tab_classes():
             if tab_cls.tab_id == "file_registry":
@@ -876,13 +878,17 @@ class CryoETOrganizerApp:
         _sync_tabs_to_project(), which is called automatically before saving.
         """
         self._modified = True
-        if not domains or {"datasets", "file_registry", "ts_metadata"} & set(domains):
+        domain_set = set(domains)
+        history_domains = {"processing", "processing_m", "tomograms", "particles", "custom"}
+        if domain_set & history_domains:
+            domain_set.add("job_queue")
+        if not domains or {"datasets", "file_registry", "ts_metadata"} & domain_set:
             clear_ts_metadata_cache()
-        self._queue_project_refresh(tuple(domains) if domains else None)
+        self._queue_project_refresh(tuple(domain_set) if domains else None)
         self._update_title()
         self.status_var.set(status_message)
         if self.debug_mode.enabled:
-            self.debug_log("STATE", f"Project changed in memory for domains: {', '.join(domains) if domains else 'all'}")
+            self.debug_log("STATE", f"Project changed in memory for domains: {', '.join(domain_set) if domains else 'all'}")
 
     def _confirm_discard_changes(self) -> bool:
         if not self._modified:
@@ -1178,6 +1184,36 @@ class CryoETOrganizerApp:
         log_win.attach_process(process)
         return process
 
+    def start_managed_process_for_output(
+        self,
+        command: str,
+        cwd: str | None = None,
+        activation_command: str = "",
+    ) -> subprocess.Popen:
+        """Start *command* with stdout/stderr piped for a shared output dialog."""
+        prepared_command = self._local_command_with_environment(command, activation_command)
+        if self.debug_mode.enabled:
+            self.open_debug_log_window()
+            process = self.start_managed_process(command, cwd=cwd, activation_command=activation_command)
+            self.debug_log("COMMAND", f"Would stream command output: {command} (cwd: {cwd or '-'})")
+            return process  # type: ignore[return-value]
+
+        process = subprocess.Popen(
+            prepared_command,
+            shell=True,
+            cwd=cwd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+            text=True,
+            bufsize=1,
+        )
+        with self._managed_process_lock:
+            self._managed_processes[process.pid] = process
+            self._abort_requested = False
+        self.root.after(0, self._refresh_abort_button)
+        return process
+
     def _wait_process_and_callback(
         self,
         process: subprocess.Popen,
@@ -1335,6 +1371,9 @@ class CryoETOrganizerApp:
     def open_workflows_dialog(self) -> None:
         self.settings_shell().open_section("workflows")
 
+    def open_relion_projects_dialog(self) -> None:
+        self.settings_shell().open_section("relion_projects")
+
     def open_shortcuts_dialog(self) -> None:
         self.settings_shell().open_section("shortcuts")
 
@@ -1364,6 +1403,8 @@ class CryoETOrganizerApp:
             return CustomJobsDialog(self, host=host)
         if section_key == "workflows":
             return WorkflowEditorDialog(self, host, host=host)
+        if section_key == "relion_projects":
+            return RelionProjectsDialog(self, host=host)
         if section_key == "shortcuts":
             return ManageShortcutsDialog(self, host=host)
         if section_key == "appearance":
@@ -1452,6 +1493,7 @@ class CryoETOrganizerApp:
             "slurm",
             "environments",
             "custom",
+            "relion_projects",
             "shortcuts",
             "appearance",
             status_message="Imported settings",

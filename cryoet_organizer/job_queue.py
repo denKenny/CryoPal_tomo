@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 from cryoet_organizer.job_execution import display_history_timestamp, is_scheduled_history_entry
@@ -80,7 +81,19 @@ def _job_list_sort_key(ref: ScheduledJobRef) -> tuple[int, int, str, str]:
         except Exception:
             order_value = 10_000_000
         return (0, order_value, ref.entry.timestamp, ref.entry.entry_id)
-    return (1, 0, ref.entry.timestamp, ref.entry.entry_id)
+    return (1, 0, reverse_timestamp_sort_key(ref.entry.timestamp), ref.entry.entry_id)
+
+
+def reverse_timestamp_sort_key(timestamp: str) -> str:
+    try:
+        cleaned = str(timestamp).replace("Z", "+00:00")
+        parsed = datetime.fromisoformat(cleaned)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        seconds = int(parsed.timestamp())
+    except Exception:
+        seconds = 0
+    return f"{9999999999 - seconds:010d}"
 
 
 def assign_queue_order(refs: list[ScheduledJobRef]) -> None:

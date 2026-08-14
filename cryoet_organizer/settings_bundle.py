@@ -14,6 +14,15 @@ from cryoet_organizer.file_resolver import essential_file_roles, file_role_confi
 from cryoet_organizer.job_defaults import build_job_default_registry, get_project_job_default_overrides
 from cryoet_organizer.preferences import DEFAULT_PREFERENCES
 from cryoet_organizer.project import ProjectData, ProjectState, SETTINGS_SUFFIX
+from cryoet_organizer.relion_projects import (
+    RELION_DEFAULT_LABEL,
+    RelionProjectDefinition,
+    get_project_relion_default,
+    get_project_relion_projects,
+    relion_default_is_empty,
+    set_project_relion_default,
+    set_project_relion_projects,
+)
 from cryoet_organizer.shortcuts import ShortcutDefinition, get_project_shortcuts, set_project_shortcuts
 from cryoet_organizer.slurm import SlurmProfile, get_project_slurm_profiles, set_project_slurm_profiles
 from cryoet_organizer.viewer_defaults import get_effective_viewer_defaults, set_project_viewer_defaults
@@ -29,6 +38,7 @@ SETTINGS_CATEGORY_LABELS: dict[str, str] = {
     "environments": "Manage environments",
     "custom_job_types": "Manage custom job types",
     "workflows": "Manage workflows",
+    "relion_projects": "Manage Relion projects",
     "shortcuts": "Manage shortcuts",
     "appearance": "Appearance",
 }
@@ -42,6 +52,7 @@ SETTINGS_CATEGORY_ORDER: tuple[str, ...] = (
     "environments",
     "custom_job_types",
     "workflows",
+    "relion_projects",
     "shortcuts",
     "appearance",
 )
@@ -158,6 +169,17 @@ def exportable_settings_groups(project: ProjectData) -> list[SettingsSelectionGr
             or (SettingsSelectionItem(key="workflows::__empty__", label="(no workflows yet)"),),
         ),
         SettingsSelectionGroup(
+            key="relion_projects",
+            label=SETTINGS_CATEGORY_LABELS["relion_projects"],
+            items=(
+                SettingsSelectionItem(key="relion_projects::__default__", label=RELION_DEFAULT_LABEL),
+                *tuple(
+                    SettingsSelectionItem(key=f"relion_projects::{item.name}", label=item.name)
+                    for item in get_project_relion_projects(project)
+                ),
+            ),
+        ),
+        SettingsSelectionGroup(
             key="shortcuts",
             label=SETTINGS_CATEGORY_LABELS["shortcuts"],
             items=tuple(
@@ -250,6 +272,20 @@ def build_settings_export_payload(project: ProjectData, selected_item_keys: list
             for workflow in project_workflows(project)
             if isinstance(workflow, dict) and str(workflow.get("workflow_id", "")).strip() in selected_workflow_ids
         ]
+
+    selected_relion_names = {_item_name(key) for key in selected if key.startswith("relion_projects::")}
+    relion_payload: dict[str, Any] = {}
+    if "__default__" in selected_relion_names:
+        relion_payload["default"] = get_project_relion_default(project).to_dict()
+    project_names = selected_relion_names - {"__default__"}
+    if project_names:
+        relion_payload["projects"] = [
+            item.to_dict()
+            for item in get_project_relion_projects(project)
+            if item.name in project_names
+        ]
+    if relion_payload:
+        categories["relion_projects"] = relion_payload
 
     if "appearance::appearance" in selected:
         categories["appearance"] = get_project_appearance(project).to_dict()
@@ -356,6 +392,26 @@ def importable_settings_groups(payload: dict[str, Any]) -> list[SettingsSelectio
             label=SETTINGS_CATEGORY_LABELS["workflows"],
             items=items,
         )
+    if isinstance(categories.get("relion_projects"), dict):
+        relion_payload = categories["relion_projects"]
+        items: list[SettingsSelectionItem] = []
+        if isinstance(relion_payload.get("default"), dict):
+            items.append(SettingsSelectionItem(key="relion_projects::__default__", label=RELION_DEFAULT_LABEL))
+        project_items = relion_payload.get("projects", [])
+        if isinstance(project_items, list):
+            items.extend(
+                SettingsSelectionItem(
+                    key=f"relion_projects::{str(item.get('name', '')).strip()}",
+                    label=str(item.get("name", "")).strip(),
+                )
+                for item in project_items
+                if isinstance(item, dict) and str(item.get("name", "")).strip()
+            )
+        groups_by_key["relion_projects"] = SettingsSelectionGroup(
+            key="relion_projects",
+            label=SETTINGS_CATEGORY_LABELS["relion_projects"],
+            items=tuple(items),
+        )
     return [groups_by_key[key] for key in SETTINGS_CATEGORY_ORDER if key in groups_by_key]
 
 
@@ -384,6 +440,12 @@ def conflicting_import_items(project: ProjectData, selected_item_keys: list[str]
                 conflicts.append(key)
         elif key.startswith("workflows::"):
             if any(str(workflow.get("workflow_id", "")).strip() == _item_name(key) for workflow in project_workflows(project)):
+                conflicts.append(key)
+        elif key == "relion_projects::__default__":
+            if not relion_default_is_empty(project):
+                conflicts.append(key)
+        elif key.startswith("relion_projects::"):
+            if any(item.name == _item_name(key) for item in get_project_relion_projects(project)):
                 conflicts.append(key)
         elif key.startswith("shortcuts::"):
             if any(item.title == _item_name(key) for item in get_project_shortcuts(project)):
@@ -562,6 +624,30 @@ def apply_settings_import(
             workflow_id = str(item.get("workflow_id", "")).strip()
             key = f"workflows::{workflow_id}"
             if workflow_id in existing_ids and not overwrite_existing:
+                skipped.append(key)
+            else:
+                applied.append(key)
+
+    if isinstance(categories.get("relion_projects"), dict):
+        relion_payload = categories["relion_projects"]
+        if "relion_projects::__default__" in selected and isinstance(relion_payload.get("default"), dict):
+            if not relion_default_is_empty(project) and not overwrite_existing:
+                skipped.append("relion_projects::__default__")
+            else:
+                set_project_relion_default(project, RelionProjectDefinition.from_dict(relion_payload["default"]))
+                applied.append("relion_projects::__default__")
+        selected_names = {_item_name(key) for key in selected if key.startswith("relion_projects::")} - {"__default__"}
+        imported_items = [
+            RelionProjectDefinition.from_dict(item)
+            for item in relion_payload.get("projects", [])
+            if isinstance(item, dict) and str(item.get("name", "")).strip() in selected_names
+        ]
+        existing = get_project_relion_projects(project)
+        merged = _merge_named_items(existing, imported_items, lambda item: item.name, overwrite_existing)
+        set_project_relion_projects(project, merged)
+        for item in imported_items:
+            key = f"relion_projects::{item.name}"
+            if any(existing_item.name == item.name for existing_item in existing) and not overwrite_existing:
                 skipped.append(key)
             else:
                 applied.append(key)

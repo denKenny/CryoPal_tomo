@@ -23,6 +23,9 @@ class ExtractionMaskParticle:
     x: float
     y: float
     z: float
+    rot: float = 0.0
+    tilt: float = 0.0
+    psi: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -61,6 +64,15 @@ class MrcHeader:
     data_offset: int
     voxel_size: tuple[float, float, float]
     endian: str = "<"
+
+
+@dataclass(frozen=True)
+class ShapeMask:
+    path: Path
+    dimensions: tuple[int, int, int]
+    center: tuple[float, float, float]
+    scale_to_output_px: float
+    active: bytes
 
 
 def _check_cancel(cancel_event=None) -> None:
@@ -150,6 +162,7 @@ def grouped_extraction_particles(
     *,
     input_angpix: float,
     output_angpix: float,
+    require_angles: bool = False,
 ) -> OrderedDict[str, list[ExtractionMaskParticle]]:
     if input_angpix <= 0:
         raise ExtractionMaskError("Input STAR Angpix must be greater than 0.")
@@ -167,6 +180,9 @@ def grouped_extraction_particles(
     origin_x_px_index = _header_index(block.headers, "_rlnOriginX", required=False)
     origin_y_px_index = _header_index(block.headers, "_rlnOriginY", required=False)
     origin_z_px_index = _header_index(block.headers, "_rlnOriginZ", required=False)
+    rot_index = _header_index(block.headers, "_rlnAngleRot", required=require_angles)
+    tilt_index = _header_index(block.headers, "_rlnAngleTilt", required=require_angles)
+    psi_index = _header_index(block.headers, "_rlnAnglePsi", required=require_angles)
 
     scale = input_angpix / output_angpix
     grouped: OrderedDict[str, list[ExtractionMaskParticle]] = OrderedDict()
@@ -196,6 +212,9 @@ def grouped_extraction_particles(
             x=coord_x * scale - origin_x_ang / output_angpix,
             y=coord_y * scale - origin_y_ang / output_angpix,
             z=coord_z * scale - origin_z_ang / output_angpix,
+            rot=_row_float(row, rot_index) or 0.0,
+            tilt=_row_float(row, tilt_index) or 0.0,
+            psi=_row_float(row, psi_index) or 0.0,
         )
         grouped.setdefault(ts_name, []).append(particle)
     if not grouped:
@@ -293,6 +312,121 @@ def _read_mask_slice(handle, header: MrcHeader) -> bytearray:
     return bytearray(1 if value > 0 else 0 for (value,) in struct.iter_unpack(f"{header.endian}f", data))
 
 
+def _read_mrc_slice_values(handle, header: MrcHeader) -> list[float]:
+    voxel_count = header.nx * header.ny
+    if header.mode == 0:
+        data = handle.read(voxel_count)
+        if len(data) != voxel_count:
+            raise ExtractionMaskError("Unexpected end of MRC data.")
+        return [float(value) for value in data]
+
+    if header.mode == 1:
+        data = handle.read(voxel_count * 2)
+        if len(data) != voxel_count * 2:
+            raise ExtractionMaskError("Unexpected end of MRC data.")
+        return [float(value) for (value,) in struct.iter_unpack(f"{header.endian}h", data)]
+
+    if header.mode == 6:
+        data = handle.read(voxel_count * 2)
+        if len(data) != voxel_count * 2:
+            raise ExtractionMaskError("Unexpected end of MRC data.")
+        return [float(value) for (value,) in struct.iter_unpack(f"{header.endian}H", data)]
+
+    data = handle.read(voxel_count * 4)
+    if len(data) != voxel_count * 4:
+        raise ExtractionMaskError("Unexpected end of MRC data.")
+    return [float(value) for (value,) in struct.iter_unpack(f"{header.endian}f", data)]
+
+
+def _read_shape_mask(
+    path: str | Path,
+    *,
+    output_angpix: float,
+    rescale_to_output_angpix: bool,
+    binarize: bool,
+) -> ShapeMask:
+    path = Path(path)
+    if output_angpix <= 0:
+        raise ExtractionMaskError("Output mask Angpix must be greater than 0.")
+    header = read_mrc_header(path)
+    scale_to_output_px = 1.0
+    if rescale_to_output_angpix:
+        voxel_values = [value for value in header.voxel_size if value > 0]
+        if not voxel_values:
+            raise ExtractionMaskError(f"Could not determine voxel size for shape mask {path.name}.")
+        voxel_size = sum(voxel_values) / len(voxel_values)
+        scale_to_output_px = voxel_size / output_angpix
+        if scale_to_output_px <= 0:
+            raise ExtractionMaskError(f"Invalid voxel size in shape mask {path.name}.")
+    active = bytearray()
+    with path.open("rb") as handle:
+        handle.seek(header.data_offset)
+        for _z_index in range(header.nz):
+            if binarize:
+                active.extend(1 if value > 0 else 0 for value in _read_mrc_slice_values(handle, header))
+            else:
+                active.extend(
+                    1 if math.isclose(value, 1.0, rel_tol=0.0, abs_tol=1e-6) else 0
+                    for value in _read_mrc_slice_values(handle, header)
+                )
+    if not any(active):
+        raise ExtractionMaskError(f"Shape mask {path.name} does not contain any positive voxels.")
+    return ShapeMask(
+        path=path,
+        dimensions=(header.nx, header.ny, header.nz),
+        center=((header.nx - 1) / 2.0, (header.ny - 1) / 2.0, (header.nz - 1) / 2.0),
+        scale_to_output_px=scale_to_output_px,
+        active=bytes(active),
+    )
+
+
+def _relion_euler_matrix(rot: float, tilt: float, psi: float) -> tuple[tuple[float, float, float], ...]:
+    phi = math.radians(rot)
+    theta = math.radians(tilt)
+    psi_rad = math.radians(psi)
+    cphi = math.cos(phi)
+    sphi = math.sin(phi)
+    ctheta = math.cos(theta)
+    stheta = math.sin(theta)
+    cpsi = math.cos(psi_rad)
+    spsi = math.sin(psi_rad)
+    return (
+        (cpsi * ctheta * cphi - spsi * sphi, cpsi * ctheta * sphi + spsi * cphi, -cpsi * stheta),
+        (-spsi * ctheta * cphi - cpsi * sphi, -spsi * ctheta * sphi + cpsi * cphi, spsi * stheta),
+        (stheta * cphi, stheta * sphi, ctheta),
+    )
+
+
+def _matrix_transpose(matrix: tuple[tuple[float, float, float], ...]) -> tuple[tuple[float, float, float], ...]:
+    return (
+        (matrix[0][0], matrix[1][0], matrix[2][0]),
+        (matrix[0][1], matrix[1][1], matrix[2][1]),
+        (matrix[0][2], matrix[1][2], matrix[2][2]),
+    )
+
+
+def _matrix_vector_product(matrix: tuple[tuple[float, float, float], ...], vector: tuple[float, float, float]) -> tuple[float, float, float]:
+    return (
+        matrix[0][0] * vector[0] + matrix[0][1] * vector[1] + matrix[0][2] * vector[2],
+        matrix[1][0] * vector[0] + matrix[1][1] * vector[1] + matrix[1][2] * vector[2],
+        matrix[2][0] * vector[0] + matrix[2][1] * vector[1] + matrix[2][2] * vector[2],
+    )
+
+
+def _shape_mask_active_at(shape_mask: ShapeMask, local_x: float, local_y: float, local_z: float) -> bool:
+    sx, sy, sz = shape_mask.dimensions
+    cx, cy, cz = shape_mask.center
+    scale = shape_mask.scale_to_output_px
+    if scale <= 0:
+        return False
+    x_index = int(round(local_x / scale + cx))
+    y_index = int(round(local_y / scale + cy))
+    z_index = int(round(local_z / scale + cz))
+    if not (0 <= x_index < sx and 0 <= y_index < sy and 0 <= z_index < sz):
+        return False
+    return bool(shape_mask.active[x_index + y_index * sx + z_index * sx * sy])
+
+
 def _write_mrc_header(
     handle,
     *,
@@ -348,12 +482,21 @@ def write_extraction_masks(
     cleanup_distance_angstrom: float,
     dimensions: tuple[int, int, int],
     add_to_pre_existing: bool = False,
+    mask_mode: str = "radius",
+    shape_mask_path: str | Path | None = None,
+    binarize_shape_input: bool = False,
+    rescale_shape_to_output_angpix: bool = False,
     progress_callback: Callable[[int, int, str], None] | None = None,
     log_callback: Callable[[str], None] | None = None,
     cancel_event=None,
 ) -> ExtractionMaskResult:
-    if cleanup_distance_angstrom < 0:
+    normalized_mode = mask_mode.strip().casefold()
+    if normalized_mode not in {"radius", "shape"}:
+        raise ExtractionMaskError("Mask mode must be 'radius' or 'shape'.")
+    if normalized_mode == "radius" and cleanup_distance_angstrom < 0:
         raise ExtractionMaskError("Distance cleanup must be 0 or greater.")
+    if normalized_mode == "shape" and not str(shape_mask_path or "").strip():
+        raise ExtractionMaskError("Shape mask path is required when masking by shape.")
     nx, ny, nz = dimensions
     if nx <= 0 or ny <= 0 or nz <= 0:
         raise ExtractionMaskError("Tomogram dimensions must be positive integers.")
@@ -366,10 +509,21 @@ def write_extraction_masks(
         input_star_path,
         input_angpix=input_angpix,
         output_angpix=output_angpix,
+        require_angles=normalized_mode == "shape",
     )
     all_ts_names = list(grouped.keys())
     outputs: list[ExtractionMaskOutput] = []
     radius_px = cleanup_distance_angstrom / output_angpix if output_angpix > 0 else 0.0
+    shape_mask = (
+        _read_shape_mask(
+            shape_mask_path,
+            output_angpix=output_angpix,
+            rescale_to_output_angpix=rescale_shape_to_output_angpix,
+            binarize=binarize_shape_input,
+        )
+        if normalized_mode == "shape"
+        else None
+    )
 
     for ts_index, (ts_name, particles) in enumerate(grouped.items(), start=1):
         _check_cancel(cancel_event)
@@ -382,18 +536,30 @@ def write_extraction_masks(
             if add_to_pre_existing
             else None
         )
-        _write_single_mask(
-            destination=destination,
-            particles=particles,
-            dimensions=dimensions,
-            output_angpix=output_angpix,
-            radius_px=radius_px,
-            existing_path=existing_path,
-            cancel_event=cancel_event,
-        )
+        if normalized_mode == "shape" and shape_mask is not None:
+            _write_single_shape_mask(
+                destination=destination,
+                particles=particles,
+                dimensions=dimensions,
+                output_angpix=output_angpix,
+                shape_mask=shape_mask,
+                existing_path=existing_path,
+                cancel_event=cancel_event,
+            )
+        else:
+            _write_single_mask(
+                destination=destination,
+                particles=particles,
+                dimensions=dimensions,
+                output_angpix=output_angpix,
+                radius_px=radius_px,
+                existing_path=existing_path,
+                cancel_event=cancel_event,
+            )
         if log_callback is not None:
             source_text = f" using {existing_path.name}" if existing_path is not None else ""
-            log_callback(f"Wrote {destination.name} for {len(particles)} particles{source_text}.")
+            mode_text = "shape" if normalized_mode == "shape" else "radius"
+            log_callback(f"Wrote {destination.name} for {len(particles)} particles by {mode_text}{source_text}.")
         outputs.append(
             ExtractionMaskOutput(
                 ts_name=ts_name,
@@ -476,6 +642,84 @@ def _write_single_mask(
                         row_offset = y_index * nx
                         for x_index in range(min_x, max_x + 1):
                             slice_data[row_offset + x_index] = 0
+                ones_count += sum(1 for value in slice_data if value)
+                output_handle.write(slice_data)
+            total_voxels = nx * ny * nz
+            mean_value = ones_count / total_voxels if total_voxels else 0.0
+            _write_mrc_header(output_handle, dimensions=dimensions, output_angpix=output_angpix, mean_value=mean_value)
+        temp_path.replace(destination)
+    except Exception:
+        temp_path.unlink(missing_ok=True)
+        raise
+    finally:
+        if existing_handle is not None:
+            existing_handle.close()
+
+
+def _write_single_shape_mask(
+    *,
+    destination: Path,
+    particles: list[ExtractionMaskParticle],
+    dimensions: tuple[int, int, int],
+    output_angpix: float,
+    shape_mask: ShapeMask,
+    existing_path: Path | None,
+    cancel_event=None,
+) -> None:
+    nx, ny, nz = dimensions
+    existing_header: MrcHeader | None = None
+    existing_handle = None
+    if existing_path is not None:
+        existing_header = read_mrc_header(existing_path)
+        if (existing_header.nx, existing_header.ny, existing_header.nz) != dimensions:
+            raise ExtractionMaskError(
+                f"Existing mask {existing_path.name} has dimensions "
+                f"{existing_header.nx}x{existing_header.ny}x{existing_header.nz}, expected {nx}x{ny}x{nz}."
+            )
+        existing_handle = existing_path.open("rb")
+        existing_handle.seek(existing_header.data_offset)
+
+    sx, sy, sz = shape_mask.dimensions
+    cx, cy, cz = shape_mask.center
+    scale = shape_mask.scale_to_output_px
+    shape_radius = math.sqrt((cx * scale) ** 2 + (cy * scale) ** 2 + (cz * scale) ** 2) + max(1.0, scale)
+    particle_shapes: list[tuple[ExtractionMaskParticle, tuple[tuple[float, float, float], ...]]] = [
+        (particle, _matrix_transpose(_relion_euler_matrix(particle.rot, particle.tilt, particle.psi)))
+        for particle in particles
+    ]
+
+    z_buckets: dict[int, list[tuple[ExtractionMaskParticle, tuple[tuple[float, float, float], ...]]]] = defaultdict(list)
+    for particle, inverse_matrix in particle_shapes:
+        min_z = max(0, math.floor(particle.z - shape_radius))
+        max_z = min(nz - 1, math.ceil(particle.z + shape_radius))
+        for z_index in range(min_z, max_z + 1):
+            z_buckets[z_index].append((particle, inverse_matrix))
+
+    temp_path = Path(tempfile.mkstemp(prefix=f".{destination.name}.", suffix=".tmp", dir=destination.parent)[1])
+    ones_count = 0
+    try:
+        with temp_path.open("wb+") as output_handle:
+            _write_mrc_header(output_handle, dimensions=dimensions, output_angpix=output_angpix)
+            for z_index in range(nz):
+                _check_cancel(cancel_event)
+                if existing_handle is not None and existing_header is not None:
+                    slice_data = _read_mask_slice(existing_handle, existing_header)
+                else:
+                    slice_data = bytearray(b"\x01") * (nx * ny)
+                for particle, inverse_matrix in z_buckets.get(z_index, []):
+                    dz = z_index - particle.z
+                    min_y = max(0, math.floor(particle.y - shape_radius))
+                    max_y = min(ny - 1, math.ceil(particle.y + shape_radius))
+                    min_x = max(0, math.floor(particle.x - shape_radius))
+                    max_x = min(nx - 1, math.ceil(particle.x + shape_radius))
+                    for y_index in range(min_y, max_y + 1):
+                        dy = y_index - particle.y
+                        row_offset = y_index * nx
+                        for x_index in range(min_x, max_x + 1):
+                            dx = x_index - particle.x
+                            local = _matrix_vector_product(inverse_matrix, (dx, dy, dz))
+                            if _shape_mask_active_at(shape_mask, *local):
+                                slice_data[row_offset + x_index] = 0
                 ones_count += sum(1 for value in slice_data if value)
                 output_handle.write(slice_data)
             total_voxels = nx * ny * nz

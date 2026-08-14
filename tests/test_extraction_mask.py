@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import struct
 import tempfile
 import unittest
 from pathlib import Path
 
 from cryoet_organizer.extraction_mask import (
+    ExtractionMaskError,
     detect_extraction_star_angpix,
     grouped_extraction_particles,
     output_mask_path,
@@ -35,6 +37,45 @@ def _write_extraction_star(path: Path) -> None:
         "1 1 1 TS_02.tomostar 0 0 0",
     ]
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _write_shape_star(path: Path) -> None:
+    lines = [
+        "data_particles",
+        "",
+        "loop_",
+        "_rlnCoordinateX #1",
+        "_rlnCoordinateY #2",
+        "_rlnCoordinateZ #3",
+        "_rlnMicrographName #4",
+        "_rlnAngleRot #5",
+        "_rlnAngleTilt #6",
+        "_rlnAnglePsi #7",
+        "3 3 3 TS_01.tomostar 0 0 0",
+    ]
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _write_mode0_mrc(
+    path: Path,
+    dimensions: tuple[int, int, int],
+    active_indices: set[tuple[int, int, int]],
+    angpix: float = 1.0,
+    active_value: int = 1,
+) -> None:
+    nx, ny, nz = dimensions
+    header = bytearray(1024)
+    struct.pack_into("<4i", header, 0, nx, ny, nz, 0)
+    struct.pack_into("<3i", header, 28, nx, ny, nz)
+    struct.pack_into("<3f", header, 40, nx * angpix, ny * angpix, nz * angpix)
+    struct.pack_into("<3f", header, 52, 90.0, 90.0, 90.0)
+    struct.pack_into("<3i", header, 64, 1, 2, 3)
+    header[208:212] = b"MAP "
+    header[212:216] = bytes((0x44, 0x41, 0x00, 0x00))
+    data = bytearray(nx * ny * nz)
+    for x_index, y_index, z_index in active_indices:
+        data[x_index + y_index * nx + z_index * nx * ny] = active_value
+    path.write_bytes(bytes(header) + bytes(data))
 
 
 def _read_mode0_data(path: Path) -> bytes:
@@ -147,6 +188,87 @@ class ExtractionMaskTests(unittest.TestCase):
             self.assertEqual(data[1 + 1 * 5 + 1 * 25], 0)
             self.assertEqual(data[3 + 3 * 5 + 3 * 25], 0)
             self.assertEqual(data[0], 1)
+
+    def test_shape_mask_zeros_oriented_shape_without_interpolation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            star_path = root / "particles.star"
+            shape_path = root / "shape.mrc"
+            _write_shape_star(star_path)
+            _write_mode0_mrc(shape_path, (3, 3, 3), {(1, 1, 1), (2, 1, 1)})
+
+            result = write_extraction_masks(
+                input_star_path=star_path,
+                output_directory=root,
+                input_angpix=1.0,
+                output_angpix=1.0,
+                cleanup_distance_angstrom=0.0,
+                dimensions=(7, 7, 7),
+                mask_mode="shape",
+                shape_mask_path=shape_path,
+                binarize_shape_input=True,
+            )
+
+            output = result.outputs[0]
+            data = _read_mode0_data(output.path)
+            self.assertEqual(data[3 + 3 * 7 + 3 * 49], 0)
+            self.assertEqual(data[4 + 3 * 7 + 3 * 49], 0)
+            self.assertEqual(data[2 + 3 * 7 + 3 * 49], 1)
+
+    def test_shape_mask_requires_relion_euler_angles(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            star_path = root / "particles.star"
+            shape_path = root / "shape.mrc"
+            _write_extraction_star(star_path)
+            _write_mode0_mrc(shape_path, (3, 3, 3), {(1, 1, 1)})
+
+            with self.assertRaises(ExtractionMaskError):
+                write_extraction_masks(
+                    input_star_path=star_path,
+                    output_directory=root,
+                    input_angpix=1.0,
+                    output_angpix=1.0,
+                    cleanup_distance_angstrom=0.0,
+                    dimensions=(7, 7, 7),
+                    mask_mode="shape",
+                    shape_mask_path=shape_path,
+                )
+
+    def test_binarize_shape_input_uses_positive_values(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            star_path = root / "particles.star"
+            shape_path = root / "shape.mrc"
+            _write_shape_star(star_path)
+            _write_mode0_mrc(shape_path, (3, 3, 3), {(1, 1, 1)}, active_value=2)
+
+            with self.assertRaises(ExtractionMaskError):
+                write_extraction_masks(
+                    input_star_path=star_path,
+                    output_directory=root / "without_binarize",
+                    input_angpix=1.0,
+                    output_angpix=1.0,
+                    cleanup_distance_angstrom=0.0,
+                    dimensions=(7, 7, 7),
+                    mask_mode="shape",
+                    shape_mask_path=shape_path,
+                    binarize_shape_input=False,
+                )
+
+            result = write_extraction_masks(
+                input_star_path=star_path,
+                output_directory=root / "with_binarize",
+                input_angpix=1.0,
+                output_angpix=1.0,
+                cleanup_distance_angstrom=0.0,
+                dimensions=(7, 7, 7),
+                mask_mode="shape",
+                shape_mask_path=shape_path,
+                binarize_shape_input=True,
+            )
+            data = _read_mode0_data(result.outputs[0].path)
+            self.assertEqual(data[3 + 3 * 7 + 3 * 49], 0)
 
 
 if __name__ == "__main__":

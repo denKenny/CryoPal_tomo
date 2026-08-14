@@ -27,6 +27,7 @@ from cryoet_organizer.job_execution import (
     is_scheduled_history_entry,
     slurm_override_payload,
 )
+from cryoet_organizer.log_window import BatchCommandOutputWindow
 from cryoet_organizer.job_defaults import (
     command_parts_for_added_job_defaults,
     resolve_job_default,
@@ -36,10 +37,10 @@ from cryoet_organizer.project import (
     DatasetRecord,
     JobHistoryEntry,
     ProjectData,
-    best_matching_paths_for_ts,
     best_matching_path_for_ts,
     dataset_ts_names,
     find_dataset_for_ts_name,
+    ts_name_match_score,
 )
 from cryoet_organizer.resizable_sections import ResizableSectionStack, VerticalSplitPane
 from cryoet_organizer.scheduled_slurm_dialog import CollectiveSlurmSubmissionDialog, ask_scheduled_slurm_mode
@@ -587,7 +588,7 @@ class TomogramsTab(SidebarTab):
         self.history_table.configure(yscrollcommand=history_scroll.set)
         history_actions = ttk.Frame(history_box)
         history_actions.grid(row=1, column=0, sticky="ew", pady=(8, 0))
-        history_actions.columnconfigure(2, weight=1)
+        history_actions.columnconfigure(3, weight=1)
         ttk.Button(
             history_actions,
             text="Show selected job details",
@@ -600,16 +601,21 @@ class TomogramsTab(SidebarTab):
         ).grid(row=0, column=1, sticky="w", padx=(8, 0))
         ttk.Button(
             history_actions,
+            text="Copy job parameters",
+            command=self._copy_selected_history_parameters,
+        ).grid(row=0, column=2, sticky="w", padx=(8, 0))
+        ttk.Button(
+            history_actions,
             text="Global Job List",
             command=self.app.open_global_job_list,
-        ).grid(row=0, column=3, sticky="e", padx=(8, 0))
+        ).grid(row=0, column=4, sticky="e", padx=(8, 0))
         history_abort = ttk.Button(
             history_actions,
             text="Abort",
             command=self.app.abort_running_commands,
             state="disabled",
         )
-        history_abort.grid(row=0, column=4, sticky="e", padx=(8, 0))
+        history_abort.grid(row=0, column=5, sticky="e", padx=(8, 0))
         self.app.attach_abort_button(history_abort)
         self.history_table.bind("<Double-1>", self._show_selected_history_details)
 
@@ -1718,7 +1724,7 @@ class TomogramsTab(SidebarTab):
             self.pytom_manual_dir_var.set(path)
 
     def _browse_pytom_tomogram_mask(self) -> None:
-        path = filedialog.askopenfilename(title="Select tomogram mask")
+        path = filedialog.askdirectory(title="Select tomogram mask directory")
         if path:
             self.pytom_tomogram_mask_var.set(path)
 
@@ -1744,7 +1750,7 @@ class TomogramsTab(SidebarTab):
             self._update_extract_preview()
 
     def _browse_extract_tomogram_mask(self) -> None:
-        path = filedialog.askopenfilename(title="Select tomogram mask")
+        path = filedialog.askdirectory(title="Select tomogram mask directory")
         if path:
             self.extract_tomogram_mask_var.set(path)
 
@@ -1926,27 +1932,142 @@ class TomogramsTab(SidebarTab):
         resolved = resolve_dataset_file(self.app.project, dataset, ts_name, "ts_xml")
         return Path(resolved.path) if resolved.path else None
 
-    def _matching_mask_message(self, folder_text: str, ts_names: list[str]) -> tuple[str, dict[str, Path]]:
+    def _mask_matching_stem(self, value: str) -> str:
+        normalized = str(value).strip().replace("\\", "/")
+        if not normalized:
+            return ""
+        return Path(normalized).stem
+
+    def _canonical_ts_names_for_dataset(self, dataset: DatasetRecord) -> list[str]:
+        names: dict[str, str] = {}
+        for ts_name in dataset_ts_names(dataset):
+            stem = self._mask_matching_stem(ts_name)
+            if stem:
+                names.setdefault(stem.casefold(), stem)
+        for thumbnail in dataset.thumbnails:
+            stem = self._mask_matching_stem(thumbnail.ts_name)
+            if stem:
+                names.setdefault(stem.casefold(), stem)
+        return sorted(names.values(), key=lambda value: (-len(value), value.casefold()))
+
+    def _ts_groundtruth_index(self) -> tuple[list[str], dict[str, tuple[DatasetRecord | None, str]]]:
+        ts_names: set[str] = set()
+        owner_map: dict[str, tuple[DatasetRecord | None, str]] = {}
+        ambiguous: set[str] = set()
+
+        def add_ts_name(ts_name: str, dataset: DatasetRecord | None) -> None:
+            stem = self._mask_matching_stem(ts_name)
+            if not stem:
+                return
+            key = stem.casefold()
+            identity = (dataset, stem)
+            existing = owner_map.get(key)
+            if existing is not None:
+                existing_dataset, _existing_ts = existing
+                if (existing_dataset.dataset_name if existing_dataset is not None else "") != (
+                    dataset.dataset_name if dataset is not None else ""
+                ):
+                    ambiguous.add(key)
+                return
+            ts_names.add(stem)
+            owner_map[key] = identity
+
+        for dataset in self.app.project.datasets:
+            for ts_name in self._canonical_ts_names_for_dataset(dataset):
+                add_ts_name(ts_name, dataset)
+
+        for key in ambiguous:
+            owner_map.pop(key, None)
+        clean_names = [name for name in ts_names if name.casefold() not in ambiguous]
+        return sorted(clean_names, key=lambda value: (-len(value), value.casefold())), owner_map
+
+    def _unique_ts_groundtruth_match(self, target_stem: str, ts_names: list[str]) -> str:
+        ranked: list[tuple[tuple[int, int], str]] = []
+        for ts_name in ts_names:
+            score = ts_name_match_score(target_stem, ts_name)
+            if score is not None:
+                ranked.append((score, ts_name))
+        if not ranked:
+            return ""
+        ranked.sort(key=lambda item: item[0], reverse=True)
+        top_score = ranked[0][0]
+        top_matches = [ts_name for score, ts_name in ranked if score == top_score]
+        if len(top_matches) != 1:
+            return ""
+        return top_matches[0]
+
+    def _resolve_tm_job_ts_identity(
+        self,
+        job_file: Path,
+        groundtruth_index: tuple[list[str], dict[str, tuple[DatasetRecord | None, str]]] | None = None,
+    ) -> tuple[DatasetRecord | None, str]:
+        raw_stem = self._mask_matching_stem(job_file.stem.removesuffix("_job"))
+        ts_names, owner_map = groundtruth_index or self._ts_groundtruth_index()
+        matched_ts = self._unique_ts_groundtruth_match(raw_stem, ts_names)
+        if matched_ts:
+            identity = owner_map.get(matched_ts.casefold())
+            if identity is not None:
+                return identity
+        dataset = find_dataset_for_ts_name(self.app.project, raw_stem)
+        return dataset, raw_stem
+
+    def _extract_job_identities(self, job_files: list[Path]) -> list[tuple[Path, DatasetRecord | None, str]]:
+        groundtruth_index = self._ts_groundtruth_index()
+        return [
+            (job_file, *self._resolve_tm_job_ts_identity(job_file, groundtruth_index))
+            for job_file in job_files
+        ]
+
+    def _extract_tomogram_mask_values(self, mask_map: dict[str, Path], ts_name: str) -> tuple[str, str]:
+        if self.extract_ignore_tomogram_mask_var.get():
+            return "", "true"
+        mask_path = str(mask_map.get(ts_name, ""))
+        return mask_path, "" if mask_path else "true"
+
+    def _indexed_mask_matches(self, matches: list[Path], ts_names: list[str]) -> dict[str, list[Path]]:
+        indexed: dict[str, list[Path]] = {}
+        for path in matches:
+            matched_ts = self._unique_ts_groundtruth_match(path.stem, ts_names)
+            if matched_ts:
+                indexed.setdefault(matched_ts.casefold(), []).append(path)
+        return indexed
+
+    def _matching_mask_message(
+        self,
+        folder_text: str,
+        ts_names: list[str],
+        selections: list[tuple[str | None, str]] | None = None,
+    ) -> tuple[str, dict[str, Path]]:
         if not folder_text:
             return f"0/{len(ts_names)} tomogram masks found.", {}
         folder = Path(folder_text)
         if not folder.exists():
             return f"0/{len(ts_names)} tomogram masks found.", {}
+        selection_rows = selections or [(None, ts_name) for ts_name in ts_names]
+        groundtruth_names, _owner_map = self._ts_groundtruth_index()
+        for _dataset_name, ts_name in selection_rows:
+            stem = self._mask_matching_stem(ts_name)
+            if stem and not any(stem.casefold() == known.casefold() for known in groundtruth_names):
+                groundtruth_names.append(stem)
+        groundtruth_names = sorted(set(groundtruth_names), key=lambda value: (-len(value), value.casefold()))
+        matches = [
+            item
+            for item in folder.iterdir()
+            if item.is_file()
+            and item.suffix.lower() == ".mrc"
+        ]
+        indexed_matches = self._indexed_mask_matches(matches, groundtruth_names)
         mapping: dict[str, Path] = {}
         found = 0
-        for ts_name in ts_names:
-            matches = [
-                item
-                for item in folder.iterdir()
-                if item.is_file()
-                and item.suffix.lower() == ".mrc"
-            ]
-            top_matches = best_matching_paths_for_ts(matches, ts_name, ts_names)
-            if not top_matches:
+        for _dataset_name, ts_name in selection_rows:
+            stem = self._mask_matching_stem(ts_name)
+            matched_ts = self._unique_ts_groundtruth_match(stem, groundtruth_names) or stem
+            candidate_paths = indexed_matches.get(matched_ts.casefold(), [])
+            if not candidate_paths:
                 continue
-            if len(top_matches) > 1:
+            if len(candidate_paths) > 1:
                 return "Warning: Non-unique naming", {}
-            mapping[ts_name] = top_matches[0]
+            mapping[ts_name] = candidate_paths[0]
             found += 1
         return f"{found}/{len(ts_names)} tomogram masks found.", mapping
 
@@ -2025,7 +2146,12 @@ class TomogramsTab(SidebarTab):
             return commands, errors
 
         ts_names = [entry["ts_name"] for entry in self.selected_entries]
-        mask_message, mask_map = self._matching_mask_message(self.pytom_tomogram_mask_var.get().strip(), ts_names)
+        mask_selections = [(entry["dataset_name"], entry["ts_name"]) for entry in self.selected_entries]
+        mask_message, mask_map = self._matching_mask_message(
+            self.pytom_tomogram_mask_var.get().strip(),
+            ts_names,
+            mask_selections,
+        )
         self.pytom_found_masks_var.set(mask_message)
         if mask_message == "Warning: Non-unique naming":
             errors.append(mask_message)
@@ -2197,15 +2323,23 @@ class TomogramsTab(SidebarTab):
         if not number_of_particles:
             errors.append("Number of particles is missing.")
             return commands, errors
-        ts_names = [job_file.stem.removesuffix("_job") for job_file in job_files]
-        mask_message, mask_map = self._matching_mask_message(self.extract_tomogram_mask_var.get().strip(), ts_names)
+        job_identities = self._extract_job_identities(job_files)
+        ts_names = [ts_name for _job_file, _dataset, ts_name in job_identities]
+        mask_selections = [
+            (dataset.dataset_name if dataset is not None else None, ts_name)
+            for _job_file, dataset, ts_name in job_identities
+        ]
+        mask_message, mask_map = self._matching_mask_message(
+            self.extract_tomogram_mask_var.get().strip(),
+            ts_names,
+            mask_selections,
+        )
         self.extract_found_masks_var.set(mask_message)
         if mask_message == "Warning: Non-unique naming":
             errors.append(mask_message)
             return commands, errors
-        for job_file in job_files:
-            ts_name = job_file.stem.removesuffix("_job")
-            dataset = find_dataset_for_ts_name(self.app.project, ts_name)
+        for job_file, dataset, ts_name in job_identities:
+            tomogram_mask, ignore_tomogram_mask = self._extract_tomogram_mask_values(mask_map, ts_name)
             spec = {
                 "job_name": "PyTom: Extract coordinates",
                 "ts_name": ts_name,
@@ -2215,8 +2349,8 @@ class TomogramsTab(SidebarTab):
                 "number_of_false_positives": self.extract_number_of_false_positives_var.get().strip(),
                 "particle_diameter": self.extract_particle_diameter_var.get().strip(),
                 "cut_off": self.extract_cut_off_var.get().strip(),
-                "tomogram_mask": str(mask_map.get(ts_name, "")),
-                "ignore_tomogram_mask": "true" if self.extract_ignore_tomogram_mask_var.get() else "",
+                "tomogram_mask": tomogram_mask,
+                "ignore_tomogram_mask": ignore_tomogram_mask,
                 "tophat_filter": "true" if self.extract_tophat_filter_var.get() else "",
                 "tophat_connectivity": self.extract_tophat_connectivity_var.get().strip(),
                 "relion5_compat": "true" if self.extract_relion5_compat_var.get() else "",
@@ -3315,13 +3449,52 @@ class TomogramsTab(SidebarTab):
         )
         self._toggle_slurm_controls()
 
-    def _apply_scheduled_entry_parameters(self, entry: JobHistoryEntry) -> None:
-        params = entry.parameters
-        self.selected_entries = [
+    def _processed_ts_entries_from_history(self, entry: JobHistoryEntry) -> list[dict[str, str]]:
+        processed_payload = entry.artifacts.get("processed_ts", [])
+        rows: list[dict[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        if isinstance(processed_payload, list):
+            for item in processed_payload:
+                if not isinstance(item, dict):
+                    continue
+                dataset_name = str(item.get("dataset_name", "")).strip()
+                ts_name = str(item.get("ts_name", "")).strip()
+                if not dataset_name and not ts_name:
+                    continue
+                key = (dataset_name, ts_name)
+                if key in seen:
+                    continue
+                seen.add(key)
+                rows.append({"dataset_name": dataset_name, "ts_name": ts_name})
+        if rows:
+            return rows
+
+        ts_name = entry.parameters.get("ts_name", "").strip()
+        if ts_name and not ts_name.endswith(" TS selected"):
+            return [{"dataset_name": entry.dataset_name or "", "ts_name": ts_name}]
+        return []
+
+    def _selected_entries_from_parameters(self, params: dict[str, str]) -> list[dict[str, str]]:
+        raw_payload = params.get("selected_entries", "[]")
+        try:
+            payload = json.loads(raw_payload)
+        except (TypeError, json.JSONDecodeError):
+            return []
+        if not isinstance(payload, list):
+            return []
+        return [
             {"dataset_name": str(item.get("dataset_name", "")), "ts_name": str(item.get("ts_name", ""))}
-            for item in json.loads(params.get("selected_entries", "[]"))
+            for item in payload
             if isinstance(item, dict)
         ]
+
+    def _apply_scheduled_entry_parameters(self, entry: JobHistoryEntry, *, update_ts_list: bool = True) -> None:
+        params = entry.parameters
+        if update_ts_list:
+            selected_entries = self._selected_entries_from_parameters(params)
+            if not selected_entries:
+                selected_entries = self._processed_ts_entries_from_history(entry)
+            self.selected_entries = selected_entries
         job_name = entry.job_name
         if job_name == "CryoLithe: Denoising":
             self.cryolithe_model_dir_var.set(params.get("model_dir", ""))
@@ -3424,6 +3597,29 @@ class TomogramsTab(SidebarTab):
         self.slurm_profile_var.set(entry.slurm_profile)
         self.slurm_overrides_ui.rebuild(params, preserve_existing=False)
         self._toggle_slurm_controls()
+
+    def _copy_selected_history_parameters(self) -> None:
+        selected = self._selected_history_entry()
+        if selected is None:
+            messagebox.showinfo("Copy job parameters", "Please select a job history entry first.")
+            return
+        _dataset, entry = selected
+        if entry.job_name not in self.job_catalog:
+            messagebox.showinfo(
+                "Copy job parameters",
+                "The selected history entry is not a TS job with editable parameters.",
+            )
+            return
+
+        update_ts_list = messagebox.askyesno("Update TS processing list?", "Update TS processing list?")
+        self.job_type_var.set(entry.job_name)
+        self._on_job_type_changed()
+        self._apply_scheduled_entry_parameters(entry, update_ts_list=update_ts_list)
+        if update_ts_list:
+            self._persist_selection()
+            self._refresh_table()
+        self._update_active_preview()
+        self.app.status_var.set(f"Copied parameters from history entry: {entry.job_name}")
 
     def _resolve_scheduled_entry(
         self,
@@ -4172,17 +4368,58 @@ class TomogramsTab(SidebarTab):
                 self.app.status_var.set(f"Submitted {len(scheduled_entries)} scheduled tomogram job(s) collectively")
                 return
 
+        has_local_commands = not force_slurm and any(entry.execution_mode != "slurm" for _dataset, entry in scheduled_entries)
+        output_window = (
+            BatchCommandOutputWindow(self.app.root, title="Scheduled tomogram job output")
+            if has_local_commands
+            else None
+        )
+
         def worker(on_queue_finished=None) -> None:
             failures: list[str] = []
-            log_counter = 1
-            total_resolved_commands = 0
-            if not force_slurm:
+            resolved_entries: list[
+                tuple[
+                    DatasetRecord,
+                    JobHistoryEntry,
+                    list[tuple[DatasetRecord | None, dict[str, str], str]],
+                    list[str],
+                ]
+            ] = []
+            output_job_ids: dict[tuple[str, int], str] = {}
+            try:
+                output_counter = 1
                 for dataset, entry in scheduled_entries:
-                    commands, _errors = self._resolved_scheduled_entry_commands(dataset, entry)
-                    total_resolved_commands += max(len(commands), 1)
-            for dataset, entry in scheduled_entries:
-                try:
                     commands, errors = self._resolved_scheduled_entry_commands(dataset, entry)
+                    resolved_entries.append((dataset, entry, commands, errors))
+                    if output_window is not None and entry.execution_mode != "slurm":
+                        for command_index, (resolved_dataset, spec, command) in enumerate(commands, start=1):
+                            current_dataset_name = (
+                                resolved_dataset.dataset_name
+                                if resolved_dataset is not None
+                                else entry.dataset_name or "unknown_dataset"
+                            )
+                            job_id = f"tomogram-scheduled-{output_counter}"
+                            output_job_ids[(entry.entry_id, command_index)] = job_id
+                            label_bits = [
+                                bit
+                                for bit in (
+                                    current_dataset_name,
+                                    spec.get("ts_name", ""),
+                                    entry.job_name,
+                                )
+                                if bit
+                            ]
+                            label = " / ".join(label_bits) if label_bits else entry.job_name
+                            if len(commands) > 1:
+                                label = f"{label} ({command_index}/{len(commands)})"
+                            output_window.queue_job(job_id, label, command)
+                            output_counter += 1
+            except Exception as exc:
+                failures.append(str(exc))
+            for dataset, entry, commands, errors in resolved_entries:
+                if failures:
+                    break
+                try:
                     if errors and not self.app.is_debug_mode_enabled():
                         failures.append(f"{entry.dataset_name}/{entry.parameters.get('ts_name', '-')}: " + "; ".join(errors))
                         break
@@ -4236,7 +4473,7 @@ class TomogramsTab(SidebarTab):
                                 )
                                 break
                         continue
-                    for resolved_dataset, spec, command in commands:
+                    for command_index, (resolved_dataset, spec, command) in enumerate(commands, start=1):
                         current_dataset_name = (
                             resolved_dataset.dataset_name if resolved_dataset is not None else entry.dataset_name or "unknown_dataset"
                         )
@@ -4255,16 +4492,18 @@ class TomogramsTab(SidebarTab):
                         )
                         if cwd and not self.app.is_debug_mode_enabled():
                             Path(cwd).mkdir(parents=True, exist_ok=True)
-                        process = self.app.start_managed_process_with_log(
+                        batch_job_id = output_job_ids.get((entry.entry_id, command_index), "")
+                        if output_window is not None and batch_job_id:
+                            output_window.set_job_running(batch_job_id)
+                        process = self.app.start_managed_process_for_output(
                             command,
                             cwd=cwd,
-                            title=(
-                                f"Scheduled tomogram job output ({log_counter}/{total_resolved_commands}): "
-                                f"{entry.job_name}"
-                            ),
                         )
-                        log_counter += 1
+                        if output_window is not None and batch_job_id:
+                            output_window.attach_process(batch_job_id, process)
                         return_code = self.app.wait_managed_process(process)
+                        if output_window is not None and batch_job_id:
+                            output_window.set_job_finished(batch_job_id, return_code)
                         if self.app.abort_requested():
                             failures.append(f"{current_dataset_name}/{spec.get('ts_name', '-')}: aborted")
                             break
@@ -4279,6 +4518,8 @@ class TomogramsTab(SidebarTab):
                 if self.app.abort_requested():
                     failures.append(f"{entry.dataset_name}/{entry.parameters.get('ts_name', '-')}: aborted")
                     break
+            if output_window is not None:
+                output_window.finish_batch(failures)
             self.app.root.after(
                 0,
                 lambda: self._finish_tomogram_queue_run(len(scheduled_entries), failures, on_queue_finished),

@@ -4,6 +4,7 @@ import threading
 from datetime import datetime, timezone
 from typing import Callable
 
+from cryoet_organizer.log_window import BatchCommandOutputWindow
 from cryoet_organizer.project import JobHistoryEntry
 from cryoet_organizer.slurm import SlurmSubmissionResult, wait_for_slurm_job
 
@@ -29,7 +30,11 @@ def build_slurm_override_metadata(
 
 
 def slurm_override_payload(parameters: dict[str, str]) -> dict[str, str]:
-    overrides = {key: value for key, value in parameters.items() if key.startswith("slurm_header__")}
+    overrides = {
+        key.removeprefix("slurm_header__"): value
+        for key, value in parameters.items()
+        if key.startswith("slurm_header__")
+    }
     if "slurm_memory_choice" in parameters:
         overrides["slurm_memory_choice"] = parameters.get("slurm_memory_choice", "")
     if overrides:
@@ -105,9 +110,28 @@ def execute_scheduled_history_entries(
     on_entry_completed: Callable[[JobHistoryEntry], None] | None = None,
     on_finished: Callable[[int, list[str]], None],
 ) -> None:
+    local_entries = [
+        entry
+        for entry in entries
+        if not (force_slurm or entry.execution_mode == "slurm")
+    ]
+    output_window = None
+    output_job_ids: dict[str, str] = {}
+    if local_entries:
+        output_window = BatchCommandOutputWindow(app.root, title="Scheduled job output")
+        for index, entry in enumerate(local_entries, start=1):
+            job_id = f"scheduled-{index}"
+            output_job_ids[entry.entry_id] = job_id
+            label_bits = [
+                bit
+                for bit in (entry.dataset_name, entry.parameters.get("ts_name", ""), entry.job_name)
+                if bit
+            ]
+            label = " / ".join(label_bits) if label_bits else entry.job_name
+            output_window.add_job(job_id, label, entry.command)
+
     def worker() -> None:
         failures: list[str] = []
-        log_counter = 1
         for entry in entries:
             started_at = history_timestamp_now()
             try:
@@ -140,6 +164,7 @@ def execute_scheduled_history_entries(
                             app.root.after(0, lambda current_entry=entry: on_entry_completed(current_entry))
                 else:
                     activation_command = app.resolve_environment_activation(entry.environment_title)
+                    batch_job_id = output_job_ids.get(entry.entry_id, "")
                     app.root.after(
                         0,
                         lambda current_entry=entry, current_time=started_at: on_entry_started(
@@ -147,14 +172,18 @@ def execute_scheduled_history_entries(
                             current_time,
                         ),
                     )
-                    process = app.start_managed_process_with_log(
+                    if output_window is not None and batch_job_id:
+                        output_window.set_job_running(batch_job_id)
+                    process = app.start_managed_process_for_output(
                         entry.command,
                         cwd=cwd,
-                        title=f"Scheduled job output ({log_counter}/{len(entries)}): {entry.job_name}",
                         activation_command=activation_command,
                     )
-                    log_counter += 1
+                    if output_window is not None and batch_job_id:
+                        output_window.attach_process(batch_job_id, process)
                     return_code = app.wait_managed_process(process)
+                    if output_window is not None and batch_job_id:
+                        output_window.set_job_finished(batch_job_id, return_code)
                     if app.abort_requested():
                         failures.append(f"{entry.job_name}: aborted")
                         break
@@ -170,6 +199,8 @@ def execute_scheduled_history_entries(
                 failures.append(f"{entry.job_name}: aborted")
                 break
 
+        if output_window is not None:
+            output_window.finish_batch(failures)
         app.root.after(0, lambda: on_finished(len(entries), failures))
 
     threading.Thread(target=worker, daemon=True).start()
@@ -186,15 +217,28 @@ def execute_command_sequence(
     on_completed: Callable[[dict[str, object]], None] | None,
     on_finished: Callable[[int, list[str]], None],
 ) -> None:
+    output_window = None
+    if not use_slurm and items:
+        output_window = BatchCommandOutputWindow(app.root, title="Command output")
+        for index, item in enumerate(items, start=1):
+            job_id = f"job-{index}"
+            item["_batch_output_id"] = job_id
+            dataset_name = str(item.get("dataset_name", "")).strip()
+            ts_name = str(item.get("ts_name", "")).strip()
+            job_name = str(item.get("job_name", "")).strip() or "job"
+            label_bits = [bit for bit in (dataset_name, ts_name, job_name) if bit]
+            label = " / ".join(label_bits) if label_bits else job_name
+            output_window.add_job(job_id, label, str(item.get("command", "")))
+
     def worker() -> None:
         failures: list[str] = []
-        log_counter = 1
         for item in items:
             command = str(item.get("command", "")).strip()
             dataset_name = str(item.get("dataset_name", "")).strip()
             job_name = str(item.get("job_name", "")).strip() or "job"
             cwd = str(item.get("cwd", "")).strip() or None
             error_label = str(item.get("error_label", "")).strip() or job_name
+            batch_job_id = str(item.get("_batch_output_id", "")).strip()
             try:
                 if use_slurm:
                     result = app.submit_slurm_command(
@@ -212,14 +256,18 @@ def execute_command_sequence(
                         )
                 else:
                     activation_command = str(item.get("activation_command", "")).strip()
-                    process = app.start_managed_process_with_log(
+                    if output_window is not None and batch_job_id:
+                        output_window.set_job_running(batch_job_id)
+                    process = app.start_managed_process_for_output(
                         command,
                         cwd=cwd,
-                        title=f"Command output ({log_counter}/{len(items)}): {job_name}",
                         activation_command=activation_command,
                     )
-                    log_counter += 1
+                    if output_window is not None and batch_job_id:
+                        output_window.attach_process(batch_job_id, process)
                     return_code = app.wait_managed_process(process)
+                    if output_window is not None and batch_job_id:
+                        output_window.set_job_finished(batch_job_id, return_code)
                     if app.abort_requested():
                         failures.append(f"{error_label}: aborted")
                         break
@@ -235,6 +283,8 @@ def execute_command_sequence(
                 failures.append(f"{error_label}: aborted")
                 break
 
+        if output_window is not None:
+            output_window.finish_batch(failures)
         app.root.after(0, lambda: on_finished(len(items), failures))
 
     threading.Thread(target=worker, daemon=True).start()

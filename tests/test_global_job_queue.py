@@ -44,6 +44,22 @@ class GlobalJobQueueTests(unittest.TestCase):
 
         self.assertEqual([ref.entry.job_name for ref in refs], ["queued", "finished"])
 
+    def test_default_global_order_places_recent_completed_jobs_first_after_scheduled(self) -> None:
+        project = ProjectData()
+        dataset = _dataset("ds1")
+        older = create_history_entry(action="ran", group="", job_name="older", command="true")
+        older.timestamp = "2026-08-03T10:00:00+00:00"
+        newer = create_history_entry(action="ran", group="", job_name="newer", command="true")
+        newer.timestamp = "2026-08-03T11:00:00+00:00"
+        queued = create_history_entry(action="scheduled", group="", job_name="queued", command="echo queued", scheduled=True)
+        queued.artifacts["queue_order"] = 1
+        dataset.job_history.extend([older, newer, queued])
+        project.datasets.append(dataset)
+
+        refs = iter_job_history_refs(project)
+
+        self.assertEqual([ref.entry.job_name for ref in refs], ["queued", "newer", "older"])
+
     def test_global_refs_dedupe_shared_grouped_history_entries(self) -> None:
         project = ProjectData()
         first = _dataset("ds1")

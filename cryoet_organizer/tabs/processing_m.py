@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import shlex
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
@@ -962,10 +963,11 @@ class ProcessingMTab(SidebarTab):
         self.slurm_mem_per_cpu_var.set(entry.parameters.get("slurm_mem_per_cpu", ""))
         self.slurm_mem_mode_var.set(entry.parameters.get("slurm_mem_mode", self.slurm_mem_mode_var.get() or "mem"))
         self.slurm_overrides_ui.rebuild(entry.parameters, preserve_existing=False)
-        for flag_name, variable in self.parameter_vars.items():
-            if flag_name not in entry.parameters:
+        for flag in self._active_job_flags():
+            variable = self.parameter_vars.get(flag.name)
+            if variable is None:
                 continue
-            value = entry.parameters[flag_name]
+            value = self._history_parameter_value(entry, flag)
             if isinstance(variable, tk.BooleanVar):
                 variable.set(str(value).lower() in {"1", "true", "yes", "on"})
             else:
@@ -984,11 +986,35 @@ class ProcessingMTab(SidebarTab):
                 continue
             current = variable.get()
             if flag.widget == "bool":
-                if current:
-                    values[flag.name] = "true"
-            elif str(current).strip():
+                values[flag.name] = "true" if current else "false"
+            else:
                 values[flag.name] = str(current).strip()
         return values
+
+    def _history_parameter_value(self, entry: JobHistoryEntry, flag: MToolFlag) -> str:
+        if flag.name in entry.parameters:
+            return entry.parameters[flag.name]
+        parameter_names = self._history_parameter_names(flag)
+        tokens = self._history_command_tokens(entry.command)
+        if flag.widget == "bool":
+            return "true" if any(name and name in tokens for name in parameter_names) else "false"
+        for index, token in enumerate(tokens):
+            if token not in parameter_names:
+                continue
+            if index + 1 < len(tokens):
+                return tokens[index + 1]
+            return ""
+        return ""
+
+    def _history_parameter_names(self, flag: MToolFlag) -> set[str]:
+        names = {flag.name, self._display_parameter_name(flag)}
+        return {name for name in names if name}
+
+    def _history_command_tokens(self, command: str) -> list[str]:
+        try:
+            return shlex.split(command)
+        except ValueError:
+            return command.split()
 
     def _job_environment_default(self) -> str:
         if self.current_job is None:

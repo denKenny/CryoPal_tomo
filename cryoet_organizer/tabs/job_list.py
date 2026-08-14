@@ -21,7 +21,9 @@ from cryoet_organizer.job_queue import (
     ref_cwd,
     ref_dataset_name,
     remove_job_ref_from_project,
+    reverse_timestamp_sort_key,
 )
+from cryoet_organizer.log_window import BatchCommandOutputWindow
 from cryoet_organizer.project import JobHistoryEntry, ProjectData
 from cryoet_organizer.scheduled_slurm_dialog import CollectiveSlurmSubmissionDialog, ask_scheduled_slurm_mode
 from cryoet_organizer.slurm import SlurmSubmissionResult, find_slurm_profile, render_sbatch_script, wait_for_slurm_job
@@ -231,7 +233,7 @@ class JobListTab(SidebarTab):
             queue_order = int(ref.entry.artifacts.get("queue_order", 0))
         except Exception:
             queue_order = 10_000_000
-        return (0, queue_order) if is_scheduled_history_entry(ref.entry) else (1, ref.entry.timestamp)
+        return (0, queue_order) if is_scheduled_history_entry(ref.entry) else (1, reverse_timestamp_sort_key(ref.entry.timestamp))
 
     def _sort_by(self, column: str) -> None:
         if self.sort_column == column:
@@ -486,16 +488,45 @@ class JobListTab(SidebarTab):
     ) -> None:
         running_ids = [ref.entry_id for ref in refs]
         override_payload = slurm_override_payload(forced_overrides)
+        has_local_commands = not force_slurm and any(ref.entry.execution_mode != "slurm" for ref in refs)
+        output_window = (
+            BatchCommandOutputWindow(self.app.root, title="Scheduled job output")
+            if has_local_commands
+            else None
+        )
 
         def worker() -> None:
             failures: list[str] = []
             resolved_refs: list[tuple[ScheduledJobRef, list[tuple[str | None, str, str]]]] = []
             total_commands = 0
+            output_job_ids: dict[tuple[str, int], str] = {}
             try:
                 for ref in refs:
                     items = self._resolved_command_items_for_ref(ref)
                     resolved_refs.append((ref, items))
                     total_commands += len(items)
+                if output_window is not None:
+                    output_counter = 1
+                    for ref, command_items in resolved_refs:
+                        if ref.entry.execution_mode == "slurm":
+                            continue
+                        for command_index, (_cwd, dataset_name, command) in enumerate(command_items, start=1):
+                            job_id = f"scheduled-{output_counter}"
+                            output_job_ids[(ref.entry_id, command_index)] = job_id
+                            label_bits = [
+                                bit
+                                for bit in (
+                                    dataset_name or ref_dataset_name(ref),
+                                    ref.entry.parameters.get("ts_name", ""),
+                                    ref.entry.job_name,
+                                )
+                                if bit
+                            ]
+                            label = " / ".join(label_bits) if label_bits else ref.entry.job_name
+                            if len(command_items) > 1:
+                                label = f"{label} ({command_index}/{len(command_items)})"
+                            output_window.queue_job(job_id, label, command)
+                            output_counter += 1
             except Exception as exc:
                 failures.append(str(exc))
             log_counter = 1
@@ -548,15 +579,21 @@ class JobListTab(SidebarTab):
                             current_command,
                         ),
                     )
-                    for cwd, _dataset_name, command in command_items:
-                        process = self.app.start_managed_process_with_log(
+                    for command_index, (cwd, _dataset_name, command) in enumerate(command_items, start=1):
+                        batch_job_id = output_job_ids.get((ref.entry_id, command_index), "")
+                        if output_window is not None and batch_job_id:
+                            output_window.set_job_running(batch_job_id)
+                        process = self.app.start_managed_process_for_output(
                             command,
                             cwd=cwd,
-                            title=f"Scheduled job output ({log_counter}/{total_commands}): {entry.job_name}",
                             activation_command=activation_command,
                         )
+                        if output_window is not None and batch_job_id:
+                            output_window.attach_process(batch_job_id, process)
                         log_counter += 1
                         return_code = self.app.wait_managed_process(process)
+                        if output_window is not None and batch_job_id:
+                            output_window.set_job_finished(batch_job_id, return_code)
                         if self.app.abort_requested():
                             failures.append(f"{entry.job_name}: aborted")
                             break
@@ -569,6 +606,9 @@ class JobListTab(SidebarTab):
                 if self.app.abort_requested():
                     failures.append(f"{entry.job_name}: aborted")
                     break
+
+            if output_window is not None:
+                output_window.finish_batch(failures)
 
             def finish() -> None:
                 self.app.clear_history_entries_running(running_ids)

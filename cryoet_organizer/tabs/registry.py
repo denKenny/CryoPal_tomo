@@ -6,6 +6,7 @@ from cryoet_organizer.tabs.particles import ParticlesTab
 from cryoet_organizer.tabs.processing import ProcessingTab
 from cryoet_organizer.tabs.processing_m import ProcessingMTab
 from cryoet_organizer.tabs.project import ProjectOverviewTab
+from cryoet_organizer.tabs.relion_projects import RelionProjectsTab
 from cryoet_organizer.tabs.shortcuts import ShortcutsTab
 from cryoet_organizer.tabs.tomograms import TomogramsTab
 
@@ -20,6 +21,7 @@ def get_tab_classes() -> list[type]:
         TomogramsTab,
         ParticlesTab,
         CustomTab,
+        RelionProjectsTab,
         ShortcutsTab,
         FileRegistryTab,
     ]

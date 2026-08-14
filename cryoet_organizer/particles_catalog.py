@@ -122,10 +122,35 @@ PARTICLE_JOBS: tuple[CatalogJob, ...] = (
                 description="Pixel size of the generated extraction masks.",
             ),
             CatalogField(
+                "mask_mode",
+                "Mask out mode",
+                default_value="radius",
+                description="Masking mode: radius uses a cleanup sphere, shape uses an oriented input MRC mask.",
+            ),
+            CatalogField(
                 "distance_cleanup_angstrom",
                 "Distance cleanup in A",
                 required=True,
                 description="3D radius around each particle coordinate that will be set to zero.",
+            ),
+            CatalogField(
+                "shape_mask",
+                "Input shape mask",
+                widget="path",
+                description="3D MRC shape mask to rotate by RELION Euler angles and stamp into the output masks.",
+            ),
+            CatalogField(
+                "binarize_input",
+                "Binarize input",
+                widget="bool",
+                default_value="true",
+                description="Treat positive input shape-mask voxels as 1 and all other voxels as 0.",
+            ),
+            CatalogField(
+                "rescale_to_match_angpix",
+                "Rescale to match Angpix",
+                widget="bool",
+                description="Scale the input shape mask from its MRC header voxel size to the output mask Angpix.",
             ),
             CatalogField(
                 "output_directory",

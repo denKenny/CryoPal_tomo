@@ -14,6 +14,7 @@ SETTINGS_SHELL_ORDER: tuple[str, ...] = (
     "environments",
     "custom_job_types",
     "workflows",
+    "relion_projects",
     "shortcuts",
     "appearance",
 )

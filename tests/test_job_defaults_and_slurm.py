@@ -9,8 +9,10 @@ from cryoet_organizer.job_defaults import (
     get_project_job_default_overrides,
     set_project_job_default_overrides,
 )
+from cryoet_organizer.job_execution import slurm_override_payload
 from cryoet_organizer.project import ProjectData
 from cryoet_organizer.slurm import (
+    SlurmHeaderField,
     SlurmProfile,
     get_project_slurm_profiles,
     render_sbatch_script,
@@ -53,6 +55,34 @@ class JobDefaultsAndSlurmTests(unittest.TestCase):
         self.assertIn("#SBATCH --partition=gpu", script)
         self.assertIn("#SBATCH --gres=gpu:1", script)
         self.assertIn("cd /tmp/work", script)
+
+    def test_encoded_slurm_header_overrides_render_as_sbatch_values(self) -> None:
+        profile = SlurmProfile(
+            name="GPU",
+            header_fields=[
+                SlurmHeaderField(key="partition", flag="--partition", description="partition", value=""),
+                SlurmHeaderField(key="gres", flag="--gres", description="GPU resources", value=""),
+                SlurmHeaderField(key="job_name", flag="-J", description="job name", value="{job_name}"),
+            ],
+        )
+
+        script = render_sbatch_script(
+            command="echo hello",
+            profile=profile,
+            cwd=None,
+            dataset_name="DS",
+            job_name="my_job",
+            overrides=slurm_override_payload(
+                {
+                    "slurm_header__partition": "gpu-long",
+                    "slurm_header__gres": "gpu:2",
+                }
+            ),
+        )
+
+        self.assertIn("#SBATCH --partition=gpu-long", script)
+        self.assertIn("#SBATCH --gres=gpu:2", script)
+        self.assertIn("#SBATCH -J my_job", script)
 
 
 if __name__ == "__main__":

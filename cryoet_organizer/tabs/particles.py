@@ -1,5 +1,6 @@
 from __future__ import annotations
 import re
+import shlex
 import subprocess
 import threading
 import tkinter as tk
@@ -8,7 +9,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
-from cryoet_organizer.dialogs import bind_scrollable_canvas, fit_outer_canvas_to_viewport, show_detail_dialog
+from cryoet_organizer.dialogs import (
+    autosize_detail_tree_columns,
+    bind_scrollable_canvas,
+    fit_outer_canvas_to_viewport,
+    show_detail_dialog,
+    technical_font_name,
+)
 from cryoet_organizer.environments import environment_titles
 from cryoet_organizer.executables import WARPTOOLS_EXECUTABLE, resolve_executable_command
 from cryoet_organizer.extraction_mask import (
@@ -172,6 +179,10 @@ class ParticlesTab(SidebarTab):
         self.extraction_input_angpix_var = tk.StringVar()
         self.extraction_output_angpix_var = tk.StringVar()
         self.extraction_distance_ang_var = tk.StringVar()
+        self.extraction_mask_mode_var = tk.StringVar(value="radius")
+        self.extraction_shape_mask_var = tk.StringVar()
+        self.extraction_binarize_shape_var = tk.BooleanVar(value=True)
+        self.extraction_rescale_shape_var = tk.BooleanVar(value=False)
         self.extraction_output_dir_var = tk.StringVar()
         self.extraction_dim_x_var = tk.StringVar()
         self.extraction_dim_y_var = tk.StringVar()
@@ -879,16 +890,64 @@ class ParticlesTab(SidebarTab):
             sticky="ew",
             pady=(0, 8),
         )
-        ttk.Label(extraction_parameters, text="Distance cleanup in A").grid(row=2, column=0, sticky="w", pady=(0, 4))
-        ttk.Entry(extraction_parameters, textvariable=self.extraction_distance_ang_var).grid(
-            row=2,
+        ttk.Label(extraction_parameters, text="Mask out mode").grid(row=2, column=0, sticky="w", pady=(0, 4))
+        extraction_mode_row = ttk.Frame(extraction_parameters)
+        extraction_mode_row.grid(row=2, column=1, sticky="ew", pady=(0, 8))
+        ttk.Radiobutton(
+            extraction_mode_row,
+            text="Mask out by radius",
+            variable=self.extraction_mask_mode_var,
+            value="radius",
+            command=self._on_extraction_mask_mode_changed,
+        ).grid(row=0, column=0, sticky="w", padx=(0, 12))
+        ttk.Radiobutton(
+            extraction_mode_row,
+            text="Mask out by shape",
+            variable=self.extraction_mask_mode_var,
+            value="shape",
+            command=self._on_extraction_mask_mode_changed,
+        ).grid(row=0, column=1, sticky="w")
+        self.extraction_distance_label = ttk.Label(extraction_parameters, text="Distance cleanup in A")
+        self.extraction_distance_label.grid(row=3, column=0, sticky="w", pady=(0, 4))
+        self.extraction_distance_entry = ttk.Entry(extraction_parameters, textvariable=self.extraction_distance_ang_var)
+        self.extraction_distance_entry.grid(
+            row=3,
             column=1,
             sticky="ew",
             pady=(0, 8),
         )
-        ttk.Label(extraction_parameters, text="Tomogram dimensions X/Y/Z").grid(row=3, column=0, sticky="w", pady=(0, 4))
+        self.extraction_shape_label = ttk.Label(extraction_parameters, text="Input shape mask (*.mrc)")
+        self.extraction_shape_label.grid(row=4, column=0, sticky="w", pady=(0, 4))
+        self.extraction_shape_row = ttk.Frame(extraction_parameters)
+        self.extraction_shape_row.grid(row=4, column=1, sticky="ew", pady=(0, 8))
+        self.extraction_shape_row.columnconfigure(0, weight=1)
+        self.extraction_shape_entry = ttk.Entry(self.extraction_shape_row, textvariable=self.extraction_shape_mask_var)
+        self.extraction_shape_entry.grid(row=0, column=0, sticky="ew")
+        self.extraction_shape_browse = ttk.Button(
+            self.extraction_shape_row,
+            text="Browse...",
+            command=self._browse_extraction_shape_mask,
+        )
+        self.extraction_shape_browse.grid(row=0, column=1, padx=(8, 0))
+        self.extraction_shape_options_row = ttk.Frame(extraction_parameters)
+        self.extraction_shape_options_row.grid(row=5, column=1, sticky="ew", pady=(0, 8))
+        self.extraction_binarize_shape_check = ttk.Checkbutton(
+            self.extraction_shape_options_row,
+            text="Binarize input",
+            variable=self.extraction_binarize_shape_var,
+            command=self._update_extraction_mask_preview,
+        )
+        self.extraction_binarize_shape_check.grid(row=0, column=0, sticky="w", padx=(0, 12))
+        self.extraction_rescale_shape_check = ttk.Checkbutton(
+            self.extraction_shape_options_row,
+            text="Rescale to match Angpix",
+            variable=self.extraction_rescale_shape_var,
+            command=self._update_extraction_mask_preview,
+        )
+        self.extraction_rescale_shape_check.grid(row=0, column=1, sticky="w")
+        ttk.Label(extraction_parameters, text="Tomogram dimensions X/Y/Z").grid(row=6, column=0, sticky="w", pady=(0, 4))
         dimension_row = ttk.Frame(extraction_parameters)
-        dimension_row.grid(row=3, column=1, sticky="ew", pady=(0, 8))
+        dimension_row.grid(row=6, column=1, sticky="ew", pady=(0, 8))
         for column in range(3):
             dimension_row.columnconfigure(column, weight=1)
         ttk.Entry(dimension_row, textvariable=self.extraction_dim_x_var, width=12).grid(row=0, column=0, sticky="ew")
@@ -899,12 +958,14 @@ class ParticlesTab(SidebarTab):
             text="Add to pre-existing",
             variable=self.extraction_add_existing_var,
             command=self._update_extraction_mask_preview,
-        ).grid(row=4, column=0, columnspan=2, sticky="w", pady=(0, 8))
+        ).grid(row=7, column=0, columnspan=2, sticky="w", pady=(0, 8))
+        self._on_extraction_mask_mode_changed()
 
         self.extraction_input_star_var.trace_add("write", lambda *_args: self._on_extraction_input_star_changed())
         self.extraction_input_angpix_var.trace_add("write", lambda *_args: self._update_extraction_mask_preview())
         self.extraction_output_angpix_var.trace_add("write", lambda *_args: self._on_extraction_output_angpix_changed())
         self.extraction_distance_ang_var.trace_add("write", lambda *_args: self._update_extraction_mask_preview())
+        self.extraction_shape_mask_var.trace_add("write", lambda *_args: self._update_extraction_mask_preview())
         self.extraction_output_dir_var.trace_add("write", lambda *_args: self._update_extraction_mask_preview())
         self.extraction_dim_x_var.trace_add("write", lambda *_args: self._update_extraction_mask_preview())
         self.extraction_dim_y_var.trace_add("write", lambda *_args: self._update_extraction_mask_preview())
@@ -1160,7 +1221,7 @@ class ParticlesTab(SidebarTab):
 
         history_actions = ttk.Frame(history_box)
         history_actions.grid(row=1, column=0, sticky="ew", pady=(8, 0))
-        history_actions.columnconfigure(2, weight=1)
+        history_actions.columnconfigure(3, weight=1)
         ttk.Button(
             history_actions,
             text="Show selected job details",
@@ -1173,9 +1234,14 @@ class ParticlesTab(SidebarTab):
         ).grid(row=0, column=1, sticky="w", padx=(8, 0))
         ttk.Button(
             history_actions,
+            text="Copy job parameters",
+            command=self._copy_selected_history_parameters,
+        ).grid(row=0, column=2, sticky="w", padx=(8, 0))
+        ttk.Button(
+            history_actions,
             text="Global Job List",
             command=self.app.open_global_job_list,
-        ).grid(row=0, column=3, sticky="e", padx=(8, 0))
+        ).grid(row=0, column=4, sticky="e", padx=(8, 0))
         self.history_table.bind("<Double-1>", self._show_selected_history_details)
 
         self._build_parameter_form()
@@ -1724,6 +1790,51 @@ class ParticlesTab(SidebarTab):
                 "",
             )
         )
+        self.extraction_mask_mode_var.set(
+            resolve_job_default(
+                self.app.project,
+                "Particles",
+                "Create tomogram extraction-mask from .star-file",
+                "create_tomogram_extraction_mask_from_star",
+                "mask_mode",
+                "radius",
+            )
+            or "radius"
+        )
+        if self.extraction_mask_mode_var.get() not in {"radius", "shape"}:
+            self.extraction_mask_mode_var.set("radius")
+        self.extraction_shape_mask_var.set(
+            resolve_job_default(
+                self.app.project,
+                "Particles",
+                "Create tomogram extraction-mask from .star-file",
+                "create_tomogram_extraction_mask_from_star",
+                "shape_mask",
+                "",
+            )
+        )
+        self.extraction_binarize_shape_var.set(
+            resolve_job_default(
+                self.app.project,
+                "Particles",
+                "Create tomogram extraction-mask from .star-file",
+                "create_tomogram_extraction_mask_from_star",
+                "binarize_input",
+                "true",
+            ).lower()
+            in {"1", "true", "yes", "on"}
+        )
+        self.extraction_rescale_shape_var.set(
+            resolve_job_default(
+                self.app.project,
+                "Particles",
+                "Create tomogram extraction-mask from .star-file",
+                "create_tomogram_extraction_mask_from_star",
+                "rescale_to_match_angpix",
+                "",
+            ).lower()
+            in {"1", "true", "yes", "on"}
+        )
         self.extraction_output_dir_var.set(
             resolve_job_default(
                 self.app.project,
@@ -1755,6 +1866,7 @@ class ParticlesTab(SidebarTab):
             ).lower()
             in {"1", "true", "yes", "on"}
         )
+        self._on_extraction_mask_mode_changed()
 
     def _browse_parameter(self, flag: WarpToolFlag) -> None:
         if flag.name == "--output_star":
@@ -2575,6 +2687,33 @@ class ParticlesTab(SidebarTab):
         if value:
             self.extraction_output_dir_var.set(value)
 
+    def _browse_extraction_shape_mask(self) -> None:
+        value = filedialog.askopenfilename(
+            title="Select input shape mask",
+            filetypes=[("MRC files", "*.mrc"), ("All files", "*.*")],
+        )
+        if value:
+            self.extraction_shape_mask_var.set(value)
+
+    def _on_extraction_mask_mode_changed(self) -> None:
+        shape_mode = self.extraction_mask_mode_var.get() == "shape"
+        radius_state = "disabled" if shape_mode else "normal"
+        shape_state = "normal" if shape_mode else "disabled"
+        for widget in (
+            getattr(self, "extraction_distance_entry", None),
+        ):
+            if widget is not None:
+                widget.configure(state=radius_state)
+        for widget in (
+            getattr(self, "extraction_shape_entry", None),
+            getattr(self, "extraction_shape_browse", None),
+            getattr(self, "extraction_binarize_shape_check", None),
+            getattr(self, "extraction_rescale_shape_check", None),
+        ):
+            if widget is not None:
+                widget.configure(state=shape_state)
+        self._update_extraction_mask_preview()
+
     def _on_extraction_input_star_changed(self) -> None:
         input_path = self.extraction_input_star_var.get().strip()
         self._extraction_detected_ts_names = []
@@ -2676,7 +2815,19 @@ class ParticlesTab(SidebarTab):
             "dataset_for_dimensions": self.extraction_dataset_var.get().strip(),
             "input_star_angpix": self.extraction_input_angpix_var.get().strip(),
             "output_mask_angpix": self.extraction_output_angpix_var.get().strip(),
-            "distance_cleanup_angstrom": self.extraction_distance_ang_var.get().strip(),
+            "mask_mode": self.extraction_mask_mode_var.get(),
+            "distance_cleanup_angstrom": self.extraction_distance_ang_var.get().strip()
+            if self.extraction_mask_mode_var.get() == "radius"
+            else "",
+            "shape_mask": self.extraction_shape_mask_var.get().strip()
+            if self.extraction_mask_mode_var.get() == "shape"
+            else "",
+            "binarize_input": "true"
+            if self.extraction_mask_mode_var.get() == "shape" and self.extraction_binarize_shape_var.get()
+            else "",
+            "rescale_to_match_angpix": "true"
+            if self.extraction_mask_mode_var.get() == "shape" and self.extraction_rescale_shape_var.get()
+            else "",
             "output_directory": self.extraction_output_dir_var.get().strip(),
             "tomogram_dimensions": self._extraction_dimensions_text(),
             "add_to_pre_existing": "true" if self.extraction_add_existing_var.get() else "",
@@ -2711,21 +2862,35 @@ class ParticlesTab(SidebarTab):
         if not input_path:
             return ""
         output_dir = self.extraction_output_dir_var.get().strip() or "(none selected)"
-        return "\n".join(
+        shape_mode = self.extraction_mask_mode_var.get() == "shape"
+        lines = [
+            "Create tomogram extraction-mask from .star-file",
+            f"Input STAR: {input_path}",
+            f"Output directory: {output_dir}",
+            f"Dataset for dimensions: {self.extraction_dataset_var.get().strip() or '-'}",
+            f"Detected TS: {self.extraction_detected_ts_var.get()}",
+            f"Input STAR Angpix: {self.extraction_input_angpix_var.get().strip() or '-'}",
+            f"Output mask Angpix: {self.extraction_output_angpix_var.get().strip() or '-'}",
+            f"Mask mode: {'shape' if shape_mode else 'radius'}",
+        ]
+        if shape_mode:
+            lines.extend(
+                [
+                    f"Input shape mask: {self.extraction_shape_mask_var.get().strip() or '-'}",
+                    f"Binarize input: {'yes' if self.extraction_binarize_shape_var.get() else 'no'}",
+                    f"Rescale to match Angpix: {'yes' if self.extraction_rescale_shape_var.get() else 'no'}",
+                ]
+            )
+        else:
+            lines.append(f"Distance cleanup (A): {self.extraction_distance_ang_var.get().strip() or '-'}")
+        lines.extend(
             [
-                "Create tomogram extraction-mask from .star-file",
-                f"Input STAR: {input_path}",
-                f"Output directory: {output_dir}",
-                f"Dataset for dimensions: {self.extraction_dataset_var.get().strip() or '-'}",
-                f"Detected TS: {self.extraction_detected_ts_var.get()}",
-                f"Input STAR Angpix: {self.extraction_input_angpix_var.get().strip() or '-'}",
-                f"Output mask Angpix: {self.extraction_output_angpix_var.get().strip() or '-'}",
-                f"Distance cleanup (A): {self.extraction_distance_ang_var.get().strip() or '-'}",
                 f"Dimensions X/Y/Z: {self._extraction_dimensions_text() or '-'}",
                 f"Add to pre-existing: {'yes' if self.extraction_add_existing_var.get() else 'no'}",
                 "Output name pattern: <TS_stem>_ExtractionMask_<Angpix>A.mrc",
             ]
         )
+        return "\n".join(lines)
 
     def _set_extraction_log(self, text: str) -> None:
         self.extraction_log_text.delete("1.0", "end")
@@ -2747,7 +2912,9 @@ class ParticlesTab(SidebarTab):
         self.frame.clipboard_append(preview)
         self.app.status_var.set("Extraction mask log copied to clipboard")
 
-    def _validated_extraction_inputs(self) -> tuple[str, str, float, float, float, tuple[int, int, int]] | None:
+    def _validated_extraction_inputs(
+        self,
+    ) -> tuple[str, str, float, float, float, tuple[int, int, int], str, str, bool, bool] | None:
         input_star = self.extraction_input_star_var.get().strip()
         if not input_star:
             messagebox.showinfo("Missing STAR file", "Please select a particle STAR file first.")
@@ -2759,9 +2926,24 @@ class ParticlesTab(SidebarTab):
         try:
             input_angpix = float(self.extraction_input_angpix_var.get().strip())
             output_angpix = float(self.extraction_output_angpix_var.get().strip())
-            cleanup_distance = float(self.extraction_distance_ang_var.get().strip())
         except ValueError:
-            messagebox.showinfo("Invalid values", "Please provide numerical Angpix and distance-cleanup values.")
+            messagebox.showinfo("Invalid values", "Please provide numerical Angpix values.")
+            return None
+        mode = self.extraction_mask_mode_var.get()
+        cleanup_distance = 0.0
+        shape_mask = self.extraction_shape_mask_var.get().strip()
+        if mode == "radius":
+            try:
+                cleanup_distance = float(self.extraction_distance_ang_var.get().strip())
+            except ValueError:
+                messagebox.showinfo("Invalid values", "Please provide a numerical distance-cleanup value.")
+                return None
+        elif mode == "shape":
+            if not shape_mask:
+                messagebox.showinfo("Missing shape mask", "Please select an input shape mask MRC file first.")
+                return None
+        else:
+            messagebox.showinfo("Invalid mask mode", "Please select whether to mask out by radius or by shape.")
             return None
         try:
             dimensions = (
@@ -2775,19 +2957,41 @@ class ParticlesTab(SidebarTab):
         if input_angpix <= 0 or output_angpix <= 0:
             messagebox.showinfo("Invalid Angpix", "Input and output Angpix must be greater than 0.")
             return None
-        if cleanup_distance < 0:
+        if mode == "radius" and cleanup_distance < 0:
             messagebox.showinfo("Invalid distance", "Distance cleanup must be 0 or greater.")
             return None
         if any(value <= 0 for value in dimensions):
             messagebox.showinfo("Invalid dimensions", "Tomogram dimensions must be greater than 0.")
             return None
-        return input_star, output_dir, input_angpix, output_angpix, cleanup_distance, dimensions
+        return (
+            input_star,
+            output_dir,
+            input_angpix,
+            output_angpix,
+            cleanup_distance,
+            dimensions,
+            mode,
+            shape_mask,
+            self.extraction_binarize_shape_var.get(),
+            self.extraction_rescale_shape_var.get(),
+        )
 
     def _run_extraction_mask(self) -> None:
         validated = self._validated_extraction_inputs()
         if validated is None:
             return
-        input_star, output_dir, input_angpix, output_angpix, cleanup_distance, dimensions = validated
+        (
+            input_star,
+            output_dir,
+            input_angpix,
+            output_angpix,
+            cleanup_distance,
+            dimensions,
+            mask_mode,
+            shape_mask,
+            binarize_shape,
+            rescale_shape,
+        ) = validated
         preview = self._extraction_preview_text()
         cancel_event = threading.Event()
         busy = self._show_particle_busy(
@@ -2811,6 +3015,10 @@ class ParticlesTab(SidebarTab):
                     cleanup_distance_angstrom=cleanup_distance,
                     dimensions=dimensions,
                     add_to_pre_existing=self.extraction_add_existing_var.get(),
+                    mask_mode=mask_mode,
+                    shape_mask_path=shape_mask,
+                    binarize_shape_input=binarize_shape,
+                    rescale_shape_to_output_angpix=rescale_shape,
                     progress_callback=progress,
                     log_callback=lambda line: self.app.root.after(0, lambda message=line: self._append_extraction_log(message)),
                     cancel_event=cancel_event,
@@ -4129,16 +4337,19 @@ class ParticlesTab(SidebarTab):
             tree_parent = top_panel
             plots_parent = bottom_panel
         else:
-            tree_parent = container
+            tree_parent = ttk.Frame(container)
+            tree_parent.grid(row=0, column=0, columnspan=2, sticky="nsew")
+            tree_parent.columnconfigure(0, weight=1)
+            tree_parent.rowconfigure(0, weight=1)
             plots_parent = None
 
         tree = ttk.Treeview(tree_parent, columns=("field", "value"), show="tree headings", style="Technical.Treeview")
         tree.heading("#0", text="Section")
         tree.heading("field", text="Field")
         tree.heading("value", text="Value")
-        tree.column("#0", width=180, anchor="w")
-        tree.column("field", width=240, anchor="w")
-        tree.column("value", width=560, anchor="w")
+        tree.column("#0", width=180, anchor="w", stretch=False)
+        tree.column("field", width=240, anchor="w", stretch=False)
+        tree.column("value", width=560, anchor="w", stretch=False)
         tree.grid(row=0, column=0, sticky="nsew")
         yscroll = ttk.Scrollbar(tree_parent, orient="vertical", command=tree.yview)
         yscroll.grid(row=0, column=1, sticky="ns")
@@ -4180,18 +4391,21 @@ class ParticlesTab(SidebarTab):
             section_id = tree.insert("", "end", text=section_title, open=True, values=("", ""))
             for field, value in rows:
                 tree.insert(section_id, "end", text="", values=(field, value))
+        autosize_detail_tree_columns(tree, sections)
 
         next_row = 1
         if entry.command:
             command_box = ttk.LabelFrame(container, text="Command", padding=12)
             command_box.grid(row=next_row, column=0, columnspan=2, sticky="nsew", pady=(12, 0))
             command_box.columnconfigure(0, weight=1)
-            command_text = tk.Text(command_box, height=6, wrap="word", font="TkDefaultFont")
+            command_text = tk.Text(command_box, height=6, wrap="none", font=technical_font_name())
             command_text.grid(row=0, column=0, sticky="nsew")
             command_text.insert("1.0", entry.command)
             command_scroll = ttk.Scrollbar(command_box, orient="vertical", command=command_text.yview)
             command_scroll.grid(row=0, column=1, sticky="ns")
-            command_text.configure(yscrollcommand=command_scroll.set)
+            command_xscroll = ttk.Scrollbar(command_box, orient="horizontal", command=command_text.xview)
+            command_xscroll.grid(row=1, column=0, sticky="ew")
+            command_text.configure(yscrollcommand=command_scroll.set, xscrollcommand=command_xscroll.set)
             next_row += 1
 
         if entry.artifacts.get("kind") == "particle_abundance" and plots_parent is not None:
@@ -4256,6 +4470,178 @@ class ParticlesTab(SidebarTab):
         footer.grid(row=next_row, column=0, columnspan=2, sticky="e", pady=(12, 0))
         ttk.Button(footer, text="Close", command=window.destroy).grid(row=0, column=0)
 
+    def _selected_history_entry(self) -> JobHistoryEntry | None:
+        selection = self.history_table.selection()
+        if not selection:
+            return None
+        selected = self.history_entry_refs.get(selection[0])
+        if selected is None:
+            return None
+        _index, entry = selected
+        return entry
+
+    def _bool_parameter(self, parameters: dict[str, str], key: str, *, default: bool = False) -> bool:
+        value = parameters.get(key)
+        if value is None:
+            return default
+        return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+    def _history_list_parameter(self, parameters: dict[str, str], key: str) -> list[str]:
+        return [item.strip() for item in parameters.get(key, "").split(",") if item.strip()]
+
+    def _history_datasets(self, entry: JobHistoryEntry) -> list[str]:
+        dataset_options = set(self._dataset_options())
+        names = [name for name in self._history_list_parameter(entry.parameters, "datasets") if name in dataset_options]
+        if names:
+            return names
+        dataset_name = (entry.dataset_name or "").strip()
+        if dataset_name and dataset_name in dataset_options:
+            return [dataset_name]
+        return []
+
+    def _history_command_tokens(self, command: str) -> list[str]:
+        try:
+            return shlex.split(command)
+        except ValueError:
+            return command.split()
+
+    def _history_export_parameter_names(self, flag: WarpToolFlag) -> set[str]:
+        names = {flag.name, self._display_export_parameter_name(flag), *flag.aliases}
+        return {name for name in names if name}
+
+    def _history_export_parameter_value(self, entry: JobHistoryEntry, flag: WarpToolFlag) -> str:
+        if flag.name in entry.parameters:
+            return entry.parameters[flag.name]
+        parameter_names = self._history_export_parameter_names(flag)
+        tokens = self._history_command_tokens(entry.command)
+        if flag.widget == "bool":
+            return "true" if any(name in tokens for name in parameter_names) else "false"
+        for index, token in enumerate(tokens):
+            if token in parameter_names and index + 1 < len(tokens):
+                return tokens[index + 1]
+        return ""
+
+    def _history_particle_job_title(self, entry: JobHistoryEntry) -> str:
+        for title, definition in self.job_catalog.items():
+            if entry.job_name in {definition.job_key, definition.title}:
+                return title
+        if entry.job_name == self.current_job.command:
+            return "Export particles"
+        return ""
+
+    def _apply_export_history_parameters(self, entry: JobHistoryEntry) -> None:
+        self.selected_export_datasets = self._history_datasets(entry)
+        self._refresh_selected_dataset_list()
+        for flag in self._active_export_flags():
+            variable = self.parameter_vars.get(flag.name)
+            if variable is None:
+                continue
+            value = self._history_export_parameter_value(entry, flag)
+            if flag.name == "--output_star":
+                path_value = Path(str(value).strip()) if str(value).strip() else Path("")
+                if path_value.suffix:
+                    variable.set(str(path_value.parent) if str(path_value.parent) != "." else "")
+                    self.export_output_name_var.set(path_value.name)
+                else:
+                    variable.set(value)
+                continue
+            if isinstance(variable, tk.BooleanVar):
+                variable.set(str(value).strip().lower() in {"1", "true", "yes", "on"})
+            else:
+                variable.set(value)
+        self._update_command_preview()
+
+    def _apply_particle_history_parameters(self, entry: JobHistoryEntry) -> bool:
+        params = entry.parameters
+        job_title = self._history_particle_job_title(entry)
+        if not job_title:
+            return False
+        self.job_type_var.set(job_title)
+        self._on_job_type_changed()
+        job_key = self._selected_job_key()
+
+        if job_key == "ts_export_particles":
+            self.execution_mode_var.set("Submit to Slurm" if entry.execution_mode == "slurm" else "Run locally")
+            self.environment_var.set(
+                entry.environment_title
+                or params.get("execution_environment", self._particle_environment_default())
+                or "None"
+            )
+            self.slurm_profile_var.set(entry.slurm_profile or self.slurm_profile_var.get())
+            self.slurm_overrides_ui.rebuild(params, preserve_existing=False)
+            self._toggle_slurm_controls()
+            self._apply_export_history_parameters(entry)
+        elif job_key == "distance_clean":
+            self.selected_distance_datasets = self._history_datasets(entry)
+            self.distance_input_star_var.set(params.get("input_star", ""))
+            self.distance_radius_px_var.set(params.get("radius_px", ""))
+            self.distance_radius_ang_var.set(params.get("radius_angstrom", ""))
+            self.distance_output_name_var.set(params.get("output_star", "Output.star"))
+            self.distance_cleaned_var.set(self._bool_parameter(params, "write_cleaned"))
+            self.distance_duplicates_var.set(self._bool_parameter(params, "write_dublicates"))
+            self._refresh_distance_selected_dataset_list()
+        elif job_key == "intersect_star_files":
+            self.selected_intersect_datasets = self._history_datasets(entry)
+            self.intersect_star_paths = self._history_list_parameter(params, "input_stars")
+            self.intersect_identification_mode_var.set(params.get("identification_mode", "By distance"))
+            self.intersect_radius_px_var.set(params.get("radius_px", ""))
+            self.intersect_radius_ang_var.set(params.get("radius_angstrom", ""))
+            self.intersect_output_name_var.set(params.get("output_star", "Output.star"))
+            self.intersect_common_var.set(self._bool_parameter(params, "write_common"))
+            self.intersect_unique_var.set(self._bool_parameter(params, "write_unique"))
+            self._refresh_selected_intersect_dataset_list()
+            self._refresh_intersect_star_list(show_busy=False)
+            self._on_intersect_identification_changed()
+        elif job_key == "merge_split_star_files":
+            self.merge_split_star_paths = self._history_list_parameter(params, "input_stars")
+            self.merge_split_mode_var.set(params.get("mode", "Merge .star files"))
+            self.merge_split_output_dir_var.set(params.get("output_directory", ""))
+            self.merge_split_output_name_var.set(params.get("output_name", "Output.star"))
+            self._refresh_merge_split_star_list()
+        elif job_key == "create_tomogram_extraction_mask_from_star":
+            self.extraction_input_star_var.set(params.get("input_star", ""))
+            self.extraction_dataset_var.set(params.get("dataset_for_dimensions", ""))
+            self.extraction_input_angpix_var.set(params.get("input_star_angpix", ""))
+            self.extraction_output_angpix_var.set(params.get("output_mask_angpix", ""))
+            self.extraction_mask_mode_var.set(params.get("mask_mode", "radius") or "radius")
+            if self.extraction_mask_mode_var.get() not in {"radius", "shape"}:
+                self.extraction_mask_mode_var.set("radius")
+            self.extraction_distance_ang_var.set(params.get("distance_cleanup_angstrom", ""))
+            self.extraction_shape_mask_var.set(params.get("shape_mask", ""))
+            self.extraction_binarize_shape_var.set(self._bool_parameter(params, "binarize_input"))
+            self.extraction_rescale_shape_var.set(self._bool_parameter(params, "rescale_to_match_angpix"))
+            self.extraction_output_dir_var.set(params.get("output_directory", ""))
+            self._set_extraction_dimensions_from_text(params.get("tomogram_dimensions", ""))
+            self.extraction_add_existing_var.set(self._bool_parameter(params, "add_to_pre_existing"))
+            self._on_extraction_mask_mode_changed()
+        elif job_key == "plot_particle_abundance":
+            self.abundance_star_paths = self._history_list_parameter(params, "input_stars")
+            self.abundance_compare_samples_var.set(self._bool_parameter(params, "compare_samples"))
+            self.abundance_measure_var.set(params.get("plot_mode", "Plot total particle numbers"))
+            self.abundance_rescale_var.set(bool(entry.artifacts.get("rescale_to_window", False)))
+            self._refresh_abundance_star_list(show_busy=False)
+        elif job_key == "plot_classification_convergence":
+            self.convergence_directory_var.set(params.get("input_directory", ""))
+            self.convergence_rescale_var.set(bool(entry.artifacts.get("rescale_to_window", False)))
+            self._refresh_convergence_directory_metadata()
+            self._reset_convergence_plot_display(
+                "Parameters copied. Click 'Render plot' to update the classification convergence plots."
+            )
+        return True
+
+    def _copy_selected_history_parameters(self) -> None:
+        entry = self._selected_history_entry()
+        if entry is None:
+            messagebox.showinfo("Copy job parameters", "Please select a particle job history entry first.")
+            return
+        if not self._apply_particle_history_parameters(entry):
+            messagebox.showinfo(
+                "Copy job parameters",
+                "The selected history entry is not a particle job with editable parameters.",
+            )
+            return
+        self.app.status_var.set(f"Copied parameters from history entry: {entry.job_name}")
+
     def _remove_selected_history_entry(self) -> None:
         selection = self.history_table.selection()
         if not selection:
@@ -4309,6 +4695,10 @@ class ParticlesTab(SidebarTab):
             self._extraction_detected_ts_names = []
             self.extraction_dataset_var.set("")
             self.extraction_input_star_var.set("")
+            self.extraction_shape_mask_var.set("")
+            self.extraction_mask_mode_var.set("radius")
+            self.extraction_binarize_shape_var.set(True)
+            self.extraction_rescale_shape_var.set(False)
             self.extraction_detected_ts_var.set("-")
             self._extraction_auto_dimensions = None
             self.convergence_mode_var.set("-")
@@ -4327,6 +4717,7 @@ class ParticlesTab(SidebarTab):
         if self.extraction_dataset_var.get() not in dataset_options:
             self.extraction_dataset_var.set(dataset_options[0] if dataset_options else "")
             self._apply_extraction_default_dimensions(force=False)
+        self._on_extraction_mask_mode_changed()
         history_options = ["All datasets"] + dataset_options if dataset_options else ["All datasets"]
         self.history_dataset_combo.configure(values=history_options)
         if self.history_dataset_var.get() not in history_options:

@@ -15,7 +15,7 @@ from typing import Any
 PROJECT_SUFFIX = ".cryopal.json"
 SETTINGS_SUFFIX = ".cryopal.settings"
 TS_NAME_DELIMITERS = "_-. "
-PROJECT_SCHEMA_VERSION = 6
+PROJECT_SCHEMA_VERSION = 7
 
 
 def _string_keyed_dict(payload: Any) -> dict[str, Any]:
@@ -82,6 +82,8 @@ class ProjectState:
     file_registry_overrides: dict[str, dict[str, dict[str, str]]] = field(default_factory=dict)
     custom_job_types: list[dict[str, Any]] = field(default_factory=list)
     shortcuts: list[dict[str, str]] = field(default_factory=list)
+    relion_project_default: dict[str, str] = field(default_factory=dict)
+    relion_projects: list[dict[str, str]] = field(default_factory=list)
     tomograms_selection: list[dict[str, str]] = field(default_factory=list)
     workflows: list[dict[str, Any]] = field(default_factory=list)
 
@@ -107,6 +109,8 @@ class ProjectState:
             file_registry_overrides=_triple_string_dict(payload.get("file_registry_overrides", {})),
             custom_job_types=custom_jobs,
             shortcuts=_string_string_dict_list(payload.get("shortcuts", [])),
+            relion_project_default=_string_string_dict(payload.get("relion_project_default", {})),
+            relion_projects=_string_string_dict_list(payload.get("relion_projects", [])),
             tomograms_selection=_string_string_dict_list(payload.get("tomograms_selection", [])),
             workflows=[
                 deepcopy(dict(item))
@@ -639,6 +643,8 @@ def migrate_project_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "file_registry_overrides",
         "custom_job_types",
         "shortcuts",
+        "relion_project_default",
+        "relion_projects",
         "tomograms_selection",
         "preferences",
     }
@@ -656,6 +662,9 @@ def migrate_project_payload(payload: dict[str, Any]) -> dict[str, Any]:
         schema_version = 5
     if schema_version < 6:
         migrated = _migrate_v5_to_v6(migrated)
+        schema_version = 6
+    if schema_version < 7:
+        migrated = _migrate_v6_to_v7(migrated)
     migrated["schema_version"] = PROJECT_SCHEMA_VERSION
     return migrated
 
@@ -725,6 +734,8 @@ def _migrate_v2_to_v3(payload: dict[str, Any]) -> dict[str, Any]:
     move("file_registry_role_order", [])
     move("file_registry_overrides", {})
     move("custom_job_types", [])
+    move("relion_project_default", {})
+    move("relion_projects", [])
     move("tomograms_selection", [])
     move("preferences", {})
     return migrated
@@ -757,4 +768,15 @@ def _migrate_v5_to_v6(payload: dict[str, Any]) -> dict[str, Any]:
         state = {}
         migrated["state"] = state
     state.setdefault("executable_overrides", {})
+    return migrated
+
+
+def _migrate_v6_to_v7(payload: dict[str, Any]) -> dict[str, Any]:
+    migrated = deepcopy(payload)
+    state = migrated.setdefault("state", {})
+    if not isinstance(state, dict):
+        state = {}
+        migrated["state"] = state
+    state.setdefault("relion_projects", [])
+    state.setdefault("relion_project_default", {})
     return migrated
