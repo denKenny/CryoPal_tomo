@@ -42,6 +42,7 @@ from cryoet_organizer.particles_catalog import (
     particle_job_titles,
     particle_jobs_by_title,
 )
+from cryoet_organizer.performance import TkDebouncer
 from cryoet_organizer.preferences import project_preference_enabled
 from cryoet_organizer.project import DatasetRecord, JobHistoryEntry, ProjectData, dataset_ts_names
 from cryoet_organizer.resizable_sections import ResizableSectionStack
@@ -210,6 +211,8 @@ class ParticlesTab(SidebarTab):
         self.slurm_mem_per_cpu_var = tk.StringVar()
         self.slurm_mem_mode_var = tk.StringVar(value="mem")
         self.slurm_overrides_ui = SlurmOverrideUI(self.app, self.slurm_profile_var)
+        self._suspend_command_preview_updates = False
+        self._command_preview_debouncer = TkDebouncer(self.frame, self._update_command_preview, delay_ms=120)
         self.history_sort_column = "timestamp"
         self.history_sort_descending = True
         self.job_catalog = particle_jobs_by_title()
@@ -1382,7 +1385,7 @@ class ParticlesTab(SidebarTab):
                 check = ttk.Checkbutton(
                     control_frame,
                     variable=value_var,
-                    command=self._update_command_preview,
+                    command=self._schedule_command_preview_update,
                 )
                 check.grid(row=0, column=0, sticky="w")
                 row["value_widget"] = check
@@ -1401,8 +1404,8 @@ class ParticlesTab(SidebarTab):
                 ttk.Label(control_frame, text="Name").grid(row=0, column=2, padx=(12, 4), sticky="w")
                 name_entry = ttk.Entry(control_frame, textvariable=name_var, width=24)
                 name_entry.grid(row=0, column=3, sticky="ew")
-                value_var.trace_add("write", lambda *_args: self._update_command_preview())
-                name_var.trace_add("write", lambda *_args: self._update_command_preview())
+                value_var.trace_add("write", self._schedule_command_preview_update)
+                name_var.trace_add("write", self._schedule_command_preview_update)
                 row["value_widget"] = directory_entry
                 row["browse_button"] = browse
                 row["name_widget"] = name_entry
@@ -1411,7 +1414,7 @@ class ParticlesTab(SidebarTab):
                 value_var = tk.StringVar()
                 entry = ttk.Entry(control_frame, textvariable=value_var)
                 entry.grid(row=0, column=0, sticky="ew")
-                value_var.trace_add("write", lambda *_args: self._update_command_preview())
+                value_var.trace_add("write", self._schedule_command_preview_update)
                 row["value_widget"] = entry
                 if desired_kind == "path":
                     browse = ttk.Button(
@@ -1510,6 +1513,7 @@ class ParticlesTab(SidebarTab):
                 frame.grid_remove()
 
     def _build_parameter_form(self) -> None:
+        self._suspend_command_preview_updates = True
         self.parameter_vars.clear()
 
         row = 0
@@ -1539,6 +1543,7 @@ class ParticlesTab(SidebarTab):
             row += 1
 
         self._hide_unused_export_parameter_rows(row)
+        self._suspend_command_preview_updates = False
         self._update_command_preview()
 
     def _particle_environment_default(self) -> str:
@@ -2097,9 +2102,16 @@ class ParticlesTab(SidebarTab):
         return commands
 
     def _update_command_preview(self, *_args) -> None:
+        if self._suspend_command_preview_updates:
+            return
         commands = [command for _dataset, command in self._commands()]
         self.command_text.delete("1.0", "end")
         self.command_text.insert("1.0", "\n".join(commands) if commands else "")
+
+    def _schedule_command_preview_update(self, *_args) -> None:
+        if self._suspend_command_preview_updates:
+            return
+        self._command_preview_debouncer.schedule()
 
     def _raw_output_star(self) -> str:
         variable = self.parameter_vars.get("--output_star")

@@ -13,6 +13,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from cryoet_organizer.dialogs import autosize_detail_tree_columns, bind_scrollable_canvas
 from cryoet_organizer.file_resolver import file_role_order, resolve_dataset_file, role_title
+from cryoet_organizer.performance import TkLatestTask
 from cryoet_organizer.preferences import project_preference, project_preference_enabled, project_preference_int
 from cryoet_organizer.project import (
     DatasetRecord,
@@ -156,6 +157,7 @@ class GalleryTab(SidebarTab):
         self._current_page = 0
         self._current_page_count = 0
         self._render_generation = 0
+        self._metadata_selection_task = TkLatestTask(self.frame)
         self._main_pane_initialized = False
         self._default_details_pane_width = self.app._scale_pixels(360)
         self._details_pane_min_width = self.app._scale_pixels(320)
@@ -586,7 +588,9 @@ class GalleryTab(SidebarTab):
     def _on_gallery_filter_changed(self, _event=None) -> None:
         self._reset_gallery_page()
         self.multi_selected_keys.clear()
-        self._request_gallery_render(reuse_prepared_records=True)
+        keysym = str(getattr(_event, "keysym", "") or "")
+        delay_ms = 180 if keysym and keysym != "Return" else 0
+        self._request_gallery_render(delay_ms=delay_ms, reuse_prepared_records=True)
 
     def _dataset_options(self, project: ProjectData) -> list[str]:
         if not project.datasets:
@@ -1500,6 +1504,7 @@ class GalleryTab(SidebarTab):
 
     def _select_thumbnail(self, dataset_name: str, image_path: str) -> None:
         if self.multi_selection_var.get():
+            self._metadata_selection_task.cancel()
             key = (dataset_name, image_path)
             if key in self.multi_selected_keys:
                 self.multi_selected_keys.remove(key)
@@ -1520,27 +1525,9 @@ class GalleryTab(SidebarTab):
         if thumbnail is None:
             return
 
-        try:
-            metadata = collect_ts_metadata(
-                self.app.project,
-                dataset,
-                thumbnail.ts_name,
-                thumbnail_path=thumbnail.image_path,
-                mrc_path=thumbnail.mrc_path,
-            )
-        except Exception as exc:
-            messagebox.showerror(
-                "TS metadata",
-                f"Could not collect TS metadata for {thumbnail.ts_name}.\n\n{exc}",
-            )
-            metadata = None
         self.selected_dataset_var.set(dataset.dataset_name)
         self.selected_ts_var.set(thumbnail.ts_name)
-        self.selected_pixelsize_var.set(
-            f"{metadata.pixel_size:.4f}"
-            if metadata is not None and metadata.pixel_size
-            else (str(dataset.pixel_size) if dataset.pixel_size else "-")
-        )
+        self.selected_pixelsize_var.set(str(dataset.pixel_size) if dataset.pixel_size else "Loading...")
         self.selected_mrc_var.set(thumbnail.mrc_path or "-")
         self.selected_rating_var.set(thumbnail.rating)
         self.selected_tags_var.set(", ".join(thumbnail.tags) if thumbnail.tags else "-")
@@ -1553,6 +1540,66 @@ class GalleryTab(SidebarTab):
             self.tag_listbox.insert("end", tag)
         self._apply_selection_styles()
         self._update_details_for_current_selection()
+        self._schedule_selected_metadata_load(dataset, thumbnail)
+
+    def _schedule_selected_metadata_load(self, dataset: DatasetRecord, thumbnail: ThumbnailRecord) -> None:
+        generation = self._metadata_selection_task.generation()
+        dataset_name = dataset.dataset_name
+        image_path = thumbnail.image_path
+        ts_name = thumbnail.ts_name
+        thumbnail_path = thumbnail.image_path
+        mrc_path = thumbnail.mrc_path
+        fallback_pixel_size = dataset.pixel_size
+
+        def worker() -> None:
+            metadata = None
+            error = ""
+            try:
+                metadata = collect_ts_metadata(
+                    self.app.project,
+                    dataset,
+                    ts_name,
+                    thumbnail_path=thumbnail_path,
+                    mrc_path=mrc_path,
+                )
+            except Exception as exc:
+                error = str(exc)
+            try:
+                self.frame.after(
+                    0,
+                    lambda: self._finish_selected_metadata_load(
+                        generation,
+                        dataset_name,
+                        image_path,
+                        fallback_pixel_size,
+                        metadata,
+                        error,
+                    ),
+                )
+            except tk.TclError:
+                pass
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _finish_selected_metadata_load(
+        self,
+        generation: int,
+        dataset_name: str,
+        image_path: str,
+        fallback_pixel_size: float,
+        metadata,
+        error: str,
+    ) -> None:
+        if not self._metadata_selection_task.is_current(generation):
+            return
+        if self.selected_thumbnail_key != (dataset_name, image_path):
+            return
+        if metadata is not None and getattr(metadata, "pixel_size", 0.0):
+            self.selected_pixelsize_var.set(f"{metadata.pixel_size:.4f}")
+        else:
+            self.selected_pixelsize_var.set(str(fallback_pixel_size) if fallback_pixel_size else "-")
+        if error:
+            self.app.status_var.set(f"Could not collect TS metadata for {dataset_name}: {error}")
 
     def _apply_selection_styles(self) -> None:
         selected_sidebar_background = self.app._current_appearance.sidebar_background
@@ -2071,6 +2118,7 @@ class GalleryTab(SidebarTab):
         return deleted
 
     def _clear_selected_thumbnail_details(self) -> None:
+        self._metadata_selection_task.cancel()
         self.selected_thumbnail_key = None
         self.selected_dataset_var.set("-")
         self.selected_ts_var.set("-")
@@ -2088,6 +2136,7 @@ class GalleryTab(SidebarTab):
         self.multi_selection_var.set(enabled)
         self.multi_selected_keys.clear()
         if enabled:
+            self._metadata_selection_task.cancel()
             self.selected_thumbnail_key = None
         self._update_multi_selection_widgets()
         self._update_details_for_current_selection()
@@ -2097,6 +2146,7 @@ class GalleryTab(SidebarTab):
         if not self.multi_selection_var.get():
             self.multi_selection_var.set(True)
         self.multi_selected_keys.clear()
+        self._metadata_selection_task.cancel()
         self.selected_thumbnail_key = None
         self._update_multi_selection_widgets()
         self._update_details_for_current_selection()

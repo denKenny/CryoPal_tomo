@@ -29,6 +29,7 @@ from cryoet_organizer.environments_dialog import EnvironmentsDialog
 from cryoet_organizer.export_paths_dialog import ExportFilePathsDialog
 from cryoet_organizer.job_execution import is_scheduled_history_entry
 from cryoet_organizer.log_window import ProcessLogWindow, ShortcutLaunchWindow
+from cryoet_organizer.performance import perf_timer
 from cryoet_organizer.project import (
     JobHistoryEntry,
     PROJECT_SUFFIX,
@@ -77,6 +78,7 @@ from cryoet_organizer.tabs import SidebarTab, get_tab_classes
 from cryoet_organizer.ts_metadata import clear_ts_metadata_cache, collect_ts_metadata
 from cryoet_organizer.viewer_defaults import resolve_viewer_command
 from cryoet_organizer.viewer_defaults_dialog import ViewerDefaultsDialog
+from cryoet_organizer.workflow_catalog import prewarm_workflow_job_catalog
 from cryoet_organizer.workflow_editor import WorkflowEditorDialog
 
 
@@ -271,6 +273,7 @@ class CryoETOrganizerApp:
         self._pending_tab_refreshes: set[str] = set()
         self._queued_refresh_targets: set[str] = set()
         self._queued_refresh_after_id: str | None = None
+        self._workflow_catalog_prewarm_after_id: str | None = None
         self._style = ttk.Style()
         self._settings_shell: SettingsShellWindow | None = None
         self._current_appearance = AppearanceConfig()
@@ -284,7 +287,7 @@ class CryoETOrganizerApp:
         self._build_menu()
         self._build_layout()
         self._load_tabs()
-        self._apply_project_to_tabs()
+        self._pending_tab_refreshes.update(self.tabs)
         self._show_tab("project_overview")
         self._update_title()
         self.root.protocol("WM_DELETE_WINDOW", self.close_app)
@@ -668,6 +671,7 @@ class CryoETOrganizerApp:
             pass
         self.root.update_idletasks()
         self._close_logo_splash()
+        self._schedule_workflow_catalog_prewarm()
 
     def _load_tabs(self) -> None:
         start_row = 1 if self.logo_label is not None else 0
@@ -727,19 +731,20 @@ class CryoETOrganizerApp:
         self._build_refresh_domain_map()
 
     def _show_tab(self, tab_id: str) -> None:
-        if self.active_tab_id:
-            self.tabs[self.active_tab_id].frame.grid_remove()
-            self.nav_buttons[self.active_tab_id].configure(style="Sidebar.TButton")
+        with perf_timer(f"show tab {tab_id}"):
+            if self.active_tab_id:
+                self.tabs[self.active_tab_id].frame.grid_remove()
+                self.nav_buttons[self.active_tab_id].configure(style="Sidebar.TButton")
 
-        self.tabs[tab_id].frame.grid()
-        self.nav_buttons[tab_id].configure(style="ActiveSidebar.TButton")
-        self.active_tab_id = tab_id
-        self._refresh_tab_if_pending(tab_id)
-        try:
-            self.tabs[tab_id].on_tab_shown()
-        except Exception:
-            pass
-        self.status_var.set(f"Active tab: {self.tabs[tab_id].title}")
+            self.tabs[tab_id].frame.grid()
+            self.nav_buttons[tab_id].configure(style="ActiveSidebar.TButton")
+            self.active_tab_id = tab_id
+            self._refresh_tab_if_pending(tab_id)
+            try:
+                self.tabs[tab_id].on_tab_shown()
+            except Exception:
+                pass
+            self.status_var.set(f"Active tab: {self.tabs[tab_id].title}")
 
     def open_global_job_list(self) -> None:
         if "job_list" in self.tabs:
@@ -771,18 +776,21 @@ class CryoETOrganizerApp:
         return tuple(tab_id for tab_id in self.tabs if tab_id in selected)
 
     def _apply_project_to_tabs(self, targets: tuple[str, ...] | None = None) -> None:
-        self.apply_appearance_config(get_project_appearance(self.project))
-        selected_ids = set(self._resolve_refresh_targets(targets))
-        self._pending_tab_refreshes.difference_update(selected_ids)
-        for tab_id, tab in self.tabs.items():
-            if tab_id in selected_ids:
-                tab.on_project_loaded(self.project)
+        with perf_timer(f"apply project to tabs {targets or 'all'}"):
+            self.apply_appearance_config(get_project_appearance(self.project))
+            selected_ids = set(self._resolve_refresh_targets(targets))
+            self._pending_tab_refreshes.difference_update(selected_ids)
+            for tab_id, tab in self.tabs.items():
+                if tab_id in selected_ids:
+                    with perf_timer(f"load project into tab {tab_id}"):
+                        tab.on_project_loaded(self.project)
 
     def _refresh_tab_if_pending(self, tab_id: str) -> None:
         if tab_id not in self._pending_tab_refreshes:
             return
         self._pending_tab_refreshes.discard(tab_id)
-        self.tabs[tab_id].on_project_loaded(self.project)
+        with perf_timer(f"refresh pending tab {tab_id}"):
+            self.tabs[tab_id].on_project_loaded(self.project)
 
     def _cancel_queued_project_refresh(self) -> None:
         if self._queued_refresh_after_id is not None:
@@ -793,26 +801,48 @@ class CryoETOrganizerApp:
         self._queued_refresh_after_id = None
         self._queued_refresh_targets.clear()
 
+    def _schedule_workflow_catalog_prewarm(self, *, delay_ms: int = 450) -> None:
+        if self._workflow_catalog_prewarm_after_id is not None:
+            try:
+                self.root.after_cancel(self._workflow_catalog_prewarm_after_id)
+            except tk.TclError:
+                pass
+        try:
+            self._workflow_catalog_prewarm_after_id = self.root.after(delay_ms, self._prewarm_workflow_catalog)
+        except tk.TclError:
+            self._workflow_catalog_prewarm_after_id = None
+
+    def _prewarm_workflow_catalog(self) -> None:
+        self._workflow_catalog_prewarm_after_id = None
+        try:
+            with perf_timer("prewarm workflow job catalog"):
+                prewarm_workflow_job_catalog(self.project)
+        except Exception as exc:
+            if self.debug_mode.enabled:
+                self.debug_log("WARN", f"Could not prewarm workflow job catalog: {exc}")
+
     def _flush_queued_project_refresh(self) -> None:
-        self._queued_refresh_after_id = None
-        selected_ids = set(self._queued_refresh_targets)
-        self._queued_refresh_targets.clear()
-        if not selected_ids:
-            return
-        self.apply_appearance_config(get_project_appearance(self.project))
-        active_id = self.active_tab_id
-        visible_targets: set[str] = set()
-        if active_id and active_id in selected_ids:
-            visible_targets.add(active_id)
-        self._pending_tab_refreshes.update(selected_ids - visible_targets)
-        for tab_id in visible_targets:
-            self.tabs[tab_id].on_project_loaded(self.project)
+        with perf_timer("flush queued project refresh"):
+            self._queued_refresh_after_id = None
+            selected_ids = set(self._queued_refresh_targets)
+            self._queued_refresh_targets.clear()
+            if not selected_ids:
+                return
+            self.apply_appearance_config(get_project_appearance(self.project))
+            active_id = self.active_tab_id
+            visible_targets: set[str] = set()
+            if active_id and active_id in selected_ids:
+                visible_targets.add(active_id)
+            self._pending_tab_refreshes.update(selected_ids - visible_targets)
+            for tab_id in visible_targets:
+                with perf_timer(f"refresh visible tab {tab_id}"):
+                    self.tabs[tab_id].on_project_loaded(self.project)
 
     def _queue_project_refresh(self, targets: tuple[str, ...] | None = None) -> None:
         self.apply_appearance_config(get_project_appearance(self.project))
         self._queued_refresh_targets.update(self._resolve_refresh_targets(targets))
         if self._queued_refresh_after_id is None:
-            self._queued_refresh_after_id = self.root.after_idle(self._flush_queued_project_refresh)
+            self._queued_refresh_after_id = self.root.after(75, self._flush_queued_project_refresh)
 
     def _preload_tab_views(self) -> None:
         previous_active = self.active_tab_id
@@ -838,12 +868,15 @@ class CryoETOrganizerApp:
         self._pending_tab_refreshes.clear()
         busy = _BusyDialog(self.root, "Loading project", "Preparing project views. Please wait.")
         try:
-            self._apply_project_to_tabs()
-            self._preload_tab_views()
+            self.apply_appearance_config(get_project_appearance(self.project))
+            self._pending_tab_refreshes.update(self.tabs)
+            if self.active_tab_id is not None:
+                self._refresh_tab_if_pending(self.active_tab_id)
             self._update_title()
             self.status_var.set(status_message)
         finally:
             busy.close()
+        self._schedule_workflow_catalog_prewarm()
 
     def refresh_tabs(self, *domains: str) -> None:
         self._apply_project_to_tabs(tuple(domains) if domains else None)
@@ -884,6 +917,9 @@ class CryoETOrganizerApp:
             domain_set.add("job_queue")
         if not domains or {"datasets", "file_registry", "ts_metadata"} & domain_set:
             clear_ts_metadata_cache()
+        workflow_catalog_domains = {"defaults", "executables", "custom", "datasets", "m_populations", "environments"}
+        if not domains or workflow_catalog_domains & domain_set:
+            self._schedule_workflow_catalog_prewarm()
         self._queue_project_refresh(tuple(domain_set) if domains else None)
         self._update_title()
         self.status_var.set(status_message)

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import uuid
-from dataclasses import dataclass
+import json
+from collections import OrderedDict
 from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Any
 
 from cryoet_organizer.custom_jobs import CustomJobDefinition, get_project_custom_jobs
@@ -26,6 +28,10 @@ from cryoet_organizer.mtools_catalog import m_jobs_by_group
 from cryoet_organizer.project import ProjectData
 
 
+_WORKFLOW_JOB_CATALOG_CACHE: OrderedDict[str, tuple["WorkflowCatalogJob", ...]] = OrderedDict()
+_WORKFLOW_JOB_CATALOG_CACHE_SIZE = 8
+
+
 @dataclass(frozen=True)
 class WorkflowCatalogJob:
     catalog_id: str
@@ -41,6 +47,11 @@ class WorkflowCatalogJob:
 
 
 def build_workflow_job_catalog(project: ProjectData) -> list[WorkflowCatalogJob]:
+    signature = _workflow_catalog_signature(project)
+    cached = _WORKFLOW_JOB_CATALOG_CACHE.get(signature)
+    if cached is not None:
+        _WORKFLOW_JOB_CATALOG_CACHE.move_to_end(signature)
+        return list(cached)
     jobs: list[WorkflowCatalogJob] = []
     for definition in build_job_default_registry():
         if definition.namespace == "Project Overview":
@@ -49,7 +60,31 @@ def build_workflow_job_catalog(project: ProjectData) -> list[WorkflowCatalogJob]
         jobs.append(_catalog_job_from_default(project, effective))
     for custom_job in get_project_custom_jobs(project):
         jobs.append(_catalog_job_from_custom(project, custom_job))
-    return sorted(jobs, key=lambda job: (job.processing_tab.casefold(), job.group.casefold(), job.title.casefold()))
+    jobs = sorted(jobs, key=lambda job: (job.processing_tab.casefold(), job.group.casefold(), job.title.casefold()))
+    _WORKFLOW_JOB_CATALOG_CACHE[signature] = tuple(jobs)
+    _WORKFLOW_JOB_CATALOG_CACHE.move_to_end(signature)
+    while len(_WORKFLOW_JOB_CATALOG_CACHE) > _WORKFLOW_JOB_CATALOG_CACHE_SIZE:
+        _WORKFLOW_JOB_CATALOG_CACHE.popitem(last=False)
+    return list(jobs)
+
+
+def prewarm_workflow_job_catalog(project: ProjectData) -> None:
+    build_workflow_job_catalog(project)
+
+
+def clear_workflow_job_catalog_cache() -> None:
+    _WORKFLOW_JOB_CATALOG_CACHE.clear()
+
+
+def _workflow_catalog_signature(project: ProjectData) -> str:
+    payload = {
+        "job_default_overrides": project.state.job_default_overrides,
+        "executable_overrides": project.state.executable_overrides,
+        "custom_job_types": project.state.custom_job_types,
+        "datasets": [dataset.dataset_name for dataset in project.datasets],
+        "m_populations": [population.name for population in project.m_populations],
+    }
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
 
 
 def workflow_job_from_catalog(project: ProjectData, catalog_job: WorkflowCatalogJob) -> dict[str, Any]:

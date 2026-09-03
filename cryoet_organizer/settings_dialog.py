@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from copy import deepcopy
+from copy import copy, deepcopy
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
@@ -23,6 +23,7 @@ from cryoet_organizer.job_defaults import (
     set_project_job_default_overrides,
 )
 from cryoet_organizer.parameter_editor import ParameterEditorDialog, ParameterEditorRow, ParameterSummaryTable
+from cryoet_organizer.performance import perf_timer
 from cryoet_organizer.file_resolver import essential_file_roles, file_role_config, set_file_role_config
 from cryoet_organizer.settings_shell import decorate_settings_window
 from cryoet_organizer.tabs.custom import display_input_type, runtime_input_type_options, stored_input_type
@@ -56,6 +57,7 @@ class DefaultParametersDialog:
         self._pending_leaf_after: str | None = None
         self._form_rows: list[dict[str, object]] = []
         self._executable_form_rows: list[dict[str, object]] = []
+        self._summary_rows_cache: dict[tuple[str, str, str], list[ParameterEditorRow]] = {}
         self.job_edit_mode = False
         self.embedded = host is not None
 
@@ -189,7 +191,8 @@ class DefaultParametersDialog:
         if self.current_leaf == MANAGE_EXECUTABLES_LEAF:
             self._persist_executable_rows()
             return
-        return
+        if not self.job_edit_mode or not self.row_state:
+            return
         if self.current_leaf is None or not isinstance(self.current_leaf, tuple):
             return
         namespace, group, job_key = self.current_leaf
@@ -257,6 +260,7 @@ class DefaultParametersDialog:
             self.overrides[override_key] = job_overrides
         else:
             self.overrides.pop(override_key, None)
+        self._invalidate_default_summary_cache(self.current_leaf)
 
     def _persist_executable_rows(self) -> None:
         overrides: dict[str, str] = {}
@@ -323,30 +327,49 @@ class DefaultParametersDialog:
         self.canvas_xscrollbar.grid(row=2, column=0, sticky="ew")
 
     def _show_leaf(self, leaf: tuple[str, str, str] | str | None) -> None:
-        self._pending_leaf_after = None
-        self.current_leaf = leaf
-        if leaf == MANAGE_EXECUTABLES_LEAF:
-            self.job_edit_mode = False
-            self._show_executables_leaf()
-            return
-        if not isinstance(self.current_leaf, tuple):
-            return
-        definition = self.lookup.get(self.current_leaf)
-        if definition is None:
-            return
-        self.environment_title_options = environment_titles(self.app.project)
-        self._hide_executable_rows()
-        self._show_job_summary_surface()
-        self.content_box.config(text="Job defaults")
-        self.title_label.config(text=f"{definition.namespace} > {definition.group} > {definition.title}")
-        self.row_state.clear()
-        project_view = deepcopy(self.app.project)
-        project_view.state.job_default_overrides = deepcopy(self.overrides)
-        effective_definition = effective_job_default_definition(project_view, definition)
-        self._hide_job_rows()
-        self.summary_table.set_rows(self._summary_rows_from_fields(effective_definition.fields))
-        self.edit_job_entries_button.configure(state="disabled" if self.job_edit_mode else "normal")
-        self.add_job_parameter_button.configure(state="disabled")
+        with perf_timer(f"default parameters leaf {leaf}"):
+            self._pending_leaf_after = None
+            self.current_leaf = leaf
+            if leaf == MANAGE_EXECUTABLES_LEAF:
+                self.job_edit_mode = False
+                self._show_executables_leaf()
+                return
+            if not isinstance(self.current_leaf, tuple):
+                return
+            definition = self.lookup.get(self.current_leaf)
+            if definition is None:
+                return
+            self.environment_title_options = environment_titles(self.app.project)
+            self._hide_executable_rows()
+            self._show_job_summary_surface()
+            self.content_box.config(text="Job defaults")
+            self.title_label.config(text=f"{definition.namespace} > {definition.group} > {definition.title}")
+            self.row_state.clear()
+            cached_rows = self._summary_rows_cache.get(self.current_leaf)
+            if cached_rows is None:
+                effective_definition = self._effective_definition_for_current_overrides(definition)
+                cached_rows = self._summary_rows_from_fields(effective_definition.fields)
+                self._summary_rows_cache[self.current_leaf] = cached_rows
+            self._hide_job_rows()
+            self.summary_table.set_rows(cached_rows)
+            self.edit_job_entries_button.configure(state="disabled" if self.job_edit_mode else "normal")
+            self.add_job_parameter_button.configure(state="disabled")
+
+    def _project_view_for_current_overrides(self):
+        project_view = copy(self.app.project)
+        state_view = copy(self.app.project.state)
+        state_view.job_default_overrides = self.overrides
+        project_view.state = state_view
+        return project_view
+
+    def _effective_definition_for_current_overrides(self, definition):
+        return effective_job_default_definition(self._project_view_for_current_overrides(), definition)
+
+    def _invalidate_default_summary_cache(self, leaf: tuple[str, str, str] | None = None) -> None:
+        if leaf is None:
+            self._summary_rows_cache.clear()
+        else:
+            self._summary_rows_cache.pop(leaf, None)
 
     def _base_parameter_name(self, field) -> str:
         parameter_name = getattr(field, "parameter_name", "") or ""
@@ -395,9 +418,7 @@ class DefaultParametersDialog:
         definition = self.lookup.get(self.current_leaf)
         if definition is None:
             return None
-        project_view = deepcopy(self.app.project)
-        project_view.state.job_default_overrides = deepcopy(self.overrides)
-        effective_definition = effective_job_default_definition(project_view, definition)
+        effective_definition = self._effective_definition_for_current_overrides(definition)
         rows: list[ParameterEditorRow] = []
         for field in effective_definition.fields:
             rows.append(
@@ -467,6 +488,7 @@ class DefaultParametersDialog:
             self.overrides[override_key] = job_overrides
         else:
             self.overrides.pop(override_key, None)
+        self._invalidate_default_summary_cache(self.current_leaf)
 
     def _hide_job_rows(self) -> None:
         for row in self._form_rows:
@@ -977,6 +999,7 @@ class DefaultParametersDialog:
         for role, config in imported_patterns.items():
             if f"role::{role}" in selected_keys:
                 self.file_registry_patterns[role] = deepcopy(config)
+        self._invalidate_default_summary_cache()
         if self.current_leaf is not None:
             self._show_leaf(self.current_leaf)
 
@@ -1021,33 +1044,6 @@ class DefaultParametersDialog:
         for role, config in self.file_registry_patterns.items():
             set_file_role_config(self.app.project, role, config)
         self.app.on_project_changed("defaults", "file_registry", "executables", status_message="Saved project default parameters")
-        processing_tab = self.app.tabs.get("processing")
-        if processing_tab is not None and hasattr(processing_tab, "_build_parameter_form"):
-            processing_tab._build_parameter_form()
-        particles_tab = self.app.tabs.get("particles")
-        if particles_tab is not None:
-            if hasattr(particles_tab, "_apply_particle_custom_defaults"):
-                particles_tab._apply_particle_custom_defaults()
-            if hasattr(particles_tab, "_build_parameter_form"):
-                particles_tab._build_parameter_form()
-            if hasattr(particles_tab, "_on_intersect_identification_changed"):
-                particles_tab._on_intersect_identification_changed()
-            if hasattr(particles_tab, "_mark_abundance_dirty"):
-                particles_tab._mark_abundance_dirty()
-        project_tab = self.app.tabs.get("project_overview")
-        if project_tab is not None and hasattr(project_tab, "_apply_custom_defaults"):
-            project_tab._apply_custom_defaults()
-        tomograms_tab = self.app.tabs.get("tomograms")
-        if tomograms_tab is not None and hasattr(tomograms_tab, "_apply_custom_defaults"):
-            tomograms_tab._apply_custom_defaults()
-        processing_m_tab = self.app.tabs.get("processing_m")
-        if processing_m_tab is not None:
-            if hasattr(processing_m_tab, "_update_create_command_preview"):
-                processing_m_tab._update_create_command_preview()
-            if hasattr(processing_m_tab, "_update_command_preview"):
-                processing_m_tab._update_command_preview()
-        if tomograms_tab is not None and hasattr(tomograms_tab, "_update_active_preview"):
-            tomograms_tab._update_active_preview()
         self.saved_overrides = deepcopy(self.overrides)
         self.saved_executable_overrides = deepcopy(get_project_executable_overrides(self.app.project))
         self.executable_overrides = deepcopy(self.saved_executable_overrides)
@@ -1068,6 +1064,7 @@ class DefaultParametersDialog:
         self.overrides = deepcopy(self.saved_overrides)
         self.executable_overrides = deepcopy(self.saved_executable_overrides)
         self.file_registry_patterns = deepcopy(self.saved_file_registry_patterns)
+        self._invalidate_default_summary_cache()
         if self.current_leaf is not None:
             self._show_leaf(self.current_leaf)
         self.app.status_var.set("Reverted unsaved default parameter changes")

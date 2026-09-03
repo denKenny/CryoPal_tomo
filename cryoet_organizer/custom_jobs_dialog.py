@@ -538,6 +538,9 @@ class CustomJobsDialog:
             self._persist_current_from_editor()
         set_project_custom_jobs(self.app.project, self.jobs)
         self.saved_jobs = deepcopy(self.jobs)
+        schedule_workflow_prewarm = getattr(self.app, "_schedule_workflow_catalog_prewarm", None)
+        if callable(schedule_workflow_prewarm):
+            schedule_workflow_prewarm()
         self.app._apply_project_to_tabs()
         self.app._update_title()
         self.app.status_var.set("Saved custom job types")

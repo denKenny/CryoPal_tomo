@@ -24,6 +24,7 @@ from cryoet_organizer.job_queue import (
     reverse_timestamp_sort_key,
 )
 from cryoet_organizer.log_window import BatchCommandOutputWindow
+from cryoet_organizer.performance import TkDebouncer, chunked_treeview_replace
 from cryoet_organizer.project import JobHistoryEntry, ProjectData
 from cryoet_organizer.scheduled_slurm_dialog import CollectiveSlurmSubmissionDialog, ask_scheduled_slurm_mode
 from cryoet_organizer.slurm import SlurmSubmissionResult, find_slurm_profile, render_sbatch_script, wait_for_slurm_job
@@ -59,6 +60,8 @@ class JobListTab(SidebarTab):
         self.sort_column = "queue_order"
         self.sort_descending = False
         self.refs_by_id: dict[str, ScheduledJobRef] = {}
+        self._table_generation = 0
+        self._refresh_table_debouncer = TkDebouncer(self.frame, self._refresh_table, delay_ms=120)
 
         filters = ttk.LabelFrame(self.frame, text="Global job filters", padding=12)
         filters.grid(row=0, column=0, sticky="ew")
@@ -92,7 +95,7 @@ class JobListTab(SidebarTab):
             self.search_var,
             self.color_by_var,
         ):
-            variable.trace_add("write", lambda *_args: self._refresh_table())
+            variable.trace_add("write", lambda *_args: self._refresh_table_debouncer.schedule())
 
         box = ttk.LabelFrame(self.frame, text="Global jobs", padding=12)
         box.grid(row=1, column=0, sticky="nsew", pady=(12, 0))
@@ -244,25 +247,34 @@ class JobListTab(SidebarTab):
         self._refresh_table()
 
     def _refresh_table(self) -> None:
-        for item in self.table.get_children():
-            self.table.delete(item)
+        self._table_generation += 1
+        generation = self._table_generation
         self.refs_by_id = {}
+        rows: list[tuple[str, tuple[object, ...], tuple[str, ...]]] = []
         for ref in self._filtered_refs():
             self.refs_by_id[ref.entry_id] = ref
-            self.table.insert(
-                "",
-                "end",
-                iid=ref.entry_id,
-                values=(
-                    ref.entry.processing_tab or "-",
-                    ref.entry.action or "-",
-                    ref_dataset_name(ref) or "-",
-                    ref.entry.job_name or "-",
-                    display_ref_timestamp(ref),
-                    ref.entry.execution_mode or "local",
+            rows.append(
+                (
+                    ref.entry_id,
+                    (
+                        ref.entry.processing_tab or "-",
+                        ref.entry.action or "-",
+                        ref_dataset_name(ref) or "-",
+                        ref.entry.job_name or "-",
+                        display_ref_timestamp(ref),
+                        ref.entry.execution_mode or "local",
+                    ),
+                    (self._color_tag_for_ref(ref),),
                 ),
-                tags=(self._color_tag_for_ref(ref),),
             )
+        chunked_treeview_replace(
+            self.table,
+            rows,
+            widget=self.frame,
+            generation=generation,
+            is_current=lambda current: current == self._table_generation,
+            chunk_size=180,
+        )
 
     def _color_tag_for_ref(self, ref: ScheduledJobRef) -> str:
         color_by = self.color_by_var.get()

@@ -7,6 +7,7 @@ from typing import Any, Callable
 
 from cryoet_organizer.environments import environment_titles
 from cryoet_organizer.job_queue import ScheduledJobRef
+from cryoet_organizer.performance import TkDebouncer, perf_timer
 from cryoet_organizer.workflows import (
     create_workflow_from_refs,
     normalize_workflow,
@@ -43,11 +44,14 @@ class WorkflowEditorDialog:
         self.selected_refs_provider = selected_refs_provider
         self.workflows = [deepcopy(workflow) for workflow in project_workflows(app.project)]
         self._saved_snapshot = self._normalized_local_workflows()
-        self.catalog_jobs = build_workflow_job_catalog(app.project)
+        with perf_timer("workflow editor build catalog"):
+            self.catalog_jobs = build_workflow_job_catalog(app.project)
         self.current_index = -1
         self.current_job_id: str | None = None
         self.name_var = tk.StringVar()
         self.detail_cache: dict[str, dict[str, Any]] = {}
+        self.field_cache: dict[str, tuple[Any, ...]] = {}
+        self.environment_title_options = environment_titles(app.project)
         self.active_detail: dict[str, Any] | None = None
         self.current_job_dirty = False
         self._loading_job_details = False
@@ -77,9 +81,10 @@ class WorkflowEditorDialog:
         self.window.rowconfigure(0, weight=1)
         self.window.rowconfigure(1, weight=0)
 
-        self._build()
-        self._refresh_workflow_list()
-        self._load_current_workflow()
+        with perf_timer("workflow editor initial layout"):
+            self._build()
+            self._refresh_workflow_list()
+            self._load_current_workflow()
 
     def show(self) -> None:
         if not self.embedded:
@@ -428,6 +433,13 @@ class WorkflowEditorDialog:
         self.detail_cache[job_id] = detail
         return detail
 
+    def _fields_for_job(self, job_id: str, job: dict) -> tuple[Any, ...]:
+        fields = self.field_cache.get(job_id)
+        if fields is None:
+            fields = fields_for_workflow_job(self.app.project, job, self.catalog_jobs)
+            self.field_cache[job_id] = fields
+        return fields
+
     def _schedule_detail_preload(self) -> None:
         self._cancel_preload()
         job_ids: list[str] = []
@@ -443,22 +455,24 @@ class WorkflowEditorDialog:
             self._preload_after = None
             if generation != self._preload_generation or not self.window.winfo_exists():
                 return
-            while job_ids and job_ids[0] in self.detail_cache:
+            while job_ids and (job_ids[0] in self.detail_cache or job_ids[0] in self.field_cache):
                 job_ids.pop(0)
             if not job_ids:
                 return
             job_id = job_ids.pop(0)
             job = self._workflow_job_by_id(job_id)
-            if job is not None and job_id not in self.detail_cache:
-                self._clear_empty_details()
-                self._ensure_detail_cached(job_id, job)
+            if job is not None and job_id not in self.field_cache:
+                self._fields_for_job(job_id, job)
             if job_ids:
-                self._preload_after = self.window.after(12, preload_next)
+                self._preload_after = self.window.after(8, preload_next)
 
         self._preload_after = self.window.after_idle(preload_next)
 
     def _build_job_detail_frame(self, job_id: str, job: dict) -> dict[str, Any]:
-        entry = job.get("entry", {}) if isinstance(job.get("entry"), dict) else {}
+        with perf_timer("workflow editor build job detail"):
+            return self._build_job_detail_frame_uncached(job_id, job)
+
+    def _build_job_detail_frame_uncached(self, job_id: str, job: dict) -> dict[str, Any]:
         frame = ttk.Frame(self.details_box)
         frame.columnconfigure(0, weight=1)
         entry = job.get("entry", {}) if isinstance(job.get("entry"), dict) else {}
@@ -505,7 +519,7 @@ class WorkflowEditorDialog:
         form.columnconfigure(2, weight=1)
 
         parameters = entry.get("parameters", {}) if isinstance(entry.get("parameters"), dict) else {}
-        fields = fields_for_workflow_job(self.app.project, job, self.catalog_jobs)
+        fields = self._fields_for_job(job_id, job)
         for row, field in enumerate(fields):
             ttk.Label(form, text=field.label or field.key).grid(row=row, column=0, sticky="w", padx=(0, 8), pady=3)
             self._build_parameter_widget(form, row, field, str(parameters.get(field.key, field.default_value)), detail)
@@ -548,7 +562,7 @@ class WorkflowEditorDialog:
             variable = tk.StringVar(value=value or "None")
             parameter_vars[field.key] = variable
             self._trace_dirty_var(variable)
-            ttk.Combobox(parent, textvariable=variable, values=environment_titles(self.app.project), state="readonly").grid(row=row, column=1, sticky="ew", pady=3)
+            ttk.Combobox(parent, textvariable=variable, values=self.environment_title_options, state="readonly").grid(row=row, column=1, sticky="ew", pady=3)
             return
         variable = tk.StringVar(value=value)
         parameter_vars[field.key] = variable
@@ -615,6 +629,7 @@ class WorkflowEditorDialog:
         for child in self.details_box.winfo_children():
             child.destroy()
         self.detail_cache = {} if destroy_cache else self.detail_cache
+        self.field_cache = {} if destroy_cache else self.field_cache
         self.active_detail = None
         self.empty_detail_label = None
         self.details_canvas.yview_moveto(0)
@@ -672,6 +687,7 @@ class WorkflowEditorDialog:
         if self.job_tree.exists(job_id):
             self.job_tree.delete(job_id)
         cached = self.detail_cache.pop(job_id, None)
+        self.field_cache.pop(job_id, None)
         if cached is not None:
             frame = cached.get("frame")
             if frame is not None:
@@ -787,6 +803,7 @@ class WorkflowJobPickerDialog:
         self.window.grab_set()
         self.window.columnconfigure(0, weight=1)
         self.window.rowconfigure(1, weight=1)
+        self._refresh_debouncer = TkDebouncer(self.window, self._refresh, delay_ms=100)
         self._build()
         self._refresh()
 
@@ -801,7 +818,7 @@ class WorkflowJobPickerDialog:
         ttk.Label(top, text="Search").grid(row=0, column=0, sticky="w", padx=(0, 8))
         search = ttk.Entry(top, textvariable=self.search_var)
         search.grid(row=0, column=1, sticky="ew")
-        self.search_var.trace_add("write", lambda *_args: self._refresh())
+        self.search_var.trace_add("write", lambda *_args: self._refresh_debouncer.schedule())
 
         body = ttk.Frame(self.window, padding=(12, 0, 12, 12))
         body.grid(row=1, column=0, sticky="nsew")

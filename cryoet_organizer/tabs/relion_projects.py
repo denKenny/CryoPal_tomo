@@ -10,6 +10,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 from cryoet_organizer.mrc_preview import MrcPlanePreview, MrcPreview, mrc_preview_cache_key, read_mrc_preview
+from cryoet_organizer.performance import chunked_treeview_replace
 from cryoet_organizer.project import dataset_ts_names
 from cryoet_organizer.relion_pipeline import (
     RelionPipelineJob,
@@ -33,6 +34,12 @@ from cryoet_organizer.star_merge import (
 )
 from cryoet_organizer.tabs.base import SidebarTab
 
+try:
+    from PIL import Image, ImageTk
+except Exception:  # pragma: no cover - optional preview accelerator
+    Image = None
+    ImageTk = None
+
 
 MRC_SUFFIXES = {".mrc", ".mrcs"}
 PREVIEW_READ_SIZE = 60
@@ -54,6 +61,12 @@ class _PipelineLoadResult:
     error: str = ""
 
 
+@dataclass
+class _FileTreeRow:
+    path: Path
+    modified: str
+
+
 class RelionProjectsTab(SidebarTab):
     tab_id = "relion_projects"
     title = "Relion projects"
@@ -71,6 +84,7 @@ class RelionProjectsTab(SidebarTab):
         self.preview_cache: OrderedDict[tuple[str, float, int, str], MrcPreview] = OrderedDict()
         self.job_preview_cache: OrderedDict[str, _CachedJobPreview] = OrderedDict()
         self.file_list_cache: dict[str, list[Path]] = {}
+        self.file_row_cache: dict[str, list[_FileTreeRow]] = {}
         self.preview_cache_lock = threading.Lock()
         self.rendered_image_cache: OrderedDict[tuple[object, ...], tk.PhotoImage] = OrderedDict()
         self.preview_images: list[tk.PhotoImage] = []
@@ -370,7 +384,6 @@ class RelionProjectsTab(SidebarTab):
         self._clear_tree(self.job_view)
         self._clear_tree(self.file_view)
         self._update_action_buttons()
-        self._render_idle_preview_message()
         if not selection:
             return
         job_type = str(selection[0])
@@ -389,7 +402,6 @@ class RelionProjectsTab(SidebarTab):
         generation = self._job_file_generation
         self._file_insert_generation += 1
         self._clear_tree(self.file_view)
-        self._render_idle_preview_message()
         project = self._selected_project()
         if project is None or not selection:
             self._update_action_buttons()
@@ -403,21 +415,24 @@ class RelionProjectsTab(SidebarTab):
         self._update_action_buttons()
         cache_key = self._job_preview_cache_key(project, job)
         cached_files = self.file_list_cache.get(cache_key)
-        if cached_files is not None:
-            self._finish_job_file_load(generation, str(project.root_directory), job, list(cached_files), "")
+        cached_rows = self.file_row_cache.get(cache_key)
+        if cached_files is not None and cached_rows is not None:
+            self._finish_job_file_load(generation, str(project.root_directory), job, list(cached_files), list(cached_rows), "")
             return
         self.status_var.set(f"Scanning files for {job.relative_path}...")
 
         def worker() -> None:
             files: list[Path] = []
+            file_rows: list[_FileTreeRow] = []
             error = ""
             try:
                 files = relion_job_files(project.root_directory, job)
+                file_rows = [_FileTreeRow(path=path, modified=self._format_modified(path)) for path in files]
             except Exception as exc:
                 error = str(exc)
             self.app.root.after(
                 0,
-                lambda: self._finish_job_file_load(generation, str(project.root_directory), job, files, error),
+                lambda: self._finish_job_file_load(generation, str(project.root_directory), job, files, file_rows, error),
             )
 
         threading.Thread(target=worker, daemon=True).start()
@@ -428,6 +443,7 @@ class RelionProjectsTab(SidebarTab):
         root_directory: str,
         job: RelionPipelineJob,
         files: list[Path],
+        file_rows: list[_FileTreeRow],
         error: str,
     ) -> None:
         if generation != self._job_file_generation:
@@ -444,33 +460,28 @@ class RelionProjectsTab(SidebarTab):
             return
         cache_key = self._job_preview_cache_key(project, job)
         self.file_list_cache[cache_key] = list(files)
+        self.file_row_cache[cache_key] = list(file_rows)
         self.status_var.set(f"{job.relative_path}: {len(files)} file(s) found.")
-        self._populate_file_tree_chunked(files)
-        self._render_idle_preview_message()
+        self._populate_file_tree_chunked(file_rows)
 
-    def _populate_file_tree_chunked(self, files: list[Path]) -> None:
+    def _populate_file_tree_chunked(self, file_rows: list[_FileTreeRow]) -> None:
         self._file_insert_generation += 1
         generation = self._file_insert_generation
         self.file_by_iid = {}
-        self._clear_tree(self.file_view)
-        chunk_size = 120
-
-        def insert_chunk(start: int = 0) -> None:
-            if generation != self._file_insert_generation:
-                return
-            end = min(start + chunk_size, len(files))
-            for index in range(start, end):
-                path = files[index]
-                iid = f"file-{index}"
-                self.file_by_iid[iid] = path
-                modified = self._format_modified(path)
-                self.file_view.insert("", "end", iid=iid, values=(path.name, modified))
-            if end < len(files):
-                self.frame.after(1, lambda: insert_chunk(end))
-            else:
-                self._update_action_buttons()
-
-        insert_chunk()
+        rows: list[tuple[str, tuple[object, ...], tuple[str, ...]]] = []
+        for index, row in enumerate(file_rows):
+            iid = f"file-{index}"
+            self.file_by_iid[iid] = row.path
+            rows.append((iid, (row.path.name, row.modified), ()))
+        chunked_treeview_replace(
+            self.file_view,
+            rows,
+            widget=self.frame,
+            generation=generation,
+            is_current=lambda current: current == self._file_insert_generation,
+            chunk_size=160,
+            on_complete=self._update_action_buttons,
+        )
 
     def _clear_pipeline_view(self, message: str) -> None:
         self.jobs_by_type = {}
@@ -599,14 +610,12 @@ class RelionProjectsTab(SidebarTab):
         self._update_action_buttons()
         paths = self._selected_paths()
         if not paths:
-            self._render_idle_preview_message()
+            self.status_var.set("No file selected.")
             return
         if len(paths) == 1:
             self.status_var.set(f"{paths[0].name} selected. Click 'Preview' to render it.")
-            self._render_idle_preview_message()
         else:
             self.status_var.set(f"{len(paths)} files selected. File preview is available for one file at a time.")
-            self._render_idle_preview_message()
 
     def _update_action_buttons(self) -> None:
         if self._loading_pipeline or self._loading_job_files or self._preview_busy:
@@ -910,6 +919,7 @@ class RelionProjectsTab(SidebarTab):
             self.preview_cache.clear()
         self.job_preview_cache.clear()
         self.file_list_cache.clear()
+        self.file_row_cache.clear()
         self.rendered_image_cache.clear()
         self.current_job_preview_key = ""
 
@@ -936,6 +946,16 @@ class RelionProjectsTab(SidebarTab):
         if cached is not None:
             self.rendered_image_cache.move_to_end(image_key)
             return cached
+        if Image is not None and ImageTk is not None:
+            image = Image.frombytes("L", (plane.width, plane.height), bytes(plane.pixels))
+            if PREVIEW_ZOOM > 1:
+                resample = getattr(getattr(Image, "Resampling", Image), "NEAREST")
+                image = image.resize((plane.width * PREVIEW_ZOOM, plane.height * PREVIEW_ZOOM), resample)
+            rendered = ImageTk.PhotoImage(image)
+            self.rendered_image_cache[image_key] = rendered
+            while len(self.rendered_image_cache) > 96:
+                self.rendered_image_cache.popitem(last=False)
+            return rendered
         image = tk.PhotoImage(width=plane.width, height=plane.height)
         rows: list[str] = []
         for y_index in range(plane.height):

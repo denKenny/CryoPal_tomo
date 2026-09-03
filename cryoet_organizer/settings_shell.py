@@ -3,6 +3,7 @@ from __future__ import annotations
 import tkinter as tk
 from tkinter import messagebox, ttk
 
+from cryoet_organizer.performance import perf_timer
 from cryoet_organizer.settings_bundle import SETTINGS_CATEGORY_LABELS
 
 
@@ -118,7 +119,8 @@ class SettingsShellWindow:
             frame.columnconfigure(0, weight=1)
             self.section_frames[section_key] = frame
             try:
-                self.sections[section_key] = self.app._create_settings_section_view(section_key, frame)
+                with perf_timer(f"settings build section {section_key}"):
+                    self.sections[section_key] = self.app._create_settings_section_view(section_key, frame)
             except Exception as exc:
                 self.section_frames.pop(section_key, None)
                 self.sections.pop(section_key, None)

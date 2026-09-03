@@ -25,6 +25,7 @@ from cryoet_organizer.job_defaults import (
 )
 from cryoet_organizer.m_population import parse_population_file
 from cryoet_organizer.mtools_catalog import MToolCommand, MToolFlag, M_GROUPS, m_jobs_by_group
+from cryoet_organizer.performance import TkDebouncer
 from cryoet_organizer.project import JobHistoryEntry, MPopulationRecord, ProjectData
 from cryoet_organizer.resizable_sections import ResizableSectionStack, VerticalSplitPane
 from cryoet_organizer.scheduled_slurm_dialog import CollectiveSlurmSubmissionDialog, ask_scheduled_slurm_mode
@@ -72,6 +73,7 @@ class ProcessingMTab(SidebarTab):
         self.slurm_overrides_ui = SlurmOverrideUI(self.app, self.slurm_profile_var)
         self.processing_advanced_visible = tk.BooleanVar(value=False)
         self._suspend_command_preview_updates = False
+        self._command_preview_debouncer = TkDebouncer(self.frame, self._update_command_preview, delay_ms=120)
         self._required_param_rows: list[dict[str, object]] = []
         self._advanced_param_rows: list[dict[str, object]] = []
         self.history_entry_refs: dict[str, JobHistoryEntry] = {}
@@ -1190,6 +1192,11 @@ class ProcessingMTab(SidebarTab):
         self._set_command_text(f"{executable} {command_suffix}" if command_suffix else executable)
         self._update_population_summary()
 
+    def _schedule_command_preview_update(self, *_args) -> None:
+        if self._suspend_command_preview_updates:
+            return
+        self._command_preview_debouncer.schedule()
+
     def _copy_command(self) -> None:
         command = self._current_command_text()
         if not command:
@@ -1470,7 +1477,7 @@ class ProcessingMTab(SidebarTab):
             value = filedialog.askopenfilename(title=f"Select value for {flag.name}")
         if value and flag.name in self.parameter_vars:
             self.parameter_vars[flag.name].set(value)
-            self._update_command_preview()
+            self._schedule_command_preview_update()
 
     def _add_bool_widget(self, parent: ttk.Frame, row: int, flag: MToolFlag, default_value: bool) -> None:
         variable = tk.BooleanVar(value=default_value)
@@ -1478,7 +1485,7 @@ class ProcessingMTab(SidebarTab):
             parent,
             text=f"{self._display_parameter_name(flag) or flag.name}{' *' if flag.required else ''}",
             variable=variable,
-            command=self._update_command_preview,
+            command=self._schedule_command_preview_update,
         )
         check.grid(row=row, column=0, sticky="w", pady=(0, 2))
         ttk.Label(parent, text=flag.description, wraplength=900, justify="left").grid(
@@ -1505,7 +1512,7 @@ class ProcessingMTab(SidebarTab):
         variable = tk.StringVar(value=default_value)
         entry = ttk.Entry(block, textvariable=variable)
         entry.grid(row=1, column=0, sticky="ew")
-        variable.trace_add("write", lambda *_args: self._update_command_preview())
+        variable.trace_add("write", self._schedule_command_preview_update)
 
         if flag.widget == "path":
             ttk.Button(
@@ -1588,7 +1595,7 @@ class ProcessingMTab(SidebarTab):
             row["check_widget"] = None
             if desired_kind == "bool":
                 value_var: tk.Variable = tk.BooleanVar()
-                check = ttk.Checkbutton(control_frame, variable=value_var, command=self._update_command_preview)
+                check = ttk.Checkbutton(control_frame, variable=value_var, command=self._schedule_command_preview_update)
                 check.grid(row=0, column=0, sticky="w")
                 row["value_widget"] = check
                 row["check_widget"] = check
@@ -1596,7 +1603,7 @@ class ProcessingMTab(SidebarTab):
                 value_var = tk.StringVar()
                 entry = ttk.Entry(control_frame, textvariable=value_var)
                 entry.grid(row=0, column=0, sticky="ew")
-                value_var.trace_add("write", lambda *_args: self._update_command_preview())
+                value_var.trace_add("write", self._schedule_command_preview_update)
                 row["value_widget"] = entry
                 if desired_kind == "path":
                     browse = ttk.Button(

@@ -88,6 +88,7 @@ class ResizableSectionStack(ttk.Frame):
         self._dragging_key: str | None = None
         self._drag_start_y = 0
         self._drag_start_height = 0
+        self._layout_notify_after_id: str | None = None
         self._spacer = ttk.Frame(self, height=self.bottom_spacing)
         self._spacer.grid_propagate(False)
 
@@ -179,7 +180,7 @@ class ResizableSectionStack(ttk.Frame):
         if applied == 0:
             return 0
         section.wrapper.configure(height=section.current_height)
-        self._notify_layout_changed()
+        self._notify_layout_changed(defer=True)
         return applied
 
     def _visible_sections(self) -> list[_Section]:
@@ -223,7 +224,7 @@ class ResizableSectionStack(ttk.Frame):
             return
         section.current_height = new_height
         section.wrapper.configure(height=new_height)
-        self._notify_layout_changed()
+        self._notify_layout_changed(defer=True)
 
     def _finish_drag(self, _event=None) -> None:
         if not self._dragging_key:
@@ -231,7 +232,21 @@ class ResizableSectionStack(ttk.Frame):
         self._dragging_key = None
         self._notify_layout_changed()
 
-    def _notify_layout_changed(self) -> None:
+    def _notify_layout_changed(self, *, defer: bool = False) -> None:
+        if defer:
+            if self._layout_notify_after_id is None:
+                self._layout_notify_after_id = self.after(16, self._run_layout_changed_notification)
+            return
+        if self._layout_notify_after_id is not None:
+            try:
+                self.after_cancel(self._layout_notify_after_id)
+            except tk.TclError:
+                pass
+            self._layout_notify_after_id = None
+        self._run_layout_changed_notification()
+
+    def _run_layout_changed_notification(self) -> None:
+        self._layout_notify_after_id = None
         self.update_idletasks()
         if callable(self.on_layout_changed):
             self.on_layout_changed()
@@ -262,6 +277,7 @@ class VerticalSplitPane(ttk.Frame):
         self._drag_start_y = 0
         self._drag_start_height = 0
         self._resize_after_id: str | None = None
+        self._layout_notify_after_id: str | None = None
         self.columnconfigure(0, weight=1)
         self.rowconfigure(2, weight=1, minsize=self.min_bottom_height)
 
@@ -375,12 +391,26 @@ class VerticalSplitPane(ttk.Frame):
                 return
         self.current_top_height = max(self.min_top_height, self.current_top_height + applied_delta)
         self._apply_top_height()
-        self._notify_layout_changed()
+        self._notify_layout_changed(defer=True)
 
     def _finish_drag(self, _event=None) -> None:
         self._notify_layout_changed()
 
-    def _notify_layout_changed(self) -> None:
+    def _notify_layout_changed(self, *, defer: bool = False) -> None:
+        if defer:
+            if self._layout_notify_after_id is None:
+                self._layout_notify_after_id = self.after(16, self._run_layout_changed_notification)
+            return
+        if self._layout_notify_after_id is not None:
+            try:
+                self.after_cancel(self._layout_notify_after_id)
+            except tk.TclError:
+                pass
+            self._layout_notify_after_id = None
+        self._run_layout_changed_notification()
+
+    def _run_layout_changed_notification(self) -> None:
+        self._layout_notify_after_id = None
         self.update_idletasks()
         if callable(self.on_layout_changed):
             self.on_layout_changed()
