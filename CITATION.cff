@@ -2,7 +2,7 @@ cff-version: 1.2.0
 message: "If you use CryoPal_tomo, please cite the software using this metadata."
 title: "CryoPal_tomo"
 type: software
-version: 0.1.0
+version: 0.2.0
 authors:
   - family-names: Ehses
     given-names: Kenneth

@@ -2,7 +2,7 @@
 
 All notable changes are documented here. The project follows Semantic Versioning from version 1.0 onward.
 
-## Unreleased
+## 0.2.0 (unreleased)
 
 ### Changed
 
