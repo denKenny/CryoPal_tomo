@@ -19,4 +19,3 @@ Job-history records include a stable entry ID, execution state, submission/start
 ## Design constraints
 
 CryoPal coordinates external software rather than reproducing its algorithms. A command preview is therefore part of the scientific record. Built-in structured fields should avoid shell interpretation; custom jobs, shortcuts, environment activation, and Slurm preambles are explicitly executable content.
-

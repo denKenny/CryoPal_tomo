@@ -9,4 +9,3 @@ CryoPal_tomo launches local and Slurm commands with the permissions of the curre
 Built-in structured Slurm header fields reject multiline values. Explicit custom scripts and shell preambles intentionally retain shell semantics.
 
 Supported security fixes are provided for the latest released version. No 1.0 security-support window has yet been declared.
-

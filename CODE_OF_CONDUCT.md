@@ -5,4 +5,3 @@ We are committed to a respectful, harassment-free community for everyone. Contri
 Unacceptable behavior includes harassment, discriminatory language, personal attacks, publishing another person’s private information, or sharing confidential research data without authorization. Maintainers may remove content or participation that violates these expectations.
 
 Report conduct concerns privately to the project maintainer. Enforcement decisions should be documented while protecting reporter confidentiality.
-
