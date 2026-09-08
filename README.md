@@ -10,15 +10,36 @@ CryoPal_tomo does not replace the underlying processing software. Instead, it ac
 
 ## Installation
 
-CryoPal_tomo does not require additional Python dependencies to get started. It runs directly with `python3`.
+CryoPal_tomo supports Python 3.10–3.13 on Linux and macOS. A working Tk installation is required; Tk is supplied by the Conda environment below but is not installed by `pip` itself.
 
-### Launch directly
+### Recommended Conda installation
+
+```bash
+git clone https://github.com/denKenny/CryoPal_tomo.git
+cd CryoPal_tomo
+conda env create -f environment.yml
+conda activate cryopal-tomo
+cryopal-tomo doctor
+cryopal-tomo
+```
+
+### Pip installation
+
+Create and activate a Python 3.10–3.13 environment with Tk available, then run:
+
+```bash
+python -m pip install .
+cryopal-tomo doctor
+cryopal-tomo
+```
+
+### Launch from a source checkout
 
 ```bash
 python3 CryoPal_tomo.py
 ```
 
-### Optional: launch as `CryoPal_tomo`
+### Optional legacy launcher
 
 If you want to start it more conveniently from anywhere, add the repository directory to your `PATH`. For example, in `~/.bashrc`:
 
@@ -40,11 +61,14 @@ CryoPal_tomo
 
 This works because the repository already includes the executable launcher script [CryoPal_tomo](./CryoPal_tomo).
 
-### Notes
+### Support matrix
 
-- `python3` is sufficient for launching CryoPal_tomo itself.
+- Linux and macOS are supported for the 1.0 release candidate. Windows and WSL are not yet validated.
+- Supported Python versions are 3.10, 3.11, 3.12, and 3.13.
+- Tk is a required system/runtime component. Run `cryopal-tomo doctor` before reporting an installation problem.
 - External processing tools such as WarpTools, MTools, PyTom, CryoLithe, slabify, or MemBrain-seg are managed separately and can be connected through environments or Slurm profiles inside CryoPal_tomo.
 - If you plan to run jobs locally through the GUI, it is often useful to define one or more environments under `Settings > Manage environments`.
+- Slurm is optional; `sbatch`, `squeue`, `sacct`, and `scancel` are required for the corresponding cluster features.
 
 ## Quick Start Guide
 
@@ -81,6 +105,8 @@ CryoPal_tomo is under active development and is intended to support a range of c
 
 If you notice unexpected behavior, please report it. Clear bug reports are extremely valuable and help improve CryoPal_tomo for both current and future users.
 
+Use the [GitHub issue tracker](https://github.com/denKenny/CryoPal_tomo/issues) for reproducible bug reports and feature requests. Do not publish credentials, private paths, sensitive sample information, or security vulnerabilities in an issue; see [SECURITY.md](SECURITY.md).
+
 Helpful bug reports usually include:
 
 - what you were trying to do
@@ -93,11 +119,11 @@ Helpful bug reports usually include:
 
 If CryoPal_tomo contributes to your data processing, curation, or analysis workflow, please consider citing it in your thesis, manuscript, preprint, presentation, or software section.
 
-Current Zenodo DOI status:
+The version-independent Zenodo concept DOI is:
 
 > Zenodo DOI: `10.5281/zenodo.20812076`
 
-Recommended citation structure for now:
+Recommended citation:
 
 ```text
 Ehses, K. (2026). CryoPal_tomo: A project-centered software for organizing and processing cryo-electron tomography workflows. Zenodo. https://doi.org/10.5281/zenodo.20812076
@@ -110,6 +136,21 @@ It is a good idea to include:
 - author or maintainer information
 - Zenodo DOI
 - access date, if your journal or thesis style requests it
+
+Machine-readable citation metadata is available in [CITATION.cff](CITATION.cff). Verify that the DOI landing page identifies the exact software version used in an analysis.
+
+## Development, safety, and limitations
+
+- Contributor setup and test instructions: [CONTRIBUTING.md](CONTRIBUTING.md)
+- Security and executable-content trust model: [SECURITY.md](SECURITY.md)
+- Architecture and project-format overview: [docs/architecture.md](docs/architecture.md)
+- Known limitations and scientific conventions requiring validation: [docs/limitations.md](docs/limitations.md)
+- Reproducibility guidance: [docs/reproducibility.md](docs/reproducibility.md)
+- Manuscript validation protocol and publication gates: [docs/manuscript_validation.md](docs/manuscript_validation.md)
+
+Gallery deletion moves exactly matched files into `.cryopal_trash/<transaction-id>/` below each affected data root. This makes deletion recoverable; CryoPal_tomo does not automatically purge those folders.
+
+CryoPal_tomo is free software licensed under the [GNU General Public License, version 3 or later](LICENSE).
 
 ## References
 
@@ -127,10 +168,10 @@ CryoPal_tomo is designed to work alongside a range of established cryo-ET tools 
 https://doi.org/10.48550/arXiv.2501.15246 
 - PyTom
   https://github.com/SBC-Utrecht/pytom-match-pick
-  > Chaillet, M. L., Roet, S., & Förster, F. (2026). pytom-match-pick (0.13.2). Zenodo. https://doi.org/10.5281/zenodo.20556513`
+  > Chaillet, M. L., Roet, S., & Förster, F. (2026). pytom-match-pick (0.13.2). Zenodo. https://doi.org/10.5281/zenodo.20556513
 - slabify
   https://github.com/CellArchLab/slabify-et
-  >Righetto R., & Lamm L. (2024). CellArchLab/slabify-et: v0.3.0 (v0.3.0). Zenodo. https://doi.org/10.5281/zenodo.13964436`
+  > Righetto R., & Lamm L. (2024). CellArchLab/slabify-et: v0.3.0 (v0.3.0). Zenodo. https://doi.org/10.5281/zenodo.13964436
 - MemBrain-seg
   https://github.com/teamtomo/membrain-seg
   > Lamm, L. et al. MemBrain v2: an end-to-end tool for the analysis of membranes in cryo-electron tomography. (2025). bioRxiv. https://doi.org/10.1101/2024.01.05.574336 

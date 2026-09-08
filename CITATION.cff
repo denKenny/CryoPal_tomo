@@ -1,0 +1,21 @@
+cff-version: 1.2.0
+message: "If you use CryoPal_tomo, please cite the software using this metadata."
+title: "CryoPal_tomo"
+type: software
+version: 0.1.0
+authors:
+  - family-names: Ehses
+    given-names: Kenneth
+    orcid: "https://orcid.org/0000-0002-8595-5994"
+repository-code: "https://github.com/denKenny/CryoPal_tomo"
+url: "https://github.com/denKenny/CryoPal_tomo"
+license: GPL-3.0-or-later
+identifiers:
+  - type: doi
+    value: "10.5281/zenodo.20812076"
+    description: "Zenodo concept DOI for all CryoPal_tomo versions"
+keywords:
+  - cryo-electron tomography
+  - workflow orchestration
+  - RELION
+  - Slurm

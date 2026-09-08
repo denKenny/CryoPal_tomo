@@ -1,0 +1,10 @@
+include CHANGELOG.md
+include CITATION.cff
+include CODE_OF_CONDUCT.md
+include CONTRIBUTING.md
+include RELEASE_CHECKLIST.md
+include SECURITY.md
+include environment.yml
+include uv.lock
+recursive-include docs *.md *.pdf *.png
+recursive-include benchmarks *.py
