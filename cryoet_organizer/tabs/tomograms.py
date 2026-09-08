@@ -22,8 +22,11 @@ from cryoet_organizer.executables import (
 from cryoet_organizer.file_resolver import resolve_dataset_file
 from cryoet_organizer.job_execution import (
     build_slurm_override_metadata,
+    complete_history_entry,
+    create_history_entry,
     display_history_timestamp,
     execute_command_sequence,
+    history_timestamp_now,
     is_scheduled_history_entry,
     slurm_override_payload,
 )
@@ -583,6 +586,8 @@ class TomogramsTab(SidebarTab):
         self.history_table.tag_configure("waiting", background="#dbeeff")
         self.history_table.tag_configure("running", background="#dff4d8")
         self.history_table.tag_configure("completed", background="#dde8ff")
+        self.history_table.tag_configure("failed", background="#f8d7da")
+        self.history_table.tag_configure("cancelled", background="#fff3cd")
         history_scroll = ttk.Scrollbar(history_box, orient="vertical", command=self.history_table.yview)
         history_scroll.grid(row=0, column=1, sticky="ns")
         self.history_table.configure(yscrollcommand=history_scroll.set)
@@ -2789,25 +2794,25 @@ class TomogramsTab(SidebarTab):
         command: str,
         scheduled: bool = False,
     ) -> JobHistoryEntry:
-        dataset.job_history.append(
-            JobHistoryEntry(
-                timestamp=datetime.now(timezone.utc).isoformat(timespec="seconds"),
-                action=action,
-                group="Tomograms",
-                job_name=spec["job_name"],
-                command=command,
-                processing_tab="Processing: TS jobs",
-                dataset_name=dataset.dataset_name,
-                execution_mode="slurm" if self.execution_mode_var.get() == "Submit to Slurm" else "local",
-                slurm_profile=self.slurm_profile_var.get().strip(),
-                environment_title=self.environment_var.get().strip() if self.execution_mode_var.get() == "Run locally" else "",
-                parameters={key: value for key, value in spec.items() if value},
-            )
+        entry = create_history_entry(
+            scheduled=scheduled,
+            action=action,
+            group="Tomograms",
+            job_name=spec["job_name"],
+            command=command,
+            processing_tab="Processing: TS jobs",
+            dataset_name=dataset.dataset_name,
+            execution_mode="slurm" if self.execution_mode_var.get() == "Submit to Slurm" else "local",
+            slurm_profile=self.slurm_profile_var.get().strip(),
+            environment_title=self.environment_var.get().strip() if self.execution_mode_var.get() == "Run locally" else "",
+            parameters={key: value for key, value in spec.items() if value},
+            working_directory=dataset.processing_folder,
         )
+        dataset.job_history.append(entry)
         if self.execution_mode_var.get() == "Run locally" and self.environment_var.get().strip():
             dataset.job_history[-1].parameters["execution_environment"] = self.environment_var.get().strip()
         dataset.job_history[-1].parameters.update(self._current_slurm_overrides())
-        return dataset.job_history[-1]
+        return entry
 
     def _processed_ts_items(
         self,
@@ -2882,8 +2887,7 @@ class TomogramsTab(SidebarTab):
         dataset_summary = self._processed_dataset_summary(processed_ts, anchor_dataset.dataset_name)
         first_spec = commands_with_dataset[0][1]
         parameters = self._grouped_history_parameters(commands_with_dataset, ts_summary)
-        entry = JobHistoryEntry(
-            timestamp=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        entry = create_history_entry(
             action=action,
             group="Tomograms",
             job_name=first_spec.get("job_name", "Tomogram job"),
@@ -2894,8 +2898,9 @@ class TomogramsTab(SidebarTab):
             slurm_profile=self.slurm_profile_var.get().strip(),
             environment_title=self.environment_var.get().strip() if self.execution_mode_var.get() == "Run locally" else "",
             parameters=parameters,
-            artifacts={"processed_ts": processed_ts},
+            working_directory=anchor_dataset.processing_folder,
         )
+        entry.artifacts = {"processed_ts": processed_ts}
         if self.execution_mode_var.get() == "Run locally" and self.environment_var.get().strip():
             entry.parameters["execution_environment"] = self.environment_var.get().strip()
         entry.parameters.update(self._current_slurm_overrides())
@@ -2941,6 +2946,17 @@ class TomogramsTab(SidebarTab):
                 entry.slurm_script_path = source.slurm_script_path
                 entry.parameters = dict(source.parameters)
                 entry.artifacts = deepcopy(source.artifacts)
+                entry.status = source.status
+                entry.submitted_at = source.submitted_at
+                entry.started_at = source.started_at
+                entry.finished_at = source.finished_at
+                entry.exit_code = source.exit_code
+                entry.failure_reason = source.failure_reason
+                entry.working_directory = source.working_directory
+                entry.host = source.host
+                entry.app_version = source.app_version
+                entry.tool_version = source.tool_version
+                entry.environment_fingerprint = source.environment_fingerprint
 
     def _processed_ts_detail_rows(self, entry: JobHistoryEntry) -> list[tuple[str, str]]:
         processed_payload = entry.artifacts.get("processed_ts", [])
@@ -3139,6 +3155,7 @@ class TomogramsTab(SidebarTab):
         result: SlurmSubmissionResult,
         profile_name: str,
     ) -> None:
+        submitted_at = history_timestamp_now()
         used_entry_ids: set[int] = set()
         for dataset, spec, _command in commands:
             if dataset is None:
@@ -3155,6 +3172,9 @@ class TomogramsTab(SidebarTab):
                 if target_ts_name and entry.parameters.get("ts_name", "") != target_ts_name:
                     continue
                 entry.action = "submitted"
+                entry.timestamp = submitted_at
+                entry.status = "submitted"
+                entry.submitted_at = submitted_at
                 entry.execution_mode = "slurm"
                 entry.slurm_profile = profile_name
                 entry.slurm_job_id = result.job_id
@@ -3963,6 +3983,10 @@ class TomogramsTab(SidebarTab):
         profile_name = self.slurm_profile_var.get().strip()
         if use_slurm and not profile_name and not self.app.is_debug_mode_enabled():
             self.app.clear_history_entries_running(running_entry_ids)
+            if history_entry is not None:
+                complete_history_entry(history_entry, None, failure_reason="Slurm profile missing")
+                self._sync_history_entry_copies(history_entry)
+                self.app.on_project_changed("tomograms", "custom")
             messagebox.showerror("Slurm profile missing", "Please select a Slurm profile first.")
             return
 
@@ -3980,6 +4004,10 @@ class TomogramsTab(SidebarTab):
             except Exception as exc:
                 self.app.clear_abort_request()
                 self.app.clear_history_entries_running(running_entry_ids)
+                if history_entry is not None:
+                    complete_history_entry(history_entry, None, failure_reason=str(exc))
+                    self._sync_history_entry_copies(history_entry)
+                    self.app.on_project_changed("tomograms", "custom")
                 self.app.status_var.set(f"{label} submission failed: {exc}")
                 return
             if history_entry is not None:
@@ -3993,7 +4021,16 @@ class TomogramsTab(SidebarTab):
             return
 
         items: list[dict[str, object]] = []
-        activation_command = self.app.resolve_environment_activation(self.environment_var.get())
+        try:
+            activation_command = self.app.resolve_environment_activation(self.environment_var.get())
+        except Exception as exc:
+            self.app.clear_history_entries_running(running_entry_ids)
+            if history_entry is not None:
+                complete_history_entry(history_entry, None, failure_reason=str(exc))
+                self._sync_history_entry_copies(history_entry)
+                self.app.on_project_changed("tomograms", "custom")
+            messagebox.showerror("Environment unavailable", str(exc))
+            return
         for dataset, spec, command in commands:
             processing_folder = dataset.processing_folder if dataset is not None else ""
             dataset_name = dataset.dataset_name if dataset is not None else "unknown_dataset"
@@ -4017,6 +4054,7 @@ class TomogramsTab(SidebarTab):
                     "error_label": f"{dataset_name}/{spec.get('ts_name', '-')}",
                     "dataset": dataset,
                     "activation_command": activation_command,
+                    "history_entry": history_entry,
                 }
             )
         execute_command_sequence(
@@ -4033,6 +4071,7 @@ class TomogramsTab(SidebarTab):
                 count,
                 failures,
                 running_entry_ids,
+                history_entry,
             ),
         )
         self.app.status_var.set(
@@ -4045,7 +4084,11 @@ class TomogramsTab(SidebarTab):
         result: SlurmSubmissionResult,
         profile_name: str,
     ) -> None:
+        submitted_at = history_timestamp_now()
         entry.action = "submitted"
+        entry.timestamp = submitted_at
+        entry.status = "submitted"
+        entry.submitted_at = submitted_at
         entry.execution_mode = "slurm"
         entry.slurm_profile = profile_name
         entry.slurm_job_id = result.job_id
@@ -4059,8 +4102,21 @@ class TomogramsTab(SidebarTab):
         command_count: int,
         failures: list[str],
         running_entry_ids: list[str],
+        history_entry: JobHistoryEntry | None,
     ) -> None:
         self.app.clear_history_entries_running(running_entry_ids)
+        if history_entry is not None:
+            if failures and history_entry.status not in {"failed", "cancelled"}:
+                aborted = any("aborted" in failure.casefold() for failure in failures)
+                complete_history_entry(
+                    history_entry,
+                    None,
+                    aborted=aborted,
+                    failure_reason="; ".join(failures),
+                )
+            elif not failures:
+                complete_history_entry(history_entry, 0)
+            self._sync_history_entry_copies(history_entry)
         self.app.clear_abort_request()
         self.app.on_project_changed("tomograms", "custom")
         if failures:
@@ -4421,19 +4477,30 @@ class TomogramsTab(SidebarTab):
                     break
                 try:
                     if errors and not self.app.is_debug_mode_enabled():
-                        failures.append(f"{entry.dataset_name}/{entry.parameters.get('ts_name', '-')}: " + "; ".join(errors))
+                        failure = f"{entry.dataset_name}/{entry.parameters.get('ts_name', '-')}: " + "; ".join(errors)
+                        complete_history_entry(entry, None, failure_reason=failure)
+                        self._sync_history_entry_copies(entry)
+                        failures.append(failure)
                         break
                     if not commands:
-                        failures.append(f"{entry.dataset_name}/{entry.parameters.get('ts_name', '-')}: no commands resolved")
+                        failure = f"{entry.dataset_name}/{entry.parameters.get('ts_name', '-')}: no commands resolved"
+                        complete_history_entry(entry, None, failure_reason=failure)
+                        self._sync_history_entry_copies(entry)
+                        failures.append(failure)
                         break
-                    started_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
                     command_text = "\n".join(command for _ds, _spec, command in commands)
                     run_as_slurm = force_slurm or entry.execution_mode == "slurm"
                     current_profile = forced_profile or entry.slurm_profile
                     if run_as_slurm and not current_profile and not self.app.is_debug_mode_enabled():
-                        failures.append(f"{entry.dataset_name}/{entry.parameters.get('ts_name', '-')}: missing Slurm profile")
+                        failure = f"{entry.dataset_name}/{entry.parameters.get('ts_name', '-')}: missing Slurm profile"
+                        complete_history_entry(entry, None, failure_reason=failure)
+                        self._sync_history_entry_copies(entry)
+                        failures.append(failure)
                         break
                     if not run_as_slurm:
+                        started_at = history_timestamp_now()
+                        entry.started_at = started_at
+                        entry.status = "running"
                         self.app.root.after(
                             0,
                             lambda current_entry=entry, current_time=started_at, current_command=command_text: self._mark_scheduled_entry_started(
@@ -4455,9 +4522,12 @@ class TomogramsTab(SidebarTab):
                             job_name=entry.job_name,
                             overrides=self._slurm_override_payload(entry.parameters),
                         )
+                        submitted_at = history_timestamp_now()
+                        entry.submitted_at = submitted_at
+                        entry.status = "submitted"
                         self.app.root.after(
                             0,
-                            lambda current_entry=entry, current_time=started_at, current_command=command_text, current_result=result, profile_name=current_profile: self._mark_scheduled_entry_submitted(
+                            lambda current_entry=entry, current_time=submitted_at, current_command=command_text, current_result=result, profile_name=current_profile: self._mark_scheduled_entry_submitted(
                                 current_entry,
                                 current_time,
                                 current_command,
@@ -4468,10 +4538,13 @@ class TomogramsTab(SidebarTab):
                         if not self.app.is_debug_mode_enabled():
                             succeeded, state = wait_for_slurm_job(result.job_id)
                             if not succeeded:
-                                failures.append(
-                                    f"{entry.dataset_name}/{entry.parameters.get('ts_name', '-')}: Slurm job ended with state {state}"
-                                )
+                                failure = f"{entry.dataset_name}/{entry.parameters.get('ts_name', '-')}: Slurm job ended with state {state}"
+                                complete_history_entry(entry, None, failure_reason=failure)
+                                self._sync_history_entry_copies(entry)
+                                failures.append(failure)
                                 break
+                            complete_history_entry(entry, 0)
+                            self._sync_history_entry_copies(entry)
                         continue
                     for command_index, (resolved_dataset, spec, command) in enumerate(commands, start=1):
                         current_dataset_name = (
@@ -4505,18 +4578,32 @@ class TomogramsTab(SidebarTab):
                         if output_window is not None and batch_job_id:
                             output_window.set_job_finished(batch_job_id, return_code)
                         if self.app.abort_requested():
-                            failures.append(f"{current_dataset_name}/{spec.get('ts_name', '-')}: aborted")
+                            failure = f"{current_dataset_name}/{spec.get('ts_name', '-')}: aborted"
+                            complete_history_entry(entry, return_code, aborted=True, failure_reason=failure)
+                            self._sync_history_entry_copies(entry)
+                            failures.append(failure)
                             break
                         if return_code != 0:
-                            failures.append(f"{current_dataset_name}/{spec.get('ts_name', '-')}: exit code {return_code}")
+                            failure = f"{current_dataset_name}/{spec.get('ts_name', '-')}: exit code {return_code}"
+                            complete_history_entry(entry, return_code, failure_reason=failure)
+                            self._sync_history_entry_copies(entry)
+                            failures.append(failure)
                             break
                     if failures:
                         break
+                    complete_history_entry(entry, 0)
+                    self._sync_history_entry_copies(entry)
                 except Exception as exc:
-                    failures.append(f"{entry.dataset_name}/{entry.parameters.get('ts_name', '-')}: {exc}")
+                    failure = f"{entry.dataset_name}/{entry.parameters.get('ts_name', '-')}: {exc}"
+                    complete_history_entry(entry, None, failure_reason=failure)
+                    self._sync_history_entry_copies(entry)
+                    failures.append(failure)
                     break
                 if self.app.abort_requested():
-                    failures.append(f"{entry.dataset_name}/{entry.parameters.get('ts_name', '-')}: aborted")
+                    failure = f"{entry.dataset_name}/{entry.parameters.get('ts_name', '-')}: aborted"
+                    complete_history_entry(entry, None, aborted=True, failure_reason=failure)
+                    self._sync_history_entry_copies(entry)
+                    failures.append(failure)
                     break
             if output_window is not None:
                 output_window.finish_batch(failures)
@@ -4548,6 +4635,8 @@ class TomogramsTab(SidebarTab):
     def _mark_scheduled_entry_started(self, entry: JobHistoryEntry, started_at: str, command: str) -> None:
         entry.timestamp = started_at
         entry.action = "ran"
+        entry.status = "running"
+        entry.started_at = entry.started_at or started_at
         entry.command = command
         entry.execution_mode = "local"
         entry.slurm_job_id = ""
@@ -4566,6 +4655,8 @@ class TomogramsTab(SidebarTab):
     ) -> None:
         entry.timestamp = submitted_at
         entry.action = "submitted"
+        entry.status = "submitted"
+        entry.submitted_at = submitted_at
         entry.command = command
         entry.execution_mode = "slurm"
         entry.slurm_profile = profile_name

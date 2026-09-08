@@ -27,7 +27,13 @@ from cryoet_organizer.log_window import BatchCommandOutputWindow
 from cryoet_organizer.performance import TkDebouncer, chunked_treeview_replace
 from cryoet_organizer.project import JobHistoryEntry, ProjectData
 from cryoet_organizer.scheduled_slurm_dialog import CollectiveSlurmSubmissionDialog, ask_scheduled_slurm_mode
-from cryoet_organizer.slurm import SlurmSubmissionResult, find_slurm_profile, render_sbatch_script, wait_for_slurm_job
+from cryoet_organizer.slurm import (
+    SlurmSubmissionResult,
+    cancel_slurm_job,
+    find_slurm_profile,
+    render_sbatch_script,
+    wait_for_slurm_job,
+)
 from cryoet_organizer.tabs.base import SidebarTab
 from cryoet_organizer.workflow_editor import WorkflowEditorDialog
 
@@ -127,13 +133,15 @@ class JobListTab(SidebarTab):
         self.table.tag_configure("waiting", background="#dbeeff")
         self.table.tag_configure("running", background="#dff4d8")
         self.table.tag_configure("completed", background="#dde8ff")
+        self.table.tag_configure("failed", background="#f8d7da")
+        self.table.tag_configure("cancelled", background="#fff3cd")
         scrollbar = ttk.Scrollbar(box, orient="vertical", command=self.table.yview)
         scrollbar.grid(row=0, column=1, sticky="ns")
         self.table.configure(yscrollcommand=scrollbar.set)
 
         actions = ttk.Frame(box)
         actions.grid(row=1, column=0, sticky="ew", pady=(8, 0))
-        actions.columnconfigure(4, weight=1)
+        actions.columnconfigure(5, weight=1)
         ttk.Button(actions, text="Move up", command=lambda: self._move_selected(-1)).grid(row=0, column=0, sticky="w")
         ttk.Button(actions, text="Move down", command=lambda: self._move_selected(1)).grid(row=0, column=1, sticky="w", padx=(8, 0))
         ttk.Button(actions, text="Remove selected", command=self._remove_selected).grid(row=0, column=2, sticky="w", padx=(8, 0))
@@ -143,20 +151,26 @@ class JobListTab(SidebarTab):
         workflow_menu.add_command(label="Edit and Run existing workflows", command=self._edit_and_run_workflows)
         workflow_button.configure(menu=workflow_menu)
         workflow_button.grid(row=0, column=3, sticky="w", padx=(16, 0))
-        ttk.Button(actions, text="Run scheduled jobs", command=lambda: self._execute_queue(force_slurm=False)).grid(
+        ttk.Button(actions, text="Cancel selected Slurm job", command=self._cancel_selected_slurm_job).grid(
             row=0,
-            column=5,
-            sticky="e",
+            column=4,
+            sticky="w",
             padx=(8, 0),
         )
-        ttk.Button(actions, text="Submit scheduled jobs to Slurm", command=lambda: self._execute_queue(force_slurm=True)).grid(
+        ttk.Button(actions, text="Run scheduled jobs", command=lambda: self._execute_queue(force_slurm=False)).grid(
             row=0,
             column=6,
             sticky="e",
             padx=(8, 0),
         )
+        ttk.Button(actions, text="Submit scheduled jobs to Slurm", command=lambda: self._execute_queue(force_slurm=True)).grid(
+            row=0,
+            column=7,
+            sticky="e",
+            padx=(8, 0),
+        )
         abort = ttk.Button(actions, text="Abort", command=self.app.abort_running_commands, state="disabled")
-        abort.grid(row=0, column=7, sticky="e", padx=(8, 0))
+        abort.grid(row=0, column=8, sticky="e", padx=(8, 0))
         self.app.attach_abort_button(abort)
         self.table.bind("<Double-1>", self._show_selected_details)
 
@@ -349,6 +363,17 @@ class JobListTab(SidebarTab):
                     ("Execution mode", ref.entry.execution_mode or "local"),
                     ("Slurm profile", ref.entry.slurm_profile or "-"),
                     ("Slurm job ID", ref.entry.slurm_job_id or "-"),
+                    ("Status", ref.entry.status or "unknown"),
+                    ("Submitted", ref.entry.submitted_at or "-"),
+                    ("Started", ref.entry.started_at or "-"),
+                    ("Finished", ref.entry.finished_at or "-"),
+                    ("Exit code", "-" if ref.entry.exit_code is None else str(ref.entry.exit_code)),
+                    ("Failure reason", ref.entry.failure_reason or "-"),
+                    ("Working directory", ref.entry.working_directory or "-"),
+                    ("Host", ref.entry.host or "-"),
+                    ("CryoPal_tomo version", ref.entry.app_version or "-"),
+                    ("External tool version", ref.entry.tool_version or "not recorded"),
+                    ("Environment fingerprint", ref.entry.environment_fingerprint or "not recorded"),
                 ],
             ),
             (
@@ -407,6 +432,35 @@ class JobListTab(SidebarTab):
         assign_queue_order(iter_scheduled_job_refs(self.app.project))
         self.app.on_project_changed("job_queue", "processing", "processing_m", "tomograms", "particles", "custom")
         self.refresh_queue()
+
+    def _cancel_selected_slurm_job(self) -> None:
+        ref = self._selected_ref()
+        if ref is None or not ref.entry.slurm_job_id:
+            messagebox.showinfo("Cancel Slurm job", "Select a submitted Slurm job first.")
+            return
+        job_id = ref.entry.slurm_job_id.strip()
+        if not messagebox.askyesno(
+            "Cancel Slurm job",
+            f"Run scancel for Slurm job {job_id}?\n\nThis requests cancellation of the external cluster job.",
+            icon="warning",
+        ):
+            return
+        try:
+            cancel_slurm_job(job_id)
+        except Exception as exc:
+            messagebox.showerror("Slurm cancellation failed", str(exc))
+            return
+        finished_at = history_timestamp_now()
+        for current in iter_job_history_refs(self.app.project):
+            if current.entry.slurm_job_id != job_id:
+                continue
+            current.entry.action = "cancelled"
+            current.entry.status = "cancelled"
+            current.entry.finished_at = finished_at
+            current.entry.failure_reason = "Cancellation requested by user through scancel"
+        self.app.on_project_changed("job_queue", "processing", "processing_m", "tomograms", "particles", "custom")
+        self.refresh_queue()
+        self.app.status_var.set(f"Cancellation requested for Slurm job {job_id}")
 
     def _execute_queue(self, *, force_slurm: bool) -> None:
         refs = iter_scheduled_job_refs(self.app.project)

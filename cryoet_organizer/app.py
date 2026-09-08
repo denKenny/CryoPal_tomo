@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import csv
+import html
 import os
+import re
 import signal
 import shlex
 import subprocess
@@ -60,6 +62,7 @@ from cryoet_organizer.settings_bundle import (
     exportable_settings_groups,
     importable_settings_groups,
     load_settings_bundle,
+    selected_executable_settings,
     settings_selection_label_map,
 )
 from cryoet_organizer.settings_dialog import DefaultParametersDialog
@@ -1282,6 +1285,16 @@ class CryoETOrganizerApp:
             return "running"
         if entry.entry_id in self._waiting_history_entry_ids:
             return "waiting"
+        if entry.status == "failed":
+            return "failed"
+        if entry.status == "cancelled":
+            return "cancelled"
+        if entry.status == "running":
+            return "running"
+        if entry.status == "submitted":
+            return "waiting"
+        if entry.status == "scheduled":
+            return "scheduled"
         if entry.action == "ran":
             return "completed"
         if is_scheduled_history_entry(entry):
@@ -1498,6 +1511,17 @@ class CryoETOrganizerApp:
             messagebox.showinfo("Import settings", "No settings entries were selected.")
             return
         selection_labels = settings_selection_label_map(groups)
+        executable_settings = selected_executable_settings(selected)
+        if executable_settings:
+            trusted = messagebox.askyesno(
+                "Trust imported commands?",
+                "The selected settings can change commands executed on this computer or submitted to a cluster:\n\n"
+                + "\n".join(f"- {selection_labels.get(key, key)}" for key in executable_settings)
+                + "\n\nOnly continue if you trust the source and have reviewed these entries.",
+                icon="warning",
+            )
+            if not trusted:
+                return
         conflicts = conflicting_import_items(self.project, selected)
         overwrite_existing = True
         if conflicts:
@@ -1629,6 +1653,18 @@ class CryoETOrganizerApp:
         self._finish_loaded_project(status_message="Left Debug mode")
 
     def _prepare_for_context_change(self, action: str) -> bool:
+        if self._has_running_commands():
+            should_abort = messagebox.askyesno(
+                "Running commands",
+                f"One or more local commands are still running.\n\n"
+                f"Abort them before attempting to {action}? The current action will remain cancelled "
+                "until the processes have stopped.",
+                icon="warning",
+            )
+            if should_abort:
+                self.abort_running_commands()
+                self.status_var.set(f"Abort requested; retry '{action}' after all commands stop")
+            return False
         if not self.debug_mode.enabled:
             return True
         should_exit = messagebox.askyesno(
@@ -2083,7 +2119,7 @@ class CryoETOrganizerApp:
             return any(process.poll() is None for process in self._managed_processes.values())
 
     def close_app(self) -> None:
-        if self.debug_mode.enabled and not self._prepare_for_context_change("close CryoPal_tomo"):
+        if not self._prepare_for_context_change("close CryoPal_tomo"):
             return
         if not self._confirm_discard_changes():
             return
@@ -2120,7 +2156,9 @@ class CryoETOrganizerApp:
 def _export_history_csv(path: str, project: ProjectData) -> None:
     fieldnames = [
         "dataset", "processing_tab", "timestamp", "action", "group",
-        "job_name", "execution_mode", "slurm_job_id", "command",
+        "job_name", "execution_mode", "status", "submitted_at", "started_at", "finished_at",
+        "exit_code", "failure_reason", "working_directory", "host", "app_version", "tool_version",
+        "environment_fingerprint", "slurm_job_id", "command",
     ]
     rows = []
     for owner_name, _owner_kind, entry in _iter_export_history_entries(project):
@@ -2132,13 +2170,24 @@ def _export_history_csv(path: str, project: ProjectData) -> None:
             "group": entry.group,
             "job_name": entry.job_name,
             "execution_mode": entry.execution_mode,
+            "status": entry.status,
+            "submitted_at": entry.submitted_at,
+            "started_at": entry.started_at,
+            "finished_at": entry.finished_at,
+            "exit_code": "" if entry.exit_code is None else str(entry.exit_code),
+            "failure_reason": entry.failure_reason,
+            "working_directory": entry.working_directory,
+            "host": entry.host,
+            "app_version": entry.app_version,
+            "tool_version": entry.tool_version,
+            "environment_fingerprint": entry.environment_fingerprint,
             "slurm_job_id": entry.slurm_job_id,
             "command": entry.command,
         })
     with open(path, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
-        writer.writerows(rows)
+        writer.writerows(_csv_safe_row(row) for row in rows)
 
 
 def _export_file_paths_csv(path: str, entries: list[PathCheckEntry]) -> None:
@@ -2174,7 +2223,7 @@ def _export_file_paths_csv(path: str, entries: list[PathCheckEntry]) -> None:
     with open(path, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
-        writer.writerows(rows)
+        writer.writerows(_csv_safe_row(row) for row in rows)
 
 
 def _export_ts_annotations_csv(path: str, project: ProjectData) -> None:
@@ -2227,7 +2276,22 @@ def _export_ts_annotations_csv(path: str, project: ProjectData) -> None:
     with open(path, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
-        writer.writerows(rows)
+        writer.writerows(_csv_safe_row(row) for row in rows)
+
+
+def _csv_safe_row(row: dict[str, object]) -> dict[str, object]:
+    safe: dict[str, object] = {}
+    for key, value in row.items():
+        if isinstance(value, str):
+            stripped = value.lstrip()
+            numeric = re.fullmatch(r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)", stripped)
+            if stripped.startswith(("=", "@")) or (
+                stripped.startswith(("+", "-")) and numeric is None
+            ):
+                safe[key] = "'" + value
+                continue
+        safe[key] = value
+    return safe
 
 
 def _iter_export_history_entries(project: ProjectData) -> list[tuple[str, str, JobHistoryEntry]]:
@@ -2273,10 +2337,11 @@ def _export_history_html(path: str, project: ProjectData) -> None:
             return
         rows_html = "\n".join(current_rows)
         sections.append(
-            f"<h2>{current_owner}</h2>"
+            f"<h2>{html.escape(current_owner)}</h2>"
             "<table><thead><tr>"
             "<th>Processing tab</th><th>Timestamp</th><th>Action</th><th>Group</th><th>Job</th>"
-            "<th>Mode</th><th>SLURM Job</th><th>Command</th>"
+            "<th>Mode</th><th>Status</th><th>Started</th><th>Finished</th><th>Exit</th>"
+            "<th>Host</th><th>App version</th><th>Environment fingerprint</th><th>SLURM Job</th><th>Command</th>"
             f"</tr></thead><tbody>{rows_html}</tbody></table>"
         )
         current_owner = ""
@@ -2286,33 +2351,58 @@ def _export_history_html(path: str, project: ProjectData) -> None:
         if owner_name != current_owner:
             flush_section()
             current_owner = owner_name
+        values = [
+            _resolve_processing_tab(project, entry, owner_kind),
+            entry.timestamp.replace("T", " "),
+            entry.action,
+            entry.group,
+            entry.job_name,
+            entry.execution_mode,
+            entry.status,
+            entry.started_at or "—",
+            entry.finished_at or "—",
+            "—" if entry.exit_code is None else str(entry.exit_code),
+            entry.host or "—",
+            entry.app_version or "—",
+            entry.environment_fingerprint or "—",
+            entry.slurm_job_id or "—",
+            entry.command,
+        ]
+        escaped = [html.escape(str(value)) for value in values]
         current_rows.append(
             f"<tr>"
-            f"<td>{_resolve_processing_tab(project, entry, owner_kind)}</td>"
-            f"<td>{entry.timestamp.replace('T', ' ')}</td>"
-            f"<td>{entry.action}</td>"
-            f"<td>{entry.group}</td>"
-            f"<td>{entry.job_name}</td>"
-            f"<td>{entry.execution_mode}</td>"
-            f"<td>{entry.slurm_job_id or '—'}</td>"
-            f"<td><code>{entry.command}</code></td>"
+            f"<td>{escaped[0]}</td>"
+            f"<td>{escaped[1]}</td>"
+            f"<td>{escaped[2]}</td>"
+            f"<td>{escaped[3]}</td>"
+            f"<td>{escaped[4]}</td>"
+            f"<td>{escaped[5]}</td>"
+            f"<td>{escaped[6]}</td>"
+            f"<td>{escaped[7]}</td>"
+            f"<td>{escaped[8]}</td>"
+            f"<td>{escaped[9]}</td>"
+            f"<td>{escaped[10]}</td>"
+            f"<td>{escaped[11]}</td>"
+            f"<td>{escaped[12]}</td>"
+            f"<td>{escaped[13]}</td>"
+            f"<td><code>{escaped[14]}</code></td>"
             f"</tr>"
         )
     flush_section()
-    html = (
+    output_html = (
         "<!DOCTYPE html><html><head><meta charset='utf-8'>"
-        f"<title>{project.name} – Job History</title>"
+        f"<title>{html.escape(project.name)} – Job History</title>"
         "<style>"
         "body{font-family:sans-serif;padding:24px;max-width:1400px;margin:auto}"
         "table{width:100%;border-collapse:collapse;margin-bottom:32px}"
         "th,td{border:1px solid #ccc;padding:6px 10px;text-align:left}"
         "th{background:#f0f0f0} code{word-break:break-all;font-size:0.85em}"
         "</style></head><body>"
-        f"<h1>{project.name} – Job History</h1>"
+        f"<h1>{html.escape(project.name)} – Job History</h1>"
         + "\n".join(sections)
         + "</body></html>"
     )
-    Path(path).write_text(html, encoding="utf-8")
+    Path(path).write_text(output_html, encoding="utf-8")
 
 
 def _shift_hex_color(value: str, delta: int) -> str:

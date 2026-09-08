@@ -23,6 +23,14 @@ from cryoet_organizer.project import (
     dataset_ts_names,
 )
 from cryoet_organizer.resizable_sections import load_layout_value, save_layout_value
+from cryoet_organizer.safe_delete import (
+    DeletionCancelled,
+    QuarantineTransaction,
+    exact_stem_files,
+    matching_files,
+    processed_items_rewrite,
+)
+from cryoet_organizer.star_merge import parse_star
 from cryoet_organizer.thumbnail_cache import effective_thumbnail_source_folder, resolve_thumbnail_cache_dir, thumbnail_cache_location
 from cryoet_organizer.ts_metadata import collect_ts_metadata, ts_metadata_sections
 from cryoet_organizer.tabs.base import SidebarTab
@@ -1988,7 +1996,8 @@ class GalleryTab(SidebarTab):
 
         first_confirm = messagebox.askyesno(
             "Delete TS data",
-            f"Are you sure you want to delete ALL data associated to {label} ?",
+            f"Move all exactly matched data associated with {label} to recoverable "
+            ".cryopal_trash folders?\n\nSimilarly named tilt series will not be selected.",
         )
         if not first_confirm:
             return
@@ -1997,7 +2006,7 @@ class GalleryTab(SidebarTab):
         if delete_raw:
             second_confirm = messagebox.askyesno(
                 "Delete RAW data too",
-                "Are you sure you want to delete the RAW data too? If so, the data might be irreversibly gone.",
+                "Also move the exactly matched RAW frames to recoverable .cryopal_trash folders?",
             )
             if not second_confirm:
                 return
@@ -2005,117 +2014,29 @@ class GalleryTab(SidebarTab):
         self._open_delete_log_window(batch, delete_raw)
 
     def _parse_tomostar_frame_stems(self, tomostar_path: Path) -> list[str]:
-        frame_stems: list[str] = []
         if not tomostar_path.exists():
-            return frame_stems
-        try:
-            lines = tomostar_path.read_text(encoding="utf-8").splitlines()
-        except UnicodeDecodeError:
-            lines = tomostar_path.read_text(encoding="utf-8-sig").splitlines()
-
-        for line in lines:
-            stripped = line.strip()
-            if not stripped or stripped.startswith("#") or stripped.startswith("_") or stripped == "loop_" or stripped == "data_":
+            return []
+        document = parse_star(tomostar_path)
+        movie_headers = {
+            "_wrpmoviename",
+            "_rlnmicrographmoviename",
+            "_rlnmicrographname",
+        }
+        for block in document.blocks:
+            if block.kind != "loop":
                 continue
-            first_token = stripped.split()[0]
-            movie_path = Path(first_token)
-            frame_stems.append(movie_path.stem)
-        return frame_stems
-
-    def _delete_matching_files(self, root_folder: str, identifiers: list[str], log, cancel_event: threading.Event) -> int:
-        folder = Path(root_folder)
-        if not folder.exists():
-            log(f"Folder not found, skipping: {folder}")
-            return 0
-
-        normalized = [identifier.casefold() for identifier in identifiers if identifier]
-        deleted = 0
-        for path in sorted(folder.rglob("*"), key=lambda item: str(item).casefold()):
-            if cancel_event.is_set():
-                log("Deletion cancelled by user.")
-                break
-            if not path.is_file():
+            movie_index = next(
+                (index for index, header in enumerate(block.headers) if header.casefold() in movie_headers),
+                None,
+            )
+            if movie_index is None:
                 continue
-            name_lower = path.name.casefold()
-            if any(identifier in name_lower for identifier in normalized):
-                try:
-                    path.unlink()
-                    deleted += 1
-                    log(f"Deleted: {path}")
-                except FileNotFoundError:
-                    continue
-                except OSError as exc:
-                    log(f"Failed to delete {path}: {exc}")
-        return deleted
-
-    def _update_processed_items_file(
-        self,
-        json_path: Path,
-        identifiers: list[str],
-        log,
-        cancel_event: threading.Event,
-    ) -> None:
-        if cancel_event.is_set():
-            return
-        if not json_path.exists():
-            log(f"processed_items.json not found, skipping: {json_path}")
-            return
-        try:
-            payload = json.loads(json_path.read_text(encoding="utf-8"))
-        except Exception as exc:
-            log(f"Failed to read {json_path}: {exc}")
-            return
-        if not isinstance(payload, list):
-            log(f"Unexpected processed_items format in {json_path}")
-            return
-
-        normalized = [identifier.casefold() for identifier in identifiers if identifier]
-        updated = []
-        removed = 0
-        for item in payload:
-            current_path = str(item.get("Path", "")) if isinstance(item, dict) else ""
-            current_name = Path(current_path).name.casefold()
-            current_stem = Path(current_path).stem.casefold()
-            if any(identifier in current_name or identifier in current_stem for identifier in normalized):
-                removed += 1
-                continue
-            updated.append(item)
-
-        try:
-            json_path.write_text(json.dumps(updated, indent=2, ensure_ascii=False), encoding="utf-8")
-            log(f"Updated {json_path}: removed {removed} entries")
-        except Exception as exc:
-            log(f"Failed to update {json_path}: {exc}")
-
-    def _delete_raw_frame_files(
-        self,
-        raw_folder: str,
-        frame_stems: list[str],
-        log,
-        cancel_event: threading.Event,
-    ) -> int:
-        folder = Path(raw_folder)
-        if not folder.exists():
-            log(f"Raw folder not found, skipping: {folder}")
-            return 0
-        normalized = [stem.casefold() for stem in frame_stems if stem]
-        deleted = 0
-        for path in sorted(folder.rglob("*"), key=lambda item: str(item).casefold()):
-            if cancel_event.is_set():
-                log("Deletion cancelled by user.")
-                break
-            if not path.is_file():
-                continue
-            if Path(path.name).stem.casefold() in normalized:
-                try:
-                    path.unlink()
-                    deleted += 1
-                    log(f"Deleted raw file: {path}")
-                except FileNotFoundError:
-                    continue
-                except OSError as exc:
-                    log(f"Failed to delete raw file {path}: {exc}")
-        return deleted
+            return [
+                Path(row[movie_index].replace("\\", "/")).stem
+                for row in block.rows
+                if movie_index < len(row) and row[movie_index].strip() not in {"", ".", "?"}
+            ]
+        raise ValueError(f"Could not find a movie-path column in {tomostar_path.name}.")
 
     def _clear_selected_thumbnail_details(self) -> None:
         self._metadata_selection_task.cancel()
@@ -2197,57 +2118,78 @@ class GalleryTab(SidebarTab):
     ) -> dict[str, int | str]:
         ts_name = thumbnail.ts_name
         resolved_tomostar = resolve_dataset_file(self.app.project, dataset, ts_name, "tomostar")
-        tomostar_path = Path(resolved_tomostar.path) if resolved_tomostar.path else Path(dataset.tilt_series_data_folder) / f"{ts_name}.tomostar"
-        frame_stems = self._parse_tomostar_frame_stems(tomostar_path)
+        tomostar_path: Path | None = None
+        if resolved_tomostar.path:
+            tomostar_path = Path(resolved_tomostar.path).expanduser()
+        elif dataset.tilt_series_data_folder.strip():
+            tomostar_path = Path(dataset.tilt_series_data_folder).expanduser() / f"{ts_name}.tomostar"
+        frame_stems = self._parse_tomostar_frame_stems(tomostar_path) if tomostar_path is not None else []
         log(f"Deleting data for {ts_name}")
-        log(f"Reading tomostar: {tomostar_path}")
+        log(f"Reading tomostar: {tomostar_path or '(not configured)'}")
         log(f"Found {len(frame_stems)} frame names")
 
-        if cancel_event.is_set():
-            log("Deletion cancelled by user.")
-            return {"ts_name": ts_name, "cancelled": 1}
-
-        frameseries_deleted = self._delete_matching_files(
-            dataset.frame_series_processing_folder,
-            frame_stems,
-            log,
-            cancel_event,
+        transaction = QuarantineTransaction(cancel_event=cancel_event, log=log)
+        frame_root = (
+            Path(dataset.frame_series_processing_folder).expanduser()
+            if dataset.frame_series_processing_folder.strip()
+            else None
         )
-        frameseries_json = Path(dataset.frame_series_processing_folder) / "processed_items.json"
-        self._update_processed_items_file(frameseries_json, frame_stems, log, cancel_event)
-
-        if cancel_event.is_set():
-            return {"ts_name": ts_name, "cancelled": 1}
-
-        if tomostar_path.exists():
-            try:
-                tomostar_path.unlink()
-                log(f"Deleted tomostar file: {tomostar_path}")
-            except OSError as exc:
-                log(f"Failed to delete tomostar file {tomostar_path}: {exc}")
-        else:
-            log(f"Tomostar file not found, skipping: {tomostar_path}")
-
-        ts_deleted = self._delete_matching_files(
-            dataset.tilt_series_processing_folder,
-            [ts_name],
-            log,
-            cancel_event,
+        ts_root = (
+            Path(dataset.tilt_series_processing_folder).expanduser()
+            if dataset.tilt_series_processing_folder.strip()
+            else None
         )
-        ts_json = Path(dataset.tilt_series_processing_folder) / "processed_items.json"
-        self._update_processed_items_file(ts_json, [ts_name], log, cancel_event)
+        raw_root = Path(dataset.raw_frames_folder).expanduser() if dataset.raw_frames_folder.strip() else None
 
-        raw_deleted = 0
-        if delete_raw and not cancel_event.is_set():
-            raw_deleted = self._delete_raw_frame_files(
-                dataset.raw_frames_folder,
-                frame_stems,
-                log,
-                cancel_event,
-            )
+        frame_paths = matching_files(frame_root, frame_stems) if frame_root is not None else []
+        ts_paths = matching_files(ts_root, [ts_name]) if ts_root is not None else []
+        raw_paths = exact_stem_files(raw_root, frame_stems) if delete_raw and raw_root is not None else []
 
-        if cancel_event.is_set():
+        for path in frame_paths:
+            assert frame_root is not None
+            transaction.add_file(path, root=frame_root)
+        for path in ts_paths:
+            assert ts_root is not None
+            transaction.add_file(path, root=ts_root)
+        for path in raw_paths:
+            assert raw_root is not None
+            transaction.add_file(path, root=raw_root)
+        tomostar_exists = tomostar_path is not None and tomostar_path.exists()
+        if tomostar_exists:
+            assert tomostar_path is not None
+            transaction.add_file(tomostar_path, root=tomostar_path.parent)
+
+        manifest_specs = []
+        if frame_root is not None:
+            manifest_specs.append((frame_root / "processed_items.json", frame_stems, frame_root))
+        if ts_root is not None:
+            manifest_specs.append((ts_root / "processed_items.json", [ts_name], ts_root))
+        for json_path, identifiers, root in manifest_specs:
+            rewrite = processed_items_rewrite(json_path, identifiers)
+            if rewrite is None:
+                log(f"processed_items.json not found, skipping: {json_path}")
+                continue
+            updated_text, removed_count = rewrite
+            if removed_count:
+                transaction.add_rewrite(json_path, updated_text, root=root)
+                log(f"Prepared {json_path}: remove {removed_count} entries")
+
+        log(
+            f"Exact deletion manifest: {len(frame_paths)} frame-series files, "
+            f"{len(ts_paths)} tilt-series files, {len(raw_paths)} raw files, "
+            f"tomostar={'yes' if tomostar_exists else 'no'}"
+        )
+        try:
+            transaction.execute()
+        except DeletionCancelled:
+            log("Deletion cancelled; all files from the active transaction were restored.")
             return {"ts_name": ts_name, "cancelled": 1}
+
+        frameseries_deleted = len(frame_paths)
+        ts_deleted = len({path.resolve(strict=False) for path in ts_paths} | (
+            {tomostar_path.resolve(strict=False)} if tomostar_exists and tomostar_path is not None else set()
+        ))
+        raw_deleted = len(raw_paths)
 
         log(
             "Finished deletion. "
@@ -2255,6 +2197,7 @@ class GalleryTab(SidebarTab):
             f"Tiltseries files deleted: {ts_deleted}, "
             f"Raw files deleted: {raw_deleted}"
         )
+        log(f"Recovery transaction: {transaction.transaction_id}")
         return {
             "ts_name": ts_name,
             "frameseries_deleted": frameseries_deleted,
@@ -2310,7 +2253,7 @@ class GalleryTab(SidebarTab):
                         text.configure(state="disabled")
                     elif kind == "done":
                         status_text, result = payload
-                        if isinstance(result, dict) and not result.get("cancelled"):
+                        if isinstance(result, dict):
                             deleted_keys = {
                                 (str(item.get("dataset_name", "")), str(item.get("image_path", "")))
                                 for item in result.get("deleted_items", [])
@@ -2343,10 +2286,10 @@ class GalleryTab(SidebarTab):
                 dialog.after(100, pump_queue)
 
         def worker() -> None:
+            deleted_items: list[dict[str, str]] = []
+            result: dict[str, object] = {"deleted_items": deleted_items, "cancelled": 0}
             try:
-                deleted_items: list[dict[str, str]] = []
                 total = len(batch)
-                result: dict[str, object] = {"deleted_items": deleted_items, "cancelled": 0}
                 for index, (dataset, thumbnail) in enumerate(batch, start=1):
                     if cancel_event.is_set():
                         result["cancelled"] = 1
@@ -2369,7 +2312,7 @@ class GalleryTab(SidebarTab):
                     finish(f"Deleted data for {len(deleted_items)} TS", result)
             except Exception as exc:
                 append_log(f"Deletion failed: {exc}")
-                finish("Deletion failed")
+                finish("Deletion failed", result)
 
         threading.Thread(target=worker, daemon=True).start()
         pump_queue()

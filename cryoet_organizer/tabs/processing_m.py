@@ -11,9 +11,12 @@ from cryoet_organizer.environments import environment_titles
 from cryoet_organizer.executables import MTOOLS_EXECUTABLE, resolve_executable_command
 from cryoet_organizer.job_execution import (
     build_slurm_override_metadata,
+    complete_history_entry,
     create_history_entry,
     display_history_timestamp,
+    execution_environment_fingerprint,
     execute_scheduled_history_entries,
+    history_timestamp_now,
     is_scheduled_history_entry,
     slurm_override_payload,
 )
@@ -223,6 +226,8 @@ class ProcessingMTab(SidebarTab):
         self.history_table.tag_configure("waiting", background="#dbeeff")
         self.history_table.tag_configure("running", background="#dff4d8")
         self.history_table.tag_configure("completed", background="#dde8ff")
+        self.history_table.tag_configure("failed", background="#f8d7da")
+        self.history_table.tag_configure("cancelled", background="#fff3cd")
 
         history_scrollbar = ttk.Scrollbar(self.history_box, orient="vertical", command=self.history_table.yview)
         history_scrollbar.grid(row=0, column=1, sticky="ns")
@@ -1098,6 +1103,7 @@ class ProcessingMTab(SidebarTab):
             slurm_profile=self.slurm_profile_var.get().strip(),
             environment_title=self.environment_var.get().strip() if self.execution_mode_var.get() == "Run locally" else "",
             parameters=self._current_parameter_values(),
+            working_directory=population.directory,
         )
         if self.execution_mode_var.get() == "Run locally" and self.environment_var.get().strip():
             entry.parameters["execution_environment"] = self.environment_var.get().strip()
@@ -1228,6 +1234,7 @@ class ProcessingMTab(SidebarTab):
             if not profile_name and not self.app.is_debug_mode_enabled():
                 messagebox.showerror("Slurm profile missing", "Please select a Slurm profile first.")
                 return
+            entry = self._record_history_entry("scheduled")
             try:
                 result = self.app.submit_slurm_command(
                     command,
@@ -1238,19 +1245,33 @@ class ProcessingMTab(SidebarTab):
                     overrides=self._slurm_override_payload(self._current_slurm_overrides()),
                 )
             except Exception as exc:
+                if entry is not None:
+                    complete_history_entry(entry, None, failure_reason=str(exc))
+                    self._refresh_history()
+                    self.app.on_project_changed("processing_m")
                 messagebox.showerror("Slurm submission failed", str(exc))
                 return
-            entry = self._record_history_entry("submitted")
             if entry is not None:
+                submitted_at = history_timestamp_now()
+                entry.action = "submitted"
+                entry.timestamp = submitted_at
+                entry.status = "submitted"
+                entry.submitted_at = submitted_at
                 entry.slurm_job_id = result.job_id
                 entry.slurm_script_path = result.script_path
             self.app.on_project_changed("processing_m")
             self.app.status_var.set(f"Submitted to Slurm: {result.job_id or 'job submitted'}")
             return
 
+        entry: JobHistoryEntry | None = None
         try:
             entry = self._record_history_entry("ran")
             activation_command = self.app.resolve_environment_activation(self.environment_var.get())
+            if entry is not None:
+                entry.environment_fingerprint = execution_environment_fingerprint(
+                    entry.environment_title,
+                    activation_command,
+                )
             self.app.run_managed_process_with_log(
                 command,
                 cwd=working_directory,
@@ -1266,18 +1287,10 @@ class ProcessingMTab(SidebarTab):
                 ),
             )
         except Exception as exc:
-            if entry is not None and population is not None:
-                match_index = next(
-                    (
-                        index
-                        for index, existing in enumerate(population.job_history)
-                        if existing is entry or existing.entry_id == entry.entry_id
-                    ),
-                    None,
-                )
-                if match_index is not None:
-                    del population.job_history[match_index]
-                    self._refresh_history()
+            if entry is not None:
+                complete_history_entry(entry, None, failure_reason=str(exc))
+                self._refresh_history()
+                self.app.on_project_changed("processing_m")
             messagebox.showerror("Run failed", str(exc))
             return
 
@@ -1466,7 +1479,9 @@ class ProcessingMTab(SidebarTab):
         history_entry: JobHistoryEntry | None,
     ) -> None:
         if history_entry is not None:
+            complete_history_entry(history_entry, return_code, aborted=self.app.abort_requested())
             self.app.clear_history_entries_running([history_entry.entry_id])
+            self.app.on_project_changed("processing_m")
         if population_name and return_code == 0:
             self._refresh_population_after_metadata_job(population_name)
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shlex
 import subprocess
@@ -25,6 +26,12 @@ SLURM_FAILURE_STATES = {
     "REVOKED",
     "TIMEOUT",
 }
+_SLURM_FLAG_RE = re.compile(r"^-{1,2}[A-Za-z0-9][A-Za-z0-9-]*$")
+_MODULE_NAME_RE = re.compile(r"^[A-Za-z0-9_.+/@:-]+$")
+
+
+class SlurmError(RuntimeError):
+    pass
 
 
 @dataclass
@@ -231,8 +238,8 @@ def format_header_value(value: str, dataset_name: str, job_name: str) -> str:
         return ""
     try:
         return text.format(dataset_name=dataset_name, job_name=job_name)
-    except Exception:
-        return text
+    except (KeyError, IndexError, ValueError) as exc:
+        raise SlurmError(f"Invalid Slurm header template {text!r}: {exc}") from exc
 
 
 def encode_slurm_overrides(
@@ -325,8 +332,11 @@ def render_sbatch_script(
         normalized_flag = _normalize_flag(field.flag)
         if not normalized_flag:
             continue
+        if not _SLURM_FLAG_RE.fullmatch(normalized_flag):
+            raise SlurmError(f"Invalid Slurm header flag: {normalized_flag!r}")
+        _require_single_line(value, f"Slurm value for {normalized_flag}")
         if value:
-            if normalized_flag.startswith("--") and " " not in normalized_flag:
+            if normalized_flag.startswith("--"):
                 lines.append(f"#SBATCH {normalized_flag}={value}")
             else:
                 lines.append(f"#SBATCH {normalized_flag} {value}")
@@ -337,6 +347,8 @@ def render_sbatch_script(
     if cwd:
         lines.append(f"cd {shlex.quote(str(cwd))}")
     for module_name in [item.strip() for item in profile.modules.splitlines() if item.strip()]:
+        if not _MODULE_NAME_RE.fullmatch(module_name):
+            raise SlurmError(f"Invalid module name: {module_name!r}")
         lines.append(f"module load {module_name}")
     if profile.conda_activate:
         lines.append(f"source {shlex.quote(profile.conda_activate)}")
@@ -345,6 +357,11 @@ def render_sbatch_script(
     lines.append(command)
     lines.append("")
     return "\n".join(lines)
+
+
+def _require_single_line(value: str, label: str) -> None:
+    if "\n" in value or "\r" in value:
+        raise SlurmError(f"{label} must be a single line.")
 
 
 def write_sbatch_script(
@@ -362,26 +379,37 @@ def write_sbatch_script(
     index = 1
     while True:
         script_path = scripts_dir / f"{base_name}_{index:03d}.sbatch"
-        if not script_path.exists():
+        try:
+            descriptor = os.open(script_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
             break
-        index += 1
-    script_path.write_text(
-        render_sbatch_script(command, profile, cwd, dataset_name, job_name, overrides),
-        encoding="utf-8",
-    )
+        except FileExistsError:
+            index += 1
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(render_sbatch_script(command, profile, cwd, dataset_name, job_name, overrides))
+            handle.flush()
+            os.fsync(handle.fileno())
+    except Exception:
+        script_path.unlink(missing_ok=True)
+        raise
     return script_path
 
 
 def submit_sbatch_script(script_path: str | Path) -> SlurmSubmissionResult:
     result = subprocess.run(
-        ["sbatch", str(script_path)],
+        ["sbatch", "--parsable", str(script_path)],
         check=True,
         capture_output=True,
         text=True,
     )
     stdout = result.stdout.strip()
-    match = re.search(r"Submitted batch job\s+(\d+)", stdout)
-    job_id = match.group(1) if match else ""
+    match = re.fullmatch(r"(\d+)(?:;[^\s;]+)?", stdout)
+    if match is None:
+        legacy_match = re.fullmatch(r"Submitted batch job\s+(\d+)", stdout)
+        match = legacy_match
+    if match is None:
+        raise SlurmError(f"sbatch succeeded but did not return a valid job ID: {stdout or '(empty output)'}")
+    job_id = match.group(1)
     return SlurmSubmissionResult(job_id=job_id, script_path=str(script_path), stdout=stdout)
 
 
@@ -432,14 +460,31 @@ def query_slurm_job_state(job_id: str) -> str:
     return ""
 
 
+def cancel_slurm_job(job_id: str) -> None:
+    normalized = str(job_id).strip()
+    if not normalized.isdigit():
+        raise SlurmError(f"Invalid Slurm job ID: {job_id!r}")
+    subprocess.run(["scancel", normalized], check=True, capture_output=True, text=True)
+
+
 def wait_for_slurm_job(
     job_id: str,
     *,
     poll_interval_seconds: float = 5.0,
     max_unknown_polls: int = 60,
+    timeout_seconds: float = 86400.0,
+    cancel_event=None,
 ) -> tuple[bool, str]:
+    job_id = str(job_id).strip()
+    if not job_id.isdigit():
+        return False, "INVALID_JOB_ID"
+    started = time.monotonic()
     unknown_polls = 0
     while True:
+        if cancel_event is not None and getattr(cancel_event, "is_set", lambda: False)():
+            return False, "CANCELLED"
+        if timeout_seconds > 0 and time.monotonic() - started >= timeout_seconds:
+            return False, "WAIT_TIMEOUT"
         state = query_slurm_job_state(job_id)
         if state in SLURM_SUCCESS_STATES:
             return True, state
@@ -451,7 +496,7 @@ def wait_for_slurm_job(
                 return False, "UNKNOWN"
         else:
             unknown_polls = 0
-        time.sleep(poll_interval_seconds)
+        time.sleep(max(0.0, poll_interval_seconds))
 
 
 def export_slurm_profiles(path: str | Path, profiles: list[SlurmProfile]) -> Path:

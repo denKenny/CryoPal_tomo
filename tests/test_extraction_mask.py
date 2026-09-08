@@ -3,6 +3,8 @@ from __future__ import annotations
 import struct
 import tempfile
 import unittest
+import importlib.util
+import io
 from pathlib import Path
 
 from cryoet_organizer.extraction_mask import (
@@ -74,7 +76,7 @@ def _write_mode0_mrc(
     header[212:216] = bytes((0x44, 0x41, 0x00, 0x00))
     data = bytearray(nx * ny * nz)
     for x_index, y_index, z_index in active_indices:
-        data[x_index + y_index * nx + z_index * nx * ny] = active_value
+        data[x_index + y_index * nx + z_index * nx * ny] = active_value & 0xFF
     path.write_bytes(bytes(header) + bytes(data))
 
 
@@ -126,6 +128,26 @@ class ExtractionMaskTests(unittest.TestCase):
             data = _read_mode0_data(output.path)
             self.assertEqual(data[1 + 1 * 5 + 1 * 25], 0)
             self.assertEqual(data[4 + 4 * 5 + 4 * 25], 1)
+
+    @unittest.skipUnless(importlib.util.find_spec("mrcfile"), "mrcfile validation dependency is not installed")
+    def test_written_mask_is_valid_mrc2014(self) -> None:
+        import mrcfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            star_path = root / "particles.star"
+            _write_extraction_star(star_path)
+            result = write_extraction_masks(
+                input_star_path=star_path,
+                output_directory=root,
+                input_angpix=10.0,
+                output_angpix=10.0,
+                cleanup_distance_angstrom=10.0,
+                dimensions=(5, 5, 5),
+            )
+
+            validation_output = io.StringIO()
+            self.assertTrue(mrcfile.validate(result.outputs[0].path, print_file=validation_output))
 
     def test_add_to_existing_mask_preserves_existing_zero_regions(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -269,6 +291,27 @@ class ExtractionMaskTests(unittest.TestCase):
             )
             data = _read_mode0_data(result.outputs[0].path)
             self.assertEqual(data[3 + 3 * 7 + 3 * 49], 0)
+
+    def test_mode0_negative_values_are_not_treated_as_positive(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            star_path = root / "particles.star"
+            shape_path = root / "negative-shape.mrc"
+            _write_shape_star(star_path)
+            _write_mode0_mrc(shape_path, (3, 3, 3), {(1, 1, 1)}, active_value=-1)
+
+            with self.assertRaisesRegex(ExtractionMaskError, "does not contain any positive voxels"):
+                write_extraction_masks(
+                    input_star_path=star_path,
+                    output_directory=root / "negative",
+                    input_angpix=1.0,
+                    output_angpix=1.0,
+                    cleanup_distance_angstrom=0.0,
+                    dimensions=(7, 7, 7),
+                    mask_mode="shape",
+                    shape_mask_path=shape_path,
+                    binarize_shape_input=True,
+                )
 
 
 if __name__ == "__main__":

@@ -1218,6 +1218,8 @@ class ParticlesTab(SidebarTab):
         self.history_table.tag_configure("waiting", background="#dbeeff")
         self.history_table.tag_configure("running", background="#dff4d8")
         self.history_table.tag_configure("completed", background="#dde8ff")
+        self.history_table.tag_configure("failed", background="#f8d7da")
+        self.history_table.tag_configure("cancelled", background="#fff3cd")
         history_scrollbar = ttk.Scrollbar(history_box, orient="vertical", command=self.history_table.yview)
         history_scrollbar.grid(row=0, column=1, sticky="ns")
         self.history_table.configure(yscrollcommand=history_scrollbar.set)
@@ -4092,6 +4094,7 @@ class ParticlesTab(SidebarTab):
             slurm_profile=self.slurm_profile_var.get().strip(),
             environment_title=effective_environment if self.execution_mode_var.get() == "Run locally" else "",
             parameters=values,
+            working_directory=dataset.processing_folder,
         )
         if self.execution_mode_var.get() == "Run locally" and effective_environment:
             entry.parameters["execution_environment"] = effective_environment
@@ -4159,8 +4162,9 @@ class ParticlesTab(SidebarTab):
                 "error_label": dataset.dataset_name,
                 "dataset": dataset,
                 "activation_command": activation_command,
+                "history_entry": history_entry,
             }
-            for dataset, command in commands
+            for (dataset, command), history_entry in zip(commands, history_entries)
         ]
         execute_command_sequence(
             self.app,
@@ -4201,6 +4205,7 @@ class ParticlesTab(SidebarTab):
     ) -> None:
         self.app.clear_history_entries_running(running_entry_ids)
         self.app.clear_abort_request()
+        self.app.on_project_changed("particles")
         merge_result: MergeResult | None = None
         if (
             not self.app.is_debug_mode_enabled()
@@ -4601,7 +4606,7 @@ class ParticlesTab(SidebarTab):
             self.intersect_output_name_var.set(params.get("output_star", "Output.star"))
             self.intersect_common_var.set(self._bool_parameter(params, "write_common"))
             self.intersect_unique_var.set(self._bool_parameter(params, "write_unique"))
-            self._refresh_selected_intersect_dataset_list()
+            self._refresh_intersect_selected_dataset_list()
             self._refresh_intersect_star_list(show_busy=False)
             self._on_intersect_identification_changed()
         elif job_key == "merge_split_star_files":

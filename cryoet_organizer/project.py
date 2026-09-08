@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import shutil
 import tempfile
@@ -15,7 +16,54 @@ from typing import Any
 PROJECT_SUFFIX = ".cryopal.json"
 SETTINGS_SUFFIX = ".cryopal.settings"
 TS_NAME_DELIMITERS = "_-. "
-PROJECT_SCHEMA_VERSION = 7
+PROJECT_SCHEMA_VERSION = 8
+PROJECT_BACKUP_COUNT = 3
+
+
+class ProjectFormatError(ValueError):
+    """Raised when a project cannot be interpreted without risking data loss."""
+
+
+def _reject_nonstandard_json_constant(value: str) -> None:
+    raise ProjectFormatError(f"Project JSON contains non-standard numeric value {value!r}.")
+
+
+def _strict_bool(value: Any, *, field_name: str, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int) and value in {0, 1}:
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().casefold()
+        if normalized in {"true", "1", "yes", "on"}:
+            return True
+        if normalized in {"false", "0", "no", "off"}:
+            return False
+    raise ProjectFormatError(f"Project field '{field_name}' must be a boolean value.")
+
+
+def _finite_float(value: Any, *, field_name: str, minimum: float = 0.0) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ProjectFormatError(f"Project field '{field_name}' must be a number.") from exc
+    if not math.isfinite(parsed) or parsed < minimum:
+        raise ProjectFormatError(f"Project field '{field_name}' must be finite and at least {minimum}.")
+    return parsed
+
+
+def _nonnegative_integer(value: Any, *, field_name: str) -> int:
+    if isinstance(value, bool):
+        raise ProjectFormatError(f"Project field '{field_name}' must be a non-negative integer.")
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ProjectFormatError(f"Project field '{field_name}' must be a non-negative integer.") from exc
+    if parsed < 0 or (isinstance(value, float) and not value.is_integer()):
+        raise ProjectFormatError(f"Project field '{field_name}' must be a non-negative integer.")
+    return parsed
 
 
 def _string_keyed_dict(payload: Any) -> dict[str, Any]:
@@ -140,6 +188,17 @@ class JobHistoryEntry:
     parameters: dict[str, str] = field(default_factory=dict)
     artifacts: dict[str, Any] = field(default_factory=dict)
     entry_id: str = field(default_factory=lambda: uuid.uuid4().hex)
+    status: str = "unknown"
+    submitted_at: str = ""
+    started_at: str = ""
+    finished_at: str = ""
+    exit_code: int | None = None
+    failure_reason: str = ""
+    working_directory: str = ""
+    host: str = ""
+    app_version: str = ""
+    tool_version: str = ""
+    environment_fingerprint: str = ""
 
     @classmethod
     def from_dict(cls, payload: dict) -> "JobHistoryEntry":
@@ -160,6 +219,17 @@ class JobHistoryEntry:
             slurm_script_path=payload.get("slurm_script_path", ""),
             parameters={str(key): str(value) for key, value in payload.get("parameters", {}).items()},
             artifacts=deepcopy(dict(payload.get("artifacts", {}))) if isinstance(payload.get("artifacts"), dict) else {},
+            status=str(payload.get("status", "unknown")),
+            submitted_at=str(payload.get("submitted_at", "")),
+            started_at=str(payload.get("started_at", "")),
+            finished_at=str(payload.get("finished_at", "")),
+            exit_code=(int(payload["exit_code"]) if payload.get("exit_code") is not None else None),
+            failure_reason=str(payload.get("failure_reason", "")),
+            working_directory=str(payload.get("working_directory", "")),
+            host=str(payload.get("host", "")),
+            app_version=str(payload.get("app_version", "")),
+            tool_version=str(payload.get("tool_version", "")),
+            environment_fingerprint=str(payload.get("environment_fingerprint", "")),
         )
 
     def to_dict(self) -> dict:
@@ -262,19 +332,29 @@ class DatasetRecord:
             dataset_name=payload.get("dataset_name", ""),
             sample=payload.get("sample", ""),
             comment=payload.get("comment", ""),
-            pixel_size=float(payload.get("pixel_size", 0.0)),
-            exposure=float(payload.get("exposure", 0.0)),
-            tomogram_x=int(payload.get("tomogram_x", 0)),
-            tomogram_y=int(payload.get("tomogram_y", 0)),
-            tomogram_z=int(payload.get("tomogram_z", 0)),
+            pixel_size=_finite_float(payload.get("pixel_size", 0.0), field_name="datasets[].pixel_size"),
+            exposure=_finite_float(payload.get("exposure", 0.0), field_name="datasets[].exposure"),
+            tomogram_x=_nonnegative_integer(payload.get("tomogram_x", 0), field_name="datasets[].tomogram_x"),
+            tomogram_y=_nonnegative_integer(payload.get("tomogram_y", 0), field_name="datasets[].tomogram_y"),
+            tomogram_z=_nonnegative_integer(payload.get("tomogram_z", 0), field_name="datasets[].tomogram_z"),
             raw_frames_folder=payload.get("raw_frames_folder", ""),
             mdocs_folder=payload.get("mdocs_folder", ""),
             mdocs_source_folder=payload.get("mdocs_source_folder", payload.get("mdocs_folder", "")),
-            unified_mdoc_names=bool(payload.get("unified_mdoc_names", True)),
+            unified_mdoc_names=_strict_bool(
+                payload.get("unified_mdoc_names", True),
+                field_name="datasets[].unified_mdoc_names",
+                default=True,
+            ),
             unified_mdocs_folder=payload.get("unified_mdocs_folder", ""),
             prepared_mdoc_map=_string_string_dict(payload.get("prepared_mdoc_map", {})),
-            ignore_override_mdocs=bool(payload.get("ignore_override_mdocs", False)),
-            ignore_custom_mdocs=bool(payload.get("ignore_custom_mdocs", False)),
+            ignore_override_mdocs=_strict_bool(
+                payload.get("ignore_override_mdocs", False),
+                field_name="datasets[].ignore_override_mdocs",
+            ),
+            ignore_custom_mdocs=_strict_bool(
+                payload.get("ignore_custom_mdocs", False),
+                field_name="datasets[].ignore_custom_mdocs",
+            ),
             ignore_custom_mdocs_pattern=payload.get("ignore_custom_mdocs_pattern", ""),
             gain_file=payload.get("gain_file", ""),
             frame_series_settings_file=payload.get("frame_series_settings_file", ""),
@@ -313,9 +393,17 @@ class ProjectData:
 
     @classmethod
     def from_dict(cls, payload: dict) -> "ProjectData":
+        if not isinstance(payload, dict):
+            raise ProjectFormatError("CryoPal_tomo project root must be a JSON object.")
         migrated = migrate_project_payload(payload)
+        dataset_payload = migrated.get("datasets", [])
+        if not isinstance(dataset_payload, list) or not all(isinstance(item, dict) for item in dataset_payload):
+            raise ProjectFormatError("Project field 'datasets' must be a list of objects.")
+        population_payload = migrated.get("m_populations", [])
+        if not isinstance(population_payload, list) or not all(isinstance(item, dict) for item in population_payload):
+            raise ProjectFormatError("Project field 'm_populations' must be a list of objects.")
         datasets = [
-            DatasetRecord.from_dict(item) for item in migrated.get("datasets", [])
+            DatasetRecord.from_dict(item) for item in dataset_payload
         ]
         assert_unique_dataset_names(datasets)
         return cls(
@@ -327,10 +415,13 @@ class ProjectData:
                 if migrated.get("dataset_sort_mode") == "alphabetical"
                 else "created_at",
             ),
-            dataset_sort_descending=bool(migrated.get("dataset_sort_descending", False)),
+            dataset_sort_descending=_strict_bool(
+                migrated.get("dataset_sort_descending", False),
+                field_name="dataset_sort_descending",
+            ),
             datasets=datasets,
             m_populations=[
-                MPopulationRecord.from_dict(item) for item in migrated.get("m_populations", [])
+                MPopulationRecord.from_dict(item) for item in population_payload
             ],
             state=ProjectState.from_dict(migrated.get("state")),
             metadata=deepcopy(dict(migrated.get("metadata", {}))),
@@ -541,8 +632,6 @@ def ts_name_match_score(target_stem: str, ts_name: str) -> tuple[int, int] | Non
         if _boundary_ok(target, start, end):
             return (2, len(candidate))
         start = target.find(candidate, start + 1)
-    if candidate in target:
-        return (1, len(candidate))
     return None
 
 
@@ -592,20 +681,35 @@ def best_matching_paths_for_ts(paths: list[Path], ts_name: str, ts_names: list[s
 
 def load_project(path: str | Path) -> ProjectData:
     project_path = Path(path)
-    payload = json.loads(project_path.read_text(encoding="utf-8"))
+    payload = json.loads(
+        project_path.read_text(encoding="utf-8"),
+        parse_constant=_reject_nonstandard_json_constant,
+    )
     return ProjectData.from_dict(payload)
 
 
 def save_project(path: str | Path, project: ProjectData) -> Path:
     project_path = ensure_project_suffix(Path(path))
     project.schema_version = PROJECT_SCHEMA_VERSION
-    data = json.dumps(project.to_dict(), indent=2, ensure_ascii=False)
+    data = json.dumps(project.to_dict(), indent=2, ensure_ascii=False, allow_nan=False)
     project_path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(dir=project_path.parent, suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        _rotate_project_backups(project_path)
         os.replace(tmp_name, project_path)
+        try:
+            directory_fd = os.open(project_path.parent, os.O_RDONLY)
+        except OSError:
+            directory_fd = None
+        if directory_fd is not None:
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
     except Exception:
         try:
             os.unlink(tmp_name)
@@ -615,9 +719,42 @@ def save_project(path: str | Path, project: ProjectData) -> Path:
     return project_path
 
 
+def _backup_path(project_path: Path, generation: int) -> Path:
+    return project_path.with_name(f"{project_path.name}.bak{generation}")
+
+
+def _rotate_project_backups(project_path: Path) -> None:
+    if not project_path.exists():
+        return
+    _backup_path(project_path, PROJECT_BACKUP_COUNT).unlink(missing_ok=True)
+    for generation in range(PROJECT_BACKUP_COUNT - 1, 0, -1):
+        source = _backup_path(project_path, generation)
+        if source.exists():
+            os.replace(source, _backup_path(project_path, generation + 1))
+    backup_fd, backup_tmp_name = tempfile.mkstemp(dir=project_path.parent, suffix=".backup.tmp")
+    os.close(backup_fd)
+    backup_tmp = Path(backup_tmp_name)
+    try:
+        shutil.copy2(project_path, backup_tmp)
+        os.replace(backup_tmp, _backup_path(project_path, 1))
+    finally:
+        backup_tmp.unlink(missing_ok=True)
+
+
 def migrate_project_payload(payload: dict[str, Any]) -> dict[str, Any]:
     migrated = deepcopy(dict(payload))
-    schema_version = int(migrated.get("schema_version", 1) or 1)
+    try:
+        schema_version = int(migrated.get("schema_version", 1) or 1)
+    except (TypeError, ValueError) as exc:
+        raise ProjectFormatError("Project schema_version must be an integer.") from exc
+    if schema_version > PROJECT_SCHEMA_VERSION:
+        raise ProjectFormatError(
+            f"This project uses schema version {schema_version}, but this CryoPal_tomo release "
+            f"supports up to version {PROJECT_SCHEMA_VERSION}. Open it with a newer release; "
+            "the project was not modified."
+        )
+    if schema_version < 1:
+        raise ProjectFormatError("Project schema_version must be at least 1.")
     metadata = migrated.get("metadata")
     if not isinstance(metadata, dict):
         metadata = {}
@@ -665,6 +802,9 @@ def migrate_project_payload(payload: dict[str, Any]) -> dict[str, Any]:
         schema_version = 6
     if schema_version < 7:
         migrated = _migrate_v6_to_v7(migrated)
+        schema_version = 7
+    if schema_version < 8:
+        migrated = _migrate_v7_to_v8(migrated)
     migrated["schema_version"] = PROJECT_SCHEMA_VERSION
     return migrated
 
@@ -734,6 +874,7 @@ def _migrate_v2_to_v3(payload: dict[str, Any]) -> dict[str, Any]:
     move("file_registry_role_order", [])
     move("file_registry_overrides", {})
     move("custom_job_types", [])
+    move("shortcuts", [])
     move("relion_project_default", {})
     move("relion_projects", [])
     move("tomograms_selection", [])
@@ -780,3 +921,8 @@ def _migrate_v6_to_v7(payload: dict[str, Any]) -> dict[str, Any]:
     state.setdefault("relion_projects", [])
     state.setdefault("relion_project_default", {})
     return migrated
+
+
+def _migrate_v7_to_v8(payload: dict[str, Any]) -> dict[str, Any]:
+    """Schema 8 adds optional execution provenance fields to history entries."""
+    return deepcopy(payload)

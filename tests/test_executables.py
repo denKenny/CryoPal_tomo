@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import json
+import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 
 from cryoet_organizer.executables import (
@@ -18,6 +21,8 @@ from cryoet_organizer.settings_bundle import (
     apply_settings_import,
     build_settings_export_payload,
     importable_settings_groups,
+    load_settings_bundle,
+    selected_executable_settings,
 )
 from cryoet_organizer.tabs.processing_m import ProcessingMTab
 
@@ -88,6 +93,34 @@ class ExecutableOverrideTests(unittest.TestCase):
         self.assertEqual(applied, ["executables::executables"])
         self.assertEqual(skipped, [])
         self.assertEqual(resolve_executable_command(target, WARPTOOLS_EXECUTABLE), "/opt/bin/WarpTools")
+
+    def test_settings_bundle_rejects_future_version(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "future.cryopal.settings"
+            path.write_text(json.dumps({"version": 999, "categories": {}}), encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "No settings were imported"):
+                load_settings_bundle(path)
+
+    def test_settings_bundle_rejects_malformed_root_and_nonstandard_numbers(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            malformed = root / "malformed.cryopal.settings"
+            malformed.write_text('{"version": 3, "categories": []}', encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "categories.*JSON object"):
+                load_settings_bundle(malformed)
+
+            nonstandard = root / "nonstandard.cryopal.settings"
+            nonstandard.write_text('{"categories": {"appearance": {"scale": NaN}}}', encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "non-standard numeric value"):
+                load_settings_bundle(nonstandard)
+
+    def test_command_bearing_settings_are_identified_for_trust_prompt(self) -> None:
+        selected = selected_executable_settings(
+            ["appearance::appearance", "executables::executables", "workflows::abc", "shortcuts::__empty__"]
+        )
+
+        self.assertEqual(selected, ["executables::executables", "workflows::abc"])
 
     def test_mtools_create_population_keeps_multi_token_override_as_command_prefix(self) -> None:
         project = ProjectData()

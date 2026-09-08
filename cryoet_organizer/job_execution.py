@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import hashlib
+import socket
 import threading
 from datetime import datetime, timezone
 from typing import Callable
 
+from cryoet_organizer import __version__
 from cryoet_organizer.log_window import BatchCommandOutputWindow
 from cryoet_organizer.project import JobHistoryEntry
 from cryoet_organizer.slurm import SlurmSubmissionResult, wait_for_slurm_job
@@ -54,6 +57,13 @@ def history_timestamp_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def execution_environment_fingerprint(title: str, activation_command: str) -> str:
+    normalized = f"{title.strip()}\0{activation_command.strip()}"
+    if not normalized.strip("\0"):
+        return ""
+    return "sha256:" + hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
 def is_scheduled_history_entry(entry: JobHistoryEntry) -> bool:
     return entry.action == "scheduled" or entry.timestamp == "Scheduled"
 
@@ -80,9 +90,22 @@ def create_history_entry(
     execution_mode: str = "local",
     slurm_profile: str = "",
     environment_title: str = "",
+    working_directory: str = "",
 ) -> JobHistoryEntry:
+    timestamp = history_timestamp_now()
+    status = "scheduled" if scheduled else "created"
+    submitted_at = ""
+    started_at = ""
+    if action == "submitted":
+        status = "submitted"
+        submitted_at = timestamp
+    elif action == "ran":
+        status = "running"
+        started_at = timestamp
+    elif action == "copied":
+        status = "copied"
     return JobHistoryEntry(
-        timestamp=history_timestamp_now(),
+        timestamp=timestamp,
         action=action,
         group=group,
         job_name=job_name,
@@ -93,7 +116,35 @@ def create_history_entry(
         slurm_profile=slurm_profile,
         environment_title=environment_title,
         parameters=dict(parameters or {}),
+        status=status,
+        submitted_at=submitted_at,
+        started_at=started_at,
+        working_directory=working_directory,
+        app_version=__version__,
+        host=socket.gethostname(),
     )
+
+
+def complete_history_entry(
+    entry: JobHistoryEntry,
+    return_code: int | None,
+    *,
+    aborted: bool = False,
+    failure_reason: str = "",
+) -> None:
+    entry.exit_code = return_code
+    entry.finished_at = history_timestamp_now()
+    if aborted:
+        entry.status = "cancelled"
+        entry.failure_reason = failure_reason or "Aborted by user"
+    elif return_code == 0:
+        entry.status = "succeeded"
+        entry.failure_reason = ""
+    else:
+        entry.status = "failed"
+        entry.failure_reason = failure_reason or (
+            f"Process exited with code {return_code}" if return_code is not None else "Process failed before exit"
+        )
 
 
 def execute_scheduled_history_entries(
@@ -133,7 +184,9 @@ def execute_scheduled_history_entries(
     def worker() -> None:
         failures: list[str] = []
         for entry in entries:
-            started_at = history_timestamp_now()
+            entry.working_directory = cwd or ""
+            entry.app_version = entry.app_version or __version__
+            entry.host = entry.host or socket.gethostname()
             try:
                 run_as_slurm = force_slurm or entry.execution_mode == "slurm"
                 if run_as_slurm:
@@ -146,9 +199,14 @@ def execute_scheduled_history_entries(
                         job_name=entry.job_name,
                         overrides=slurm_override_payload(entry.parameters),
                     )
+                    submitted_at = history_timestamp_now()
+                    entry.submitted_at = submitted_at
+                    entry.status = "submitted"
+                    entry.slurm_job_id = result.job_id
+                    entry.slurm_profile = profile_name
                     app.root.after(
                         0,
-                        lambda current_entry=entry, current_time=started_at, current_result=result, current_profile=profile_name: on_entry_submitted(
+                        lambda current_entry=entry, current_time=submitted_at, current_result=result, current_profile=profile_name: on_entry_submitted(
                             current_entry,
                             current_time,
                             current_result,
@@ -158,12 +216,25 @@ def execute_scheduled_history_entries(
                     if wait_for_slurm_completion and not app.is_debug_mode_enabled():
                         succeeded, state = wait_for_slurm_job(result.job_id)
                         if not succeeded:
+                            entry.status = "failed"
+                            entry.finished_at = history_timestamp_now()
+                            entry.failure_reason = f"Slurm job ended with state {state}"
                             failures.append(f"{entry.job_name}: Slurm job ended with state {state}")
                             break
+                        entry.status = "succeeded"
+                        entry.exit_code = 0
+                        entry.finished_at = history_timestamp_now()
                         if on_entry_completed is not None:
                             app.root.after(0, lambda current_entry=entry: on_entry_completed(current_entry))
                 else:
+                    started_at = history_timestamp_now()
+                    entry.started_at = started_at
+                    entry.status = "running"
                     activation_command = app.resolve_environment_activation(entry.environment_title)
+                    entry.environment_fingerprint = execution_environment_fingerprint(
+                        entry.environment_title,
+                        activation_command,
+                    )
                     batch_job_id = output_job_ids.get(entry.entry_id, "")
                     app.root.after(
                         0,
@@ -182,17 +253,27 @@ def execute_scheduled_history_entries(
                     if output_window is not None and batch_job_id:
                         output_window.attach_process(batch_job_id, process)
                     return_code = app.wait_managed_process(process)
+                    entry.exit_code = return_code
+                    entry.finished_at = history_timestamp_now()
                     if output_window is not None and batch_job_id:
                         output_window.set_job_finished(batch_job_id, return_code)
                     if app.abort_requested():
+                        entry.status = "cancelled"
+                        entry.failure_reason = "Aborted by user"
                         failures.append(f"{entry.job_name}: aborted")
                         break
                     if return_code != 0:
+                        entry.status = "failed"
+                        entry.failure_reason = f"Process exited with code {return_code}"
                         failures.append(f"{entry.job_name}: exit code {return_code}")
                         break
+                    entry.status = "succeeded"
                     if on_entry_completed is not None:
                         app.root.after(0, lambda current_entry=entry: on_entry_completed(current_entry))
             except Exception as exc:
+                entry.status = "failed"
+                entry.finished_at = history_timestamp_now()
+                entry.failure_reason = str(exc)
                 failures.append(f"{entry.job_name}: {exc}")
                 break
             if app.abort_requested():
@@ -239,6 +320,11 @@ def execute_command_sequence(
             cwd = str(item.get("cwd", "")).strip() or None
             error_label = str(item.get("error_label", "")).strip() or job_name
             batch_job_id = str(item.get("_batch_output_id", "")).strip()
+            history_entry = item.get("history_entry")
+            if isinstance(history_entry, JobHistoryEntry):
+                history_entry.working_directory = cwd or ""
+                history_entry.host = history_entry.host or socket.gethostname()
+                history_entry.app_version = history_entry.app_version or __version__
             try:
                 if use_slurm:
                     result = app.submit_slurm_command(
@@ -249,13 +335,34 @@ def execute_command_sequence(
                         job_name=job_name,
                         overrides=overrides or {},
                     )
+                    if isinstance(history_entry, JobHistoryEntry):
+                        submitted_at = history_timestamp_now()
+                        history_entry.action = "submitted"
+                        history_entry.timestamp = submitted_at
+                        history_entry.status = "submitted"
+                        history_entry.submitted_at = submitted_at
+                        history_entry.execution_mode = "slurm"
+                        history_entry.slurm_profile = profile_name
+                        history_entry.slurm_job_id = result.job_id
+                        history_entry.slurm_script_path = result.script_path
                     if on_submitted is not None:
                         app.root.after(
                             0,
                             lambda current_item=item, current_result=result: on_submitted(current_item, current_result),
                         )
                 else:
+                    if isinstance(history_entry, JobHistoryEntry):
+                        started_at = history_timestamp_now()
+                        history_entry.action = "ran"
+                        history_entry.timestamp = started_at
+                        history_entry.status = "running"
+                        history_entry.started_at = history_entry.started_at or started_at
                     activation_command = str(item.get("activation_command", "")).strip()
+                    if isinstance(history_entry, JobHistoryEntry):
+                        history_entry.environment_fingerprint = execution_environment_fingerprint(
+                            history_entry.environment_title,
+                            activation_command,
+                        )
                     if output_window is not None and batch_job_id:
                         output_window.set_job_running(batch_job_id)
                     process = app.start_managed_process_for_output(
@@ -269,14 +376,22 @@ def execute_command_sequence(
                     if output_window is not None and batch_job_id:
                         output_window.set_job_finished(batch_job_id, return_code)
                     if app.abort_requested():
+                        if isinstance(history_entry, JobHistoryEntry):
+                            complete_history_entry(history_entry, return_code, aborted=True)
                         failures.append(f"{error_label}: aborted")
                         break
                     if return_code != 0:
+                        if isinstance(history_entry, JobHistoryEntry):
+                            complete_history_entry(history_entry, return_code)
                         failures.append(f"{error_label}: exit code {return_code}")
                         break
+                    if isinstance(history_entry, JobHistoryEntry):
+                        complete_history_entry(history_entry, return_code)
                     if on_completed is not None:
                         app.root.after(0, lambda current_item=item: on_completed(current_item))
             except Exception as exc:
+                if isinstance(history_entry, JobHistoryEntry):
+                    complete_history_entry(history_entry, None, failure_reason=str(exc))
                 failures.append(f"{error_label}: {exc}")
                 break
             if app.abort_requested():

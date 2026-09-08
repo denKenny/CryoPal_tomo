@@ -35,6 +35,6 @@ class LibraryTab(SidebarTab):
         lines = [
             f"Project: {project.name}",
             f"Datasets: {len(project.datasets)}",
-            f"Sort mode: {project.dataset_sort_mode}",
+            f"Sort mode: {project.dataset_sort_column}",
         ]
         self.summary.config(text="\n".join(lines))

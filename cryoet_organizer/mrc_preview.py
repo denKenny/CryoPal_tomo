@@ -35,6 +35,7 @@ def read_mrc_preview(path: str | Path, *, stack_2d: bool = False, max_size: int 
     header = read_mrc_header(candidate)
     with candidate.open("rb") as handle:
         with mmap.mmap(handle.fileno(), length=0, access=mmap.ACCESS_READ) as data:
+            planes: tuple[MrcPlanePreview, ...]
             if stack_2d:
                 planes = (_read_xy_plane(data, header, header.nz // 2, max_size=max_size, label="XY"),)
             else:
@@ -72,7 +73,7 @@ def _row_offset(header: MrcHeader, z_index: int, y_index: int) -> int:
 
 def _unpack_values(header: MrcHeader, data: bytes) -> list[float]:
     if header.mode == 0:
-        return [float(value) for value in data]
+        return [float(value) for (value,) in struct.iter_unpack("b", data)]
     if header.mode == 1:
         return [float(value) for (value,) in struct.iter_unpack(f"{header.endian}h", data)]
     if header.mode == 6:
