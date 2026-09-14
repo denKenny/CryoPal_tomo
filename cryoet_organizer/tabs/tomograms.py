@@ -94,6 +94,8 @@ class TomogramsTab(SidebarTab):
         self.slurm_override_frames: list[ttk.Frame] = []
         self.advanced_visible_vars: dict[str, tk.BooleanVar] = {}
         self.job_content_panes: dict[str, VerticalSplitPane] = {}
+        self.preview_warning_var = tk.StringVar()
+        self.preview_dirty_jobs: set[str] = set()
 
         self.cryolithe_model_dir_var = tk.StringVar()
         self.cryolithe_save_dir_var = tk.StringVar()
@@ -431,7 +433,7 @@ class TomogramsTab(SidebarTab):
             extract_advanced,
             text="Ignore tomogram mask",
             variable=self.extract_ignore_tomogram_mask_var,
-            command=self._update_extract_preview,
+            command=self._mark_preview_dirty,
         ).grid(row=2, column=0, columnspan=2, sticky="w", pady=(0, 8))
         extract_fields = [
             (3, "Number of false positives", self.extract_number_of_false_positives_var),
@@ -459,13 +461,13 @@ class TomogramsTab(SidebarTab):
             extract_advanced,
             text="Tophat filter",
             variable=self.extract_tophat_filter_var,
-            command=self._update_extract_preview,
+            command=self._mark_preview_dirty,
         ).grid(row=6, column=0, columnspan=2, sticky="w", pady=(0, 8))
         ttk.Checkbutton(
             extract_advanced,
             text="RELION5 compat",
             variable=self.extract_relion5_compat_var,
-            command=self._update_extract_preview,
+            command=self._mark_preview_dirty,
         ).grid(row=8, column=0, columnspan=2, sticky="w", pady=(0, 8))
 
         self.slabify_frame = ttk.Frame(self.workflow_bottom_frame)
@@ -485,7 +487,7 @@ class TomogramsTab(SidebarTab):
             self.slabify_params,
             text="Input directory manually",
             variable=self.slabify_manual_input_var,
-            command=self._update_slabify_preview,
+            command=self._mark_preview_dirty,
         ).grid(row=0, column=0, sticky="w", pady=(0, 8))
         self._add_path_row(
             self.slabify_params,
@@ -516,7 +518,7 @@ class TomogramsTab(SidebarTab):
             slabify_advanced,
             text="Measure",
             variable=self.slabify_measure_var,
-            command=self._update_slabify_preview,
+            command=self._mark_preview_dirty,
         ).grid(row=4, column=0, columnspan=2, sticky="w", pady=(0, 8))
         self._add_path_row(
             slabify_advanced,
@@ -534,7 +536,7 @@ class TomogramsTab(SidebarTab):
             slabify_advanced,
             text="Simple fit",
             variable=self.slabify_simple_var,
-            command=self._update_slabify_preview,
+            command=self._mark_preview_dirty,
         ).grid(row=11, column=0, columnspan=2, sticky="w", pady=(0, 8))
         self._add_text_row(slabify_advanced, 12, "Thickness", self.slabify_thickness_var)
         self._add_text_row(slabify_advanced, 13, "Percentile", self.slabify_percentile_var)
@@ -636,7 +638,7 @@ class TomogramsTab(SidebarTab):
             self.membrain_params,
             text="Input TS directory manually",
             variable=self.membrain_manual_input_var,
-            command=self._update_membrain_preview,
+            command=self._mark_preview_dirty,
         ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 8))
         self._add_path_row(
             self.membrain_params,
@@ -664,7 +666,7 @@ class TomogramsTab(SidebarTab):
             membrain_advanced,
             text="Rescale patches",
             variable=self.membrain_rescale_patches_var,
-            command=self._update_membrain_preview,
+            command=self._mark_preview_dirty,
         ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(0, 8))
         self._add_text_row(membrain_advanced, 2, "Input pixel size", self.membrain_in_pixel_size_var)
         self._add_text_row(membrain_advanced, 3, "Output pixel size", self.membrain_out_pixel_size_var)
@@ -672,13 +674,13 @@ class TomogramsTab(SidebarTab):
             membrain_advanced,
             text="Store probabilities",
             variable=self.membrain_store_probabilities_var,
-            command=self._update_membrain_preview,
+            command=self._mark_preview_dirty,
         ).grid(row=4, column=0, columnspan=2, sticky="w", pady=(0, 8))
         ttk.Checkbutton(
             membrain_advanced,
             text="Store connected components",
             variable=self.membrain_store_connected_components_var,
-            command=self._update_membrain_preview,
+            command=self._mark_preview_dirty,
         ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(0, 8))
         self._add_text_row(
             membrain_advanced,
@@ -690,7 +692,7 @@ class TomogramsTab(SidebarTab):
             membrain_advanced,
             text="Test-time augmentation",
             variable=self.membrain_test_time_augmentation_var,
-            command=self._update_membrain_preview,
+            command=self._mark_preview_dirty,
         ).grid(row=7, column=0, columnspan=2, sticky="w", pady=(0, 8))
         self._add_text_row(
             membrain_advanced,
@@ -768,16 +770,22 @@ class TomogramsTab(SidebarTab):
         actions = ttk.Frame(box)
         actions.grid(row=0, column=0, sticky="ew", pady=(0, 8))
         actions.columnconfigure(0, weight=1)
-        ttk.Button(actions, text="Copy command", command=copy_command).grid(row=0, column=1, padx=(8, 0))
-        ttk.Button(actions, text="Schedule command", command=schedule_command).grid(row=0, column=2, padx=(8, 0))
-        ttk.Button(actions, text="Run command", command=run_command).grid(row=0, column=3, padx=(8, 0))
+        ttk.Label(
+            actions,
+            textvariable=self.preview_warning_var,
+            foreground="#b00020",
+        ).grid(row=0, column=0, sticky="w")
+        ttk.Button(actions, text="Refresh", command=self._refresh_active_preview).grid(row=0, column=1, padx=(8, 0))
+        ttk.Button(actions, text="Copy command", command=copy_command).grid(row=0, column=2, padx=(8, 0))
+        ttk.Button(actions, text="Schedule command", command=schedule_command).grid(row=0, column=3, padx=(8, 0))
+        ttk.Button(actions, text="Run command", command=run_command).grid(row=0, column=4, padx=(8, 0))
         abort_button = ttk.Button(
             actions,
             text="Abort",
             command=self.app.abort_running_commands,
             state="disabled",
         )
-        abort_button.grid(row=0, column=4, padx=(8, 0))
+        abort_button.grid(row=0, column=5, padx=(8, 0))
         self.app.attach_abort_button(abort_button)
         execution_row = ttk.Frame(box)
         execution_row.grid(row=1, column=0, sticky="ew", pady=(0, 8))
@@ -899,7 +907,7 @@ class TomogramsTab(SidebarTab):
             self.pytom_params,
             text="Use Warp XML file",
             variable=self.pytom_warp_xml_var,
-            command=self._update_pytom_preview,
+            command=self._mark_preview_dirty,
         ).grid(row=row, column=0, columnspan=2, sticky="w", pady=(0, 8))
         row += 1
         self._add_text_row(self.pytom_params, row, "GPU IDs", self.pytom_gpu_ids_var)
@@ -909,7 +917,7 @@ class TomogramsTab(SidebarTab):
             self.pytom_params,
             text="Input TS directory manually",
             variable=self.pytom_manual_input_var,
-            command=self._update_pytom_preview,
+            command=self._mark_preview_dirty,
         ).grid(row=row, column=0, sticky="w", pady=(0, 8))
         manual_row = ttk.Frame(self.pytom_params)
         manual_row.grid(row=row, column=1, sticky="ew", pady=(0, 8))
@@ -960,7 +968,7 @@ class TomogramsTab(SidebarTab):
             ("Half precision", self.pytom_half_precision_var),
         ]
         for label, variable in bool_specs:
-            ttk.Checkbutton(advanced, text=label, variable=variable, command=self._update_pytom_preview).grid(
+            ttk.Checkbutton(advanced, text=label, variable=variable, command=self._mark_preview_dirty).grid(
                 row=advanced_row, column=0, columnspan=2, sticky="w", pady=(0, 8)
             )
             advanced_row += 1
@@ -1124,7 +1132,7 @@ class TomogramsTab(SidebarTab):
             self.membrain_segmentation_threshold_var,
             self.membrain_sliding_window_size_var,
         ):
-            variable.trace_add("write", lambda *_args: self._update_active_preview())
+            variable.trace_add("write", lambda *_args: self._mark_preview_dirty())
 
         for variable in (
             self.pytom_manual_input_var,
@@ -1145,7 +1153,7 @@ class TomogramsTab(SidebarTab):
             self.membrain_store_connected_components_var,
             self.membrain_test_time_augmentation_var,
         ):
-            variable.trace_add("write", lambda *_args: self._update_active_preview())
+            variable.trace_add("write", lambda *_args: self._mark_preview_dirty())
 
     def _tomogram_default(self, group: str, job_key: str, field_key: str, base_value: str) -> str:
         return resolve_job_default(self.app.project, "Tomograms", group, job_key, field_key, base_value)
@@ -1575,7 +1583,7 @@ class TomogramsTab(SidebarTab):
             )
         )
         self._extract_job_files()
-        self._update_active_preview()
+        self._mark_all_previews_dirty()
 
     def _dataset_options(self, project: ProjectData) -> list[str]:
         return [dataset.dataset_name for dataset in project.datasets]
@@ -1598,7 +1606,7 @@ class TomogramsTab(SidebarTab):
             self.ts_table.insert("", "end", iid=str(index), values=(entry["dataset_name"], entry["ts_name"]))
         dataset_count = len({entry["dataset_name"] for entry in self.selected_entries})
         self.selection_summary.config(text=f"{len(self.selected_entries)} TS in list across {dataset_count} dataset(s)")
-        self._update_active_preview()
+        self._mark_all_previews_dirty()
 
     def _refresh_dataset_options(self) -> None:
         options = self._dataset_options(self.app.project)
@@ -1747,7 +1755,7 @@ class TomogramsTab(SidebarTab):
         path = filedialog.askdirectory(title="Select PyTom TM output folder")
         if path:
             self.extract_tm_output_folder_var.set(path)
-            self._update_extract_preview()
+            self._mark_preview_dirty("pytom_extract_coordinates")
 
     def _browse_extract_tomogram_mask(self) -> None:
         path = filedialog.askdirectory(title="Select tomogram mask directory")
@@ -1793,6 +1801,89 @@ class TomogramsTab(SidebarTab):
         definition = self.job_catalog.get(self.job_type_var.get())
         return definition.job_key if definition is not None else ""
 
+    def _preview_job_keys(self) -> set[str]:
+        return {definition.job_key for definition in self.job_catalog.values()}
+
+    def _job_key_for_job_name(self, job_name: str) -> str:
+        definition = self.job_catalog.get(job_name)
+        return definition.job_key if definition is not None else ""
+
+    def _preview_is_dirty_for_job(self, job_name: str) -> bool:
+        job_key = self._job_key_for_job_name(job_name)
+        return bool(job_key and job_key in self.preview_dirty_jobs)
+
+    def _current_preview_job_key(self) -> str:
+        return self._selected_job_key()
+
+    def _sync_preview_warning(self) -> None:
+        if not hasattr(self, "preview_warning_var"):
+            return
+        job_key = self._current_preview_job_key()
+        if job_key and job_key in self.preview_dirty_jobs:
+            self.preview_warning_var.set("Job parameters changed. Press 'Refresh' to update command preview.")
+        else:
+            self.preview_warning_var.set("")
+
+    def _mark_preview_dirty(self, job_key: str | None = None) -> None:
+        if not hasattr(self, "preview_dirty_jobs"):
+            return
+        target = job_key or self._current_preview_job_key()
+        if not target:
+            return
+        self.preview_dirty_jobs.add(target)
+        self._sync_preview_warning()
+
+    def _mark_all_previews_dirty(self) -> None:
+        if not hasattr(self, "preview_dirty_jobs"):
+            return
+        self.preview_dirty_jobs.update(self._preview_job_keys())
+        self._sync_preview_warning()
+
+    def _clear_preview_dirty(self, job_key: str | None = None) -> None:
+        if not hasattr(self, "preview_dirty_jobs"):
+            return
+        target = job_key or self._current_preview_job_key()
+        if target:
+            self.preview_dirty_jobs.discard(target)
+        self._sync_preview_warning()
+
+    def _command_text_for_job_key(self, job_key: str) -> tk.Text | None:
+        mapping = {
+            "cryolithe_denoising": "cryolithe_command_text",
+            "pytom_template_matching": "pytom_command_text",
+            "pytom_extract_coordinates": "extract_command_text",
+            "slabify_mask_creation": "slabify_command_text",
+            "membrain_segmentation": "membrain_command_text",
+        }
+        attr = mapping.get(job_key)
+        return getattr(self, attr, None) if attr else None
+
+    def _current_preview_is_empty(self) -> bool:
+        widget = self._command_text_for_job_key(self._current_preview_job_key())
+        if widget is None:
+            return False
+        return not widget.get("1.0", "end").strip()
+
+    def _refresh_active_preview(self) -> None:
+        job_key = self._current_preview_job_key()
+        if not job_key:
+            return
+        self._update_active_preview()
+        self._clear_preview_dirty(job_key)
+        self.app.status_var.set("Command preview refreshed")
+
+    def _set_command_preview_from_commands(
+        self,
+        widget: tk.Text,
+        commands: list[tuple[DatasetRecord, dict[str, str], str]],
+        errors: list[str] | None = None,
+    ) -> None:
+        lines = [command for _dataset, _spec, command in commands]
+        lines.extend(f"# {error}" for error in (errors or []))
+        widget.delete("1.0", "end")
+        widget.insert("1.0", "\n".join(lines))
+        self._clear_preview_dirty()
+
     def _on_job_type_changed(self, _event=None) -> None:
         self._scroll_job_view_to_top()
         job_key = self._selected_job_key()
@@ -1804,7 +1895,8 @@ class TomogramsTab(SidebarTab):
             self.slabify_frame.grid_remove()
             self.membrain_frame.grid_remove()
             self.cryolithe_frame.grid()
-            self._update_cryolithe_preview()
+            if self._current_preview_is_empty():
+                self._mark_preview_dirty(job_key)
         elif job_key == "pytom_template_matching":
             self.environment_var.set(self._job_environment_default(job_key=job_key))
             self.history_frame.grid_remove()
@@ -1813,7 +1905,8 @@ class TomogramsTab(SidebarTab):
             self.slabify_frame.grid_remove()
             self.membrain_frame.grid_remove()
             self.pytom_frame.grid()
-            self._update_pytom_preview()
+            if self._current_preview_is_empty():
+                self._mark_preview_dirty(job_key)
         elif job_key == "pytom_extract_coordinates":
             self.environment_var.set(self._job_environment_default(job_key=job_key))
             self.history_frame.grid_remove()
@@ -1822,7 +1915,8 @@ class TomogramsTab(SidebarTab):
             self.slabify_frame.grid_remove()
             self.membrain_frame.grid_remove()
             self.extract_frame.grid()
-            self._update_extract_preview()
+            if self._current_preview_is_empty():
+                self._mark_preview_dirty(job_key)
         elif job_key == "slabify_mask_creation":
             self.environment_var.set(self._job_environment_default(job_key=job_key))
             self.history_frame.grid_remove()
@@ -1831,7 +1925,8 @@ class TomogramsTab(SidebarTab):
             self.extract_frame.grid_remove()
             self.membrain_frame.grid_remove()
             self.slabify_frame.grid()
-            self._update_slabify_preview()
+            if self._current_preview_is_empty():
+                self._mark_preview_dirty(job_key)
         elif job_key == "membrain_segmentation":
             self.environment_var.set(self._job_environment_default(job_key=job_key))
             self.history_frame.grid_remove()
@@ -1840,7 +1935,8 @@ class TomogramsTab(SidebarTab):
             self.extract_frame.grid_remove()
             self.slabify_frame.grid_remove()
             self.membrain_frame.grid()
-            self._update_membrain_preview()
+            if self._current_preview_is_empty():
+                self._mark_preview_dirty(job_key)
         elif self.job_type_var.get() == "Job history":
             self.cryolithe_frame.grid_remove()
             self.pytom_frame.grid_remove()
@@ -1861,6 +1957,7 @@ class TomogramsTab(SidebarTab):
             self.extract_command_text.delete("1.0", "end")
             self.slabify_command_text.delete("1.0", "end")
             self.membrain_command_text.delete("1.0", "end")
+        self._sync_preview_warning()
 
     def _update_active_preview(self) -> None:
         mode = self.job_type_var.get()
@@ -3006,7 +3103,7 @@ class TomogramsTab(SidebarTab):
         fallback_dataset: DatasetRecord | None = None,
         fallback_ts_name: str = "Preview override",
     ) -> list[tuple[DatasetRecord | None, dict[str, str], str]]:
-        preview_lines = self._preview_lines_from_widget(preview_widget)
+        preview_lines = [] if self._preview_is_dirty_for_job(job_name) else self._preview_lines_from_widget(preview_widget)
         if not preview_lines:
             return commands
         if not commands:
@@ -3043,7 +3140,7 @@ class TomogramsTab(SidebarTab):
         fallback_dataset: DatasetRecord | None = None,
         fallback_ts_name: str = "Preview override",
     ) -> list[tuple[DatasetRecord | None, dict[str, str], str]]:
-        preview_lines = self._preview_lines_from_widget(preview_widget)
+        preview_lines = [] if self._preview_is_dirty_for_job(job_name) else self._preview_lines_from_widget(preview_widget)
         if preview_lines:
             if errors:
                 self.app.debug_log(
@@ -3218,7 +3315,11 @@ class TomogramsTab(SidebarTab):
             messagebox.showinfo("Schedule command", "Please add at least one dataset to the project first.")
             return
         preview_widget = self._preview_widget_for_job(job_name)
-        preview_lines = self._preview_lines_from_widget(preview_widget) if preview_widget is not None else []
+        preview_lines = (
+            []
+            if preview_widget is None or self._preview_is_dirty_for_job(job_name)
+            else self._preview_lines_from_widget(preview_widget)
+        )
         command_preview = "Resolved at runtime"
         if preview_lines:
             command_preview = "\n".join(preview_lines)
@@ -3618,8 +3719,8 @@ class TomogramsTab(SidebarTab):
         if update_ts_list:
             self._persist_selection()
             self._refresh_table()
-        self._update_active_preview()
-        self.app.status_var.set(f"Copied parameters from history entry: {entry.job_name}")
+        self._mark_preview_dirty()
+        self.app.status_var.set(f"Copied parameters from history entry: {entry.job_name}. Press Refresh to update preview.")
 
     def _resolve_scheduled_entry(
         self,
@@ -3653,6 +3754,7 @@ class TomogramsTab(SidebarTab):
         preview = "\n".join(command for _dataset, _spec, command in commands)
         self.frame.clipboard_clear()
         self.frame.clipboard_append(preview)
+        self._set_command_preview_from_commands(self.cryolithe_command_text, commands)
         self._record_grouped_job_history(commands, "copied", preview)
         self.app.on_project_changed("tomograms", "custom")
         self.app.status_var.set("CryoLithe commands copied to clipboard")
@@ -3704,6 +3806,7 @@ class TomogramsTab(SidebarTab):
         preview = "\n".join(command for _dataset, _spec, command in commands)
         self.frame.clipboard_clear()
         self.frame.clipboard_append(preview)
+        self._set_command_preview_from_commands(self.pytom_command_text, commands)
         self._record_grouped_job_history(commands, "copied", preview)
         self.app.on_project_changed("tomograms", "custom")
         self.app.status_var.set("PyTom commands copied to clipboard")
@@ -3784,6 +3887,7 @@ class TomogramsTab(SidebarTab):
         preview = "\n".join(command for _dataset, _spec, command in commands)
         self.frame.clipboard_clear()
         self.frame.clipboard_append(preview)
+        self._set_command_preview_from_commands(self.extract_command_text, commands)
         self._record_grouped_job_history(commands, "copied", preview)
         self.app.on_project_changed("tomograms", "custom")
         self.app.status_var.set("PyTom extract commands copied to clipboard")
@@ -3840,6 +3944,7 @@ class TomogramsTab(SidebarTab):
         preview = "\n".join(command for _dataset, _spec, command in commands)
         self.frame.clipboard_clear()
         self.frame.clipboard_append(preview)
+        self._set_command_preview_from_commands(self.slabify_command_text, commands)
         self._record_grouped_job_history(commands, "copied", preview)
         self.app.on_project_changed("tomograms", "custom")
         self.app.status_var.set("Slabify commands copied to clipboard")
@@ -3904,6 +4009,7 @@ class TomogramsTab(SidebarTab):
         preview = "\n".join(command for _dataset, _spec, command in commands)
         self.frame.clipboard_clear()
         self.frame.clipboard_append(preview)
+        self._set_command_preview_from_commands(self.membrain_command_text, commands)
         self._record_grouped_job_history(commands, "copied", preview)
         self.app.on_project_changed("tomograms", "custom")
         self.app.status_var.set("MemBrain commands copied to clipboard")
@@ -4618,7 +4724,7 @@ class TomogramsTab(SidebarTab):
         self._refresh_history()
         self._refresh_slurm_profiles()
         self._on_job_type_changed()
-        self._update_active_preview()
+        self._mark_all_previews_dirty()
 
     def sync_to_project(self, project: ProjectData) -> None:
         self.workflow_pane.write_to_project(project)

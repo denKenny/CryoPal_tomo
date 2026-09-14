@@ -130,8 +130,21 @@ class ProcessingMTab(SidebarTab):
             row=0, column=2, padx=(8, 0)
         )
 
-        self.population_summary = ttk.Label(self.content, text="", wraplength=900, justify="left")
-        self.population_summary.grid(row=2, column=0, sticky="w", pady=(16, 0))
+        self.population_info = ttk.Frame(self.content)
+        self.population_info.grid(row=2, column=0, sticky="ew", pady=(16, 0))
+        self.population_info.columnconfigure(0, weight=1)
+        self.population_summary = ttk.Label(self.population_info, text="", wraplength=900, justify="left")
+        self.population_summary.grid(row=0, column=0, sticky="w")
+        self.delete_population_button = tk.Button(
+            self.population_info,
+            text="Delete M project",
+            fg="#b00020",
+            command=self._delete_current_population,
+            padx=10,
+            pady=4,
+        )
+        self.delete_population_button.grid(row=1, column=0, sticky="w", pady=(8, 0))
+        self.delete_population_button.grid_remove()
 
         self.creator_box = ttk.LabelFrame(self.content, text="Create new M population", padding=12)
         self.creator_box.grid(row=3, column=0, sticky="ew", pady=(12, 0))
@@ -615,6 +628,7 @@ class ProcessingMTab(SidebarTab):
             self.population_summary.config(
                 text="Select an M population to access its job history and processing jobs."
             )
+            self.delete_population_button.grid_remove()
             return
         lines = [
             f"Selected M population: {population.name}",
@@ -644,6 +658,86 @@ class ProcessingMTab(SidebarTab):
         if self.current_job is not None:
             lines.append(f"Selected job: {self.current_job.command} ({self.current_job.group})")
         self.population_summary.config(text="\n".join(lines))
+        self.delete_population_button.grid()
+
+    def _confirm_delete_population(self, population: MPopulationRecord) -> bool:
+        dialog = tk.Toplevel(self.frame)
+        dialog.title("Delete M project")
+        dialog.transient(self.app.root)
+        dialog.grab_set()
+        dialog.resizable(False, False)
+        dialog.columnconfigure(0, weight=1)
+
+        history_count = len(population.job_history)
+        message = (
+            f"Are you sure you want to delete this M project?\n\n"
+            f"M project: {population.name}\n"
+            f"Directory: {population.directory or '-'}\n\n"
+            f"This removes the M project entry and {history_count} job history entr"
+            f"{'y' if history_count == 1 else 'ies'} from CryoPal. "
+            "The original project directory will not be deleted."
+        )
+        ttk.Label(dialog, text=message, wraplength=520, justify="left").grid(
+            row=0,
+            column=0,
+            sticky="ew",
+            padx=18,
+            pady=(18, 12),
+        )
+        actions = ttk.Frame(dialog)
+        actions.grid(row=1, column=0, sticky="e", padx=18, pady=(0, 18))
+
+        confirmed = tk.BooleanVar(value=False)
+
+        def cancel() -> None:
+            confirmed.set(False)
+            dialog.destroy()
+
+        def delete() -> None:
+            confirmed.set(True)
+            dialog.destroy()
+
+        ttk.Button(actions, text="Cancel", command=cancel).grid(row=0, column=0, padx=(0, 8))
+        tk.Button(actions, text="Yes, delete", fg="#b00020", command=delete, padx=10, pady=3).grid(
+            row=0,
+            column=1,
+        )
+        dialog.protocol("WM_DELETE_WINDOW", cancel)
+        dialog.update_idletasks()
+        x = self.app.root.winfo_rootx() + max(0, (self.app.root.winfo_width() - dialog.winfo_width()) // 2)
+        y = self.app.root.winfo_rooty() + max(0, (self.app.root.winfo_height() - dialog.winfo_height()) // 2)
+        dialog.geometry(f"+{x}+{y}")
+        dialog.wait_window()
+        return bool(confirmed.get())
+
+    def _delete_current_population(self) -> None:
+        population = self._selected_population()
+        if population is None:
+            messagebox.showinfo("Delete M project", "Please select an M project first.")
+            return
+        if not self._confirm_delete_population(population):
+            return
+
+        deleted_name = population.name
+        self.app.project.m_populations = [
+            item
+            for item in self.app.project.m_populations
+            if item is not population and item.name != deleted_name
+        ]
+        self.population_var.set("")
+        self.current_population = None
+        self.current_job = None
+        self.history_entry_refs.clear()
+        self.history_table.delete(*self.history_table.get_children())
+        self._refresh_population_choices(self.app.project)
+        self._refresh_history()
+        self._refresh_processing_selection()
+        self._update_population_ui()
+        self.app.on_project_changed(
+            "processing_m",
+            "m_populations",
+            status_message=f"Deleted M project from CryoPal: {deleted_name}",
+        )
 
     def _on_population_selected(self, _event=None) -> None:
         self.current_population = self._selected_population()
