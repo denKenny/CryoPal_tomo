@@ -247,7 +247,6 @@ class ResizableSectionStack(ttk.Frame):
 
     def _run_layout_changed_notification(self) -> None:
         self._layout_notify_after_id = None
-        self.update_idletasks()
         if callable(self.on_layout_changed):
             self.on_layout_changed()
 
@@ -411,6 +410,5 @@ class VerticalSplitPane(ttk.Frame):
 
     def _run_layout_changed_notification(self) -> None:
         self._layout_notify_after_id = None
-        self.update_idletasks()
         if callable(self.on_layout_changed):
             self.on_layout_changed()

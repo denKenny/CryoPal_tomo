@@ -831,7 +831,10 @@ class CryoETOrganizerApp:
             self._queued_refresh_targets.clear()
             if not selected_ids:
                 return
-            self.apply_appearance_config(get_project_appearance(self.project))
+            appearance = get_project_appearance(self.project)
+            # Reconfiguring ttk styles redraws every widget, even when unchanged.
+            if appearance != self._current_appearance:
+                self.apply_appearance_config(appearance)
             active_id = self.active_tab_id
             visible_targets: set[str] = set()
             if active_id and active_id in selected_ids:
@@ -842,7 +845,6 @@ class CryoETOrganizerApp:
                     self.tabs[tab_id].on_project_loaded(self.project)
 
     def _queue_project_refresh(self, targets: tuple[str, ...] | None = None) -> None:
-        self.apply_appearance_config(get_project_appearance(self.project))
         self._queued_refresh_targets.update(self._resolve_refresh_targets(targets))
         if self._queued_refresh_after_id is None:
             self._queued_refresh_after_id = self.root.after(75, self._flush_queued_project_refresh)

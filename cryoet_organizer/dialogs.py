@@ -109,7 +109,7 @@ def fit_outer_canvas_to_viewport(
     *,
     allow_horizontal: bool = True,
 ) -> None:
-    inner.update_idletasks()
+    # Configure events already have geometry; let Tk batch remaining idle work.
     viewport_width = max(1, int(getattr(event, "width", 1) or 1))
     requested_width = inner.winfo_reqwidth()
     target_width = max(viewport_width, requested_width) if allow_horizontal else viewport_width

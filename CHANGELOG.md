@@ -16,6 +16,7 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ### Fixed
 
+- Reduced X11 redraw overhead by skipping unchanged styles during queued project refreshes and avoiding nested idle processing during resizing.
 - Prevented future project schemas from being silently downgraded.
 - Preserved shortcuts during legacy project migration.
 - Preserved quoted and missing STAR values during round trips.
