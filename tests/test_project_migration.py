@@ -1,11 +1,25 @@
 from __future__ import annotations
 
+import json
+import tempfile
 import unittest
+from pathlib import Path
 
-from cryoet_organizer.project import PROJECT_SCHEMA_VERSION, ProjectData
+from cryoet_organizer.project import (
+    PROJECT_SCHEMA_VERSION,
+    ProjectData,
+    ProjectFormatError,
+    load_project,
+    save_project,
+    ts_name_match_score,
+)
 
 
 class ProjectMigrationTests(unittest.TestCase):
+    def test_ts_name_matching_requires_identifier_boundaries(self) -> None:
+        self.assertIsNone(ts_name_match_score("TS10_reconstruction", "TS1"))
+        self.assertIsNotNone(ts_name_match_score("prefix_TS1_reconstruction", "TS1"))
+
     def test_v1_payload_migrates_file_registry_roles_into_state(self) -> None:
         payload = {
             "name": "Legacy",
@@ -88,6 +102,82 @@ class ProjectMigrationTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "Duplicate dataset names are not supported"):
             ProjectData.from_dict(payload)
+
+    def test_future_schema_is_rejected_without_downgrade(self) -> None:
+        payload = {
+            "name": "From the future",
+            "schema_version": PROJECT_SCHEMA_VERSION + 1,
+            "state": {"future_field": {"must": "survive"}},
+        }
+
+        with self.assertRaisesRegex(ProjectFormatError, "newer release"):
+            ProjectData.from_dict(payload)
+        self.assertEqual(payload["schema_version"], PROJECT_SCHEMA_VERSION + 1)
+        self.assertIn("future_field", payload["state"])
+
+    def test_v2_shortcuts_are_migrated_from_metadata(self) -> None:
+        project = ProjectData.from_dict(
+            {
+                "name": "Legacy shortcuts",
+                "schema_version": 2,
+                "metadata": {
+                    "shortcuts": [
+                        {"title": "Inspect", "script": "echo ok", "color": "#88ccff"}
+                    ]
+                },
+            }
+        )
+
+        self.assertEqual(project.state.shortcuts[0]["title"], "Inspect")
+        self.assertNotIn("shortcuts", project.metadata)
+
+    def test_string_false_is_not_treated_as_true(self) -> None:
+        project = ProjectData.from_dict(
+            {
+                "schema_version": PROJECT_SCHEMA_VERSION,
+                "dataset_sort_descending": "false",
+                "datasets": [],
+            }
+        )
+        self.assertFalse(project.dataset_sort_descending)
+
+    def test_malformed_dataset_collections_and_nonfinite_values_are_rejected(self) -> None:
+        with self.assertRaisesRegex(ProjectFormatError, "datasets.*list of objects"):
+            ProjectData.from_dict({"schema_version": PROJECT_SCHEMA_VERSION, "datasets": {"DS": {}}})
+
+        with self.assertRaisesRegex(ProjectFormatError, "pixel_size.*finite"):
+            ProjectData.from_dict(
+                {
+                    "schema_version": PROJECT_SCHEMA_VERSION,
+                    "datasets": [{"dataset_name": "DS", "pixel_size": float("nan")}],
+                }
+            )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "nonstandard.cryopal.json"
+            path.write_text('{"schema_version": 8, "datasets": [], "metadata": {"value": NaN}}')
+            with self.assertRaisesRegex(ProjectFormatError, "non-standard numeric value"):
+                load_project(path)
+
+    def test_save_rotates_recovery_backups(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "project.cryopal.json"
+            project = ProjectData(name="one")
+            save_project(path, project)
+            project.name = "two"
+            save_project(path, project)
+            project.name = "three"
+            save_project(path, project)
+
+            self.assertEqual(ProjectData.from_dict(json.loads(path.read_text())).name, "three")
+            self.assertEqual(
+                ProjectData.from_dict(json.loads(Path(f"{path}.bak1").read_text())).name,
+                "two",
+            )
+            self.assertEqual(
+                ProjectData.from_dict(json.loads(Path(f"{path}.bak2").read_text())).name,
+                "one",
+            )
 
 
 if __name__ == "__main__":

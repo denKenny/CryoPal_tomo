@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
@@ -56,6 +58,15 @@ SETTINGS_CATEGORY_ORDER: tuple[str, ...] = (
     "shortcuts",
     "appearance",
 )
+
+SETTINGS_BUNDLE_VERSION = 3
+EXECUTABLE_SETTINGS_CATEGORIES: frozenset[str] = frozenset(
+    {"executables", "slurm_profiles", "environments", "custom_job_types", "workflows", "shortcuts"}
+)
+
+
+def _reject_nonstandard_json_constant(value: str) -> None:
+    raise ValueError(f"Settings JSON contains non-standard numeric value {value!r}.")
 
 
 @dataclass(frozen=True)
@@ -291,7 +302,7 @@ def build_settings_export_payload(project: ProjectData, selected_item_keys: list
         categories["appearance"] = get_project_appearance(project).to_dict()
 
     return {
-        "version": 3,
+        "version": SETTINGS_BUNDLE_VERSION,
         "categories": categories,
     }
 
@@ -299,25 +310,65 @@ def build_settings_export_payload(project: ProjectData, selected_item_keys: list
 def export_settings_bundle(path: str | Path, project: ProjectData, selected_item_keys: list[str]) -> Path:
     target = _ensure_settings_suffix(path)
     payload = build_settings_export_payload(project, selected_item_keys)
-    target.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    file_descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{target.name}.",
+        suffix=".tmp",
+        dir=target.parent,
+    )
+    try:
+        with os.fdopen(file_descriptor, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2, ensure_ascii=False, allow_nan=False)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_name, target)
+    except Exception:
+        try:
+            os.unlink(temporary_name)
+        except FileNotFoundError:
+            pass
+        raise
     return target
 
 
 def load_settings_bundle(path: str | Path) -> dict[str, Any]:
-    payload = json.loads(Path(path).read_text(encoding="utf-8"))
-    if isinstance(payload, dict) and isinstance(payload.get("categories"), dict):
+    payload = json.loads(
+        Path(path).read_text(encoding="utf-8"),
+        parse_constant=_reject_nonstandard_json_constant,
+    )
+    if not isinstance(payload, dict):
+        raise ValueError("Settings bundle root must be a JSON object.")
+    if "categories" in payload:
+        if not isinstance(payload.get("categories"), dict):
+            raise ValueError("Settings bundle 'categories' must be a JSON object.")
+        version = payload.get("version", 1)
+        if isinstance(version, bool) or not isinstance(version, int) or version < 1:
+            raise ValueError("Settings bundle 'version' must be a positive integer.")
+        if version > SETTINGS_BUNDLE_VERSION:
+            raise ValueError(
+                f"This settings bundle uses version {version}, but this CryoPal_tomo release only supports "
+                f"versions up to {SETTINGS_BUNDLE_VERSION}. No settings were imported."
+            )
         return payload
-    if isinstance(payload, dict):
-        legacy_categories: dict[str, Any] = {}
-        if "job_default_overrides" in payload or "file_registry_patterns" in payload:
-            legacy_categories["default_parameters"] = {
-                "job_default_overrides": deepcopy(payload.get("job_default_overrides", {})),
-                "file_registry_patterns": deepcopy(payload.get("file_registry_patterns", {})),
-            }
-        if isinstance(payload.get("executable_overrides"), dict):
-            legacy_categories["executables"] = deepcopy(payload.get("executable_overrides", {}))
-        return {"version": 1, "categories": legacy_categories}
-    return {"version": 1, "categories": {}}
+    legacy_categories: dict[str, Any] = {}
+    if "job_default_overrides" in payload or "file_registry_patterns" in payload:
+        legacy_categories["default_parameters"] = {
+            "job_default_overrides": deepcopy(payload.get("job_default_overrides", {})),
+            "file_registry_patterns": deepcopy(payload.get("file_registry_patterns", {})),
+        }
+    if isinstance(payload.get("executable_overrides"), dict):
+        legacy_categories["executables"] = deepcopy(payload.get("executable_overrides", {}))
+    return {"version": 1, "categories": legacy_categories}
+
+
+def selected_executable_settings(selected_item_keys: list[str]) -> list[str]:
+    """Return selected keys that may change commands executed by CryoPal_tomo."""
+    return [
+        key
+        for key in selected_item_keys
+        if key.split("::", 1)[0] in EXECUTABLE_SETTINGS_CATEGORIES and "__empty__" not in key
+    ]
 
 
 def importable_settings_groups(payload: dict[str, Any]) -> list[SettingsSelectionGroup]:

@@ -107,11 +107,11 @@ def detect_extraction_star_angpix(path: str | Path) -> float | None:
                 if value > 0:
                     return value
         else:
-            for key, value in block.values:
+            for key, scalar_text in block.values:
                 if key.casefold() != "_rlnimagepixelsize":
                     continue
                 try:
-                    parsed = float(value)
+                    parsed = float(scalar_text)
                 except ValueError:
                     continue
                 if parsed > 0:
@@ -292,7 +292,7 @@ def _read_mask_slice(handle, header: MrcHeader) -> bytearray:
         data = handle.read(voxel_count)
         if len(data) != voxel_count:
             raise ExtractionMaskError("Unexpected end of MRC data.")
-        return bytearray(1 if value else 0 for value in data)
+        return bytearray(1 if value > 0 else 0 for (value,) in struct.iter_unpack("b", data))
 
     if header.mode == 1:
         data = handle.read(voxel_count * 2)
@@ -318,7 +318,7 @@ def _read_mrc_slice_values(handle, header: MrcHeader) -> list[float]:
         data = handle.read(voxel_count)
         if len(data) != voxel_count:
             raise ExtractionMaskError("Unexpected end of MRC data.")
-        return [float(value) for value in data]
+        return [float(value) for (value,) in struct.iter_unpack("b", data)]
 
     if header.mode == 1:
         data = handle.read(voxel_count * 2)
@@ -442,12 +442,16 @@ def _write_mrc_header(
     struct.pack_into("<3f", header, 40, nx * output_angpix, ny * output_angpix, nz * output_angpix)
     struct.pack_into("<3f", header, 52, 90.0, 90.0, 90.0)
     struct.pack_into("<3i", header, 64, 1, 2, 3)
-    struct.pack_into("<3f", header, 76, 0.0, 1.0, mean_value)
+    minimum = 1.0 if mean_value >= 1.0 else 0.0
+    maximum = 0.0 if mean_value <= 0.0 else 1.0
+    struct.pack_into("<3f", header, 76, minimum, maximum, mean_value)
     struct.pack_into("<2i", header, 88, 0, 0)
+    struct.pack_into("<i", header, 108, 20140)
     struct.pack_into("<3f", header, 196, 0.0, 0.0, 0.0)
     header[208:212] = b"MAP "
     header[212:216] = bytes((0x44, 0x41, 0x00, 0x00))
-    struct.pack_into("<f", header, 216, 0.0)
+    rms_value = math.sqrt(max(0.0, mean_value * (1.0 - mean_value)))
+    struct.pack_into("<f", header, 216, rms_value)
     struct.pack_into("<i", header, 220, 1)
     label = b"Created by CryoPal_tomo extraction-mask job"
     header[224 : 224 + len(label)] = label
@@ -514,16 +518,15 @@ def write_extraction_masks(
     all_ts_names = list(grouped.keys())
     outputs: list[ExtractionMaskOutput] = []
     radius_px = cleanup_distance_angstrom / output_angpix if output_angpix > 0 else 0.0
-    shape_mask = (
-        _read_shape_mask(
+    shape_mask = None
+    if normalized_mode == "shape":
+        assert shape_mask_path is not None
+        shape_mask = _read_shape_mask(
             shape_mask_path,
             output_angpix=output_angpix,
             rescale_to_output_angpix=rescale_shape_to_output_angpix,
             binarize=binarize_shape_input,
         )
-        if normalized_mode == "shape"
-        else None
-    )
 
     for ts_index, (ts_name, particles) in enumerate(grouped.items(), start=1):
         _check_cancel(cancel_event)
@@ -613,7 +616,11 @@ def _write_single_mask(
             if dz_sq <= radius_sq:
                 z_buckets[z_index].append((particle.x, particle.y, radius_sq, dz_sq))
 
-    temp_path = Path(tempfile.mkstemp(prefix=f".{destination.name}.", suffix=".tmp", dir=destination.parent)[1])
+    temp_fd, temp_name = tempfile.mkstemp(
+        prefix=f".{destination.name}.", suffix=".tmp", dir=destination.parent
+    )
+    os.close(temp_fd)
+    temp_path = Path(temp_name)
     ones_count = 0
     try:
         with temp_path.open("wb+") as output_handle:
@@ -647,6 +654,8 @@ def _write_single_mask(
             total_voxels = nx * ny * nz
             mean_value = ones_count / total_voxels if total_voxels else 0.0
             _write_mrc_header(output_handle, dimensions=dimensions, output_angpix=output_angpix, mean_value=mean_value)
+            output_handle.flush()
+            os.fsync(output_handle.fileno())
         temp_path.replace(destination)
     except Exception:
         temp_path.unlink(missing_ok=True)
@@ -695,7 +704,11 @@ def _write_single_shape_mask(
         for z_index in range(min_z, max_z + 1):
             z_buckets[z_index].append((particle, inverse_matrix))
 
-    temp_path = Path(tempfile.mkstemp(prefix=f".{destination.name}.", suffix=".tmp", dir=destination.parent)[1])
+    temp_fd, temp_name = tempfile.mkstemp(
+        prefix=f".{destination.name}.", suffix=".tmp", dir=destination.parent
+    )
+    os.close(temp_fd)
+    temp_path = Path(temp_name)
     ones_count = 0
     try:
         with temp_path.open("wb+") as output_handle:
@@ -725,6 +738,8 @@ def _write_single_shape_mask(
             total_voxels = nx * ny * nz
             mean_value = ones_count / total_voxels if total_voxels else 0.0
             _write_mrc_header(output_handle, dimensions=dimensions, output_angpix=output_angpix, mean_value=mean_value)
+            output_handle.flush()
+            os.fsync(output_handle.fileno())
         temp_path.replace(destination)
     except Exception:
         temp_path.unlink(missing_ok=True)

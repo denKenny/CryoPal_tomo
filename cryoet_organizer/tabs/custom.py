@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import tkinter as tk
-from datetime import datetime, timezone
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
@@ -17,6 +16,7 @@ from cryoet_organizer.file_resolver import resolve_dataset_file
 from cryoet_organizer.file_resolver import file_role_order, role_title
 from cryoet_organizer.job_execution import (
     build_slurm_override_metadata,
+    create_history_entry,
     execute_command_sequence,
     slurm_override_payload,
 )
@@ -30,7 +30,6 @@ from cryoet_organizer.project import (
     JobHistoryEntry,
     dataset_ts_names,
 )
-from cryoet_organizer.slurm import SlurmSubmissionResult
 from cryoet_organizer.slurm_override_ui import SlurmOverrideUI
 from cryoet_organizer.resizable_sections import ResizableSectionStack
 from cryoet_organizer.tabs.base import SidebarTab
@@ -922,13 +921,11 @@ class CustomTab(SidebarTab):
         command: str,
         parameters: dict[str, str],
         action: str,
-        slurm_result: SlurmSubmissionResult | None = None,
-    ) -> None:
+    ) -> JobHistoryEntry | None:
         dataset = next((item for item in self.app.project.datasets if item.dataset_name == dataset_name), None)
         if dataset is None:
-            return
-        entry = JobHistoryEntry(
-            timestamp=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            return None
+        entry = create_history_entry(
             action=action,
             group="Tomograms",
             job_name=job_name,
@@ -941,10 +938,8 @@ class CustomTab(SidebarTab):
             parameters={key: value for key, value in parameters.items() if value},
         )
         entry.parameters.update(self._current_slurm_overrides())
-        if slurm_result is not None:
-            entry.slurm_job_id = slurm_result.job_id
-            entry.slurm_script_path = slurm_result.script_path
         dataset.job_history.append(entry)
+        return entry
 
     def _current_runtime_parameters(self) -> dict[str, str]:
         payload: dict[str, str] = {}
@@ -1029,45 +1024,43 @@ class CustomTab(SidebarTab):
             messagebox.showerror("Slurm profile missing", "Please select a Slurm profile first.")
             return
 
-        items = [
-            {
+        try:
+            activation_command = (
+                "" if use_slurm else self.app.resolve_environment_activation(self.environment_var.get())
+            )
+        except Exception as exc:
+            messagebox.showerror("Environment unavailable", str(exc))
+            return
+
+        items: list[dict[str, object]] = []
+        for dataset_name, ts_name, command in commands:
+            history_entry = self._record_history(
+                dataset_name,
+                ts_name,
+                job_name,
+                command,
+                {**runtime_parameters, "ts_name": ts_name},
+                "scheduled",
+            )
+            items.append({
                 "command": command,
                 "dataset_name": dataset_name,
                 "job_name": job_name,
                 "cwd": "",
                 "error_label": f"{dataset_name}/{ts_name}" if dataset_name else (ts_name or job_name),
                 "ts_name": ts_name,
-                "activation_command": self.app.resolve_environment_activation(self.environment_var.get()),
-            }
-            for dataset_name, ts_name, command in commands
-        ]
+                "activation_command": activation_command,
+                "history_entry": history_entry,
+            })
+        self.app.on_project_changed("custom", "tomograms")
         execute_command_sequence(
             self.app,
             items,
             use_slurm=use_slurm,
             profile_name=profile_name,
             overrides=self._slurm_override_payload(self._current_slurm_overrides()),
-            on_submitted=lambda item, result: self._record_history(
-                str(item.get("dataset_name", "")),
-                str(item.get("ts_name", "")),
-                job_name,
-                str(item.get("command", "")),
-                {**runtime_parameters, "ts_name": str(item.get("ts_name", ""))},
-                "submitted",
-                result,
-            )
-            if item.get("dataset_name")
-            else None,
-            on_completed=lambda item: self._record_history(
-                str(item.get("dataset_name", "")),
-                str(item.get("ts_name", "")),
-                job_name,
-                str(item.get("command", "")),
-                {**runtime_parameters, "ts_name": str(item.get("ts_name", ""))},
-                "ran",
-            )
-            if item.get("dataset_name")
-            else None,
+            on_submitted=None,
+            on_completed=None,
             on_finished=self._finish_run_commands,
         )
         self.app.status_var.set(

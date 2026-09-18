@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import math
+import os
 import re
 import shlex
-from collections import defaultdict
+import tempfile
+from collections import OrderedDict, defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Mapping, Sequence, Union
+from typing import Callable, Literal, Mapping, Sequence, Union, overload
 
 
 class StarMergeError(RuntimeError):
@@ -146,14 +148,15 @@ class _ParticleAbundanceSummary:
     counts_by_dataset: dict[str, dict[str, int]] = field(default_factory=dict)
 
 
-_CLASSIFICATION_CONVERGENCE_CACHE: dict[
-    tuple[str, int, tuple[tuple[str, str], ...]],
+_CACHE_LIMIT = 32
+_CLASSIFICATION_CONVERGENCE_CACHE: OrderedDict[
+    tuple,
     ParticleClassificationConvergencePlot,
-] = {}
-_PARTICLE_ABUNDANCE_SUMMARY_CACHE: dict[
-    tuple[str, int, tuple[tuple[str, str], ...]],
+] = OrderedDict()
+_PARTICLE_ABUNDANCE_SUMMARY_CACHE: OrderedDict[
+    tuple,
     _ParticleAbundanceSummary,
-] = {}
+] = OrderedDict()
 
 DatasetMatcherInput = Union[Sequence[str], Mapping[str, Sequence[str]]]
 
@@ -199,7 +202,16 @@ def parse_star(path: str | Path) -> StarDocument:
                     continue
                 if stripped.startswith("data_") or stripped == "loop_" or stripped.startswith("_"):
                     break
-                rows.append(shlex.split(lines[index], posix=True))
+                try:
+                    row = shlex.split(lines[index], posix=True)
+                except ValueError as exc:
+                    raise StarMergeError(f"Invalid quoted STAR row at line {index + 1}: {exc}") from exc
+                if len(row) != len(headers):
+                    raise StarMergeError(
+                        f"STAR row at line {index + 1} has {len(row)} values, "
+                        f"but its loop declares {len(headers)} columns."
+                    )
+                rows.append(row)
                 index += 1
 
             blocks.append(StarBlock(name=name, kind="loop", headers=headers, rows=rows))
@@ -217,8 +229,15 @@ def parse_star(path: str | Path) -> StarDocument:
             if stripped.startswith("data_") or stripped == "loop_":
                 break
             if stripped.startswith("_"):
-                parts = stripped.split(None, 1)
-                values.append((parts[0], parts[1] if len(parts) > 1 else ""))
+                try:
+                    parts = shlex.split(lines[index], posix=True)
+                except ValueError as exc:
+                    raise StarMergeError(f"Invalid quoted STAR value at line {index + 1}: {exc}") from exc
+                if len(parts) > 2:
+                    raise StarMergeError(
+                        f"STAR value at line {index + 1} contains unquoted whitespace."
+                    )
+                values.append((parts[0], parts[1] if len(parts) > 1 else "?"))
             index += 1
 
         blocks.append(StarBlock(name=name, kind="values", values=values))
@@ -237,16 +256,56 @@ def write_star(path: str | Path, document: StarDocument) -> Path:
             for offset, header in enumerate(block.headers, start=1):
                 output_lines.append(f"{header} #{offset}")
             for row in block.rows:
-                output_lines.append("  " + "  ".join(row))
+                if len(row) != len(block.headers):
+                    raise StarMergeError(
+                        f"Cannot write {block.name}: row has {len(row)} values but "
+                        f"the loop declares {len(block.headers)} columns."
+                    )
+                output_lines.append("  " + "  ".join(_format_star_value(value) for value in row))
         else:
             for key, value in block.values:
-                output_lines.append(f"{key}   {value}".rstrip())
+                output_lines.append(f"{key}   {_format_star_value(value)}")
         output_lines.append("")
         output_lines.append("")
 
     output_path = Path(path)
-    output_path.write_text("\n".join(output_lines).rstrip() + "\n", encoding="utf-8")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary_name = tempfile.mkstemp(prefix=f".{output_path.name}.", suffix=".tmp", dir=output_path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write("\n".join(output_lines).rstrip() + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_name, output_path)
+    except Exception:
+        try:
+            os.unlink(temporary_name)
+        except OSError:
+            pass
+        raise
     return output_path
+
+
+def _format_star_value(value: object) -> str:
+    text = str(value)
+    if not text:
+        return "?"
+    if "\n" in text or "\r" in text:
+        raise StarMergeError("Multiline STAR values are not supported.")
+    requires_quote = (
+        any(character.isspace() for character in text)
+        or text.startswith("#")
+        or text.startswith("_")
+        or text.startswith("data_")
+        or text in {"loop_", "stop_", "global_"}
+    )
+    if not requires_quote:
+        return text
+    if "'" not in text:
+        return f"'{text}'"
+    if '"' not in text:
+        return f'"{text}"'
+    raise StarMergeError("STAR values containing whitespace and both quote characters are not supported.")
 
 
 def merge_particle_exports(output_paths: list[str | Path], merged_output_path: str | Path, is_2d: bool) -> MergeResult:
@@ -655,10 +714,12 @@ def _read_particle_abundance_summary(
     cache_key = (
         str(path.resolve()),
         path.stat().st_mtime_ns,
+        path.stat().st_size,
         matcher_key,
     )
     cached = _PARTICLE_ABUNDANCE_SUMMARY_CACHE.get(cache_key)
     if cached is not None:
+        _PARTICLE_ABUNDANCE_SUMMARY_CACHE.move_to_end(cache_key)
         return cached
 
     matcher = _dataset_matcher(dataset_names)
@@ -670,7 +731,7 @@ def _read_particle_abundance_summary(
     counts_by_dataset: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
 
     with path.open("r", encoding="utf-8") as handle:
-        for raw_line in handle:
+        for line_number, raw_line in enumerate(handle, start=1):
             _check_cancel(cancel_event)
             stripped = raw_line.strip()
             if not stripped or stripped.startswith("#"):
@@ -705,7 +766,15 @@ def _read_particle_abundance_summary(
                 )
 
             assert identifier_index is not None
-            columns = stripped.split()
+            try:
+                columns = shlex.split(raw_line, posix=True)
+            except ValueError as exc:
+                raise StarMergeError(f"Invalid quoted STAR row at line {line_number}: {exc}") from exc
+            if len(columns) != len(headers):
+                raise StarMergeError(
+                    f"STAR row at line {line_number} has {len(columns)} values, "
+                    f"but its loop declares {len(headers)} columns."
+                )
             if identifier_index >= len(columns):
                 continue
             identifier = columns[identifier_index]
@@ -722,6 +791,9 @@ def _read_particle_abundance_summary(
         counts_by_dataset={dataset: dict(tomos) for dataset, tomos in counts_by_dataset.items()},
     )
     _PARTICLE_ABUNDANCE_SUMMARY_CACHE[cache_key] = summary
+    _PARTICLE_ABUNDANCE_SUMMARY_CACHE.move_to_end(cache_key)
+    while len(_PARTICLE_ABUNDANCE_SUMMARY_CACHE) > _CACHE_LIMIT:
+        _PARTICLE_ABUNDANCE_SUMMARY_CACHE.popitem(last=False)
     return summary
 
 
@@ -754,11 +826,15 @@ def particle_classification_convergence_data(
 
     cache_key = (
         str(directory.resolve()),
-        max(path.stat().st_mtime_ns for _iteration, path in iteration_files),
+        tuple(
+            (iteration, path.name, path.stat().st_mtime_ns, path.stat().st_size)
+            for iteration, path in iteration_files
+        ),
         matcher_key,
     )
     cached = _CLASSIFICATION_CONVERGENCE_CACHE.get(cache_key)
     if cached is not None:
+        _CLASSIFICATION_CONVERGENCE_CACHE.move_to_end(cache_key)
         return cached
 
     matcher = _dataset_matcher(dataset_names)
@@ -828,6 +904,9 @@ def particle_classification_convergence_data(
         tomogram_count=len(matched_tomograms),
     )
     _CLASSIFICATION_CONVERGENCE_CACHE[cache_key] = plot
+    _CLASSIFICATION_CONVERGENCE_CACHE.move_to_end(cache_key)
+    while len(_CLASSIFICATION_CONVERGENCE_CACHE) > _CACHE_LIMIT:
+        _CLASSIFICATION_CONVERGENCE_CACHE.popitem(last=False)
     return plot
 
 
@@ -1088,7 +1167,13 @@ def _identifier_variants(identifier: str) -> tuple[str, str]:
 
 def _identifier_matches_alias(identifier: str, alias: str) -> bool:
     token, stem = _identifier_variants(identifier)
-    return token.startswith(alias) or stem.startswith(alias)
+    return _has_identifier_boundary(token, alias) or _has_identifier_boundary(stem, alias)
+
+
+def _has_identifier_boundary(value: str, alias: str) -> bool:
+    if value == alias:
+        return True
+    return value.startswith(alias) and len(value) > len(alias) and value[len(alias)] in "_-. "
 
 
 def _matches_any_dataset(identifier: str, dataset_names: DatasetMatcherInput) -> bool:
@@ -1141,7 +1226,7 @@ def _read_classification_star_summary(
     matched_tomograms: set[str] = set()
 
     with path.open("r", encoding="utf-8") as handle:
-        for raw_line in handle:
+        for line_number, raw_line in enumerate(handle, start=1):
             _check_cancel(cancel_event)
             stripped = raw_line.strip()
             if not stripped or stripped.startswith("#"):
@@ -1161,7 +1246,15 @@ def _read_classification_star_summary(
                 headers.append(stripped.split()[0])
                 continue
 
-            columns = stripped.split()
+            try:
+                columns = shlex.split(raw_line, posix=True)
+            except ValueError as exc:
+                raise StarMergeError(f"Invalid quoted STAR row at line {line_number}: {exc}") from exc
+            if len(columns) != len(headers):
+                raise StarMergeError(
+                    f"STAR row at line {line_number} has {len(columns)} values, "
+                    f"but its loop declares {len(headers)} columns."
+                )
             if current_block == "data_optics":
                 if pixel_size is None:
                     pixel_column = _header_index(headers, "_rlnImagePixelSize", required=False)
@@ -1266,71 +1359,107 @@ def _intersect_selected_particles(parsed: list[dict], identification_mode: str, 
                     common_by_file[file_index].add(row_index)
         return common_by_file
 
-    radius_squared = radius_ang * radius_ang
-    used_by_file: list[set[int]] = [set() for _ in parsed]
     reference = parsed[0]
     x_index_ref = _header_index(reference["particles_block"].headers, "_rlnCoordinateX")
     y_index_ref = _header_index(reference["particles_block"].headers, "_rlnCoordinateY")
     z_index_ref = _header_index(reference["particles_block"].headers, "_rlnCoordinateZ")
-
-    grouped_candidates: list[dict[str, list[int]]] = []
+    assert x_index_ref is not None and y_index_ref is not None and z_index_ref is not None
+    matches_by_file: list[dict[int, int]] = []
     for item in parsed[1:]:
-        groups: dict[str, list[int]] = {}
-        for row_index in item["selected_indices"]:
-            _check_cancel(cancel_event)
-            identifier = item["particles_block"].rows[row_index][item["identifier_index"]]
-            groups.setdefault(identifier, []).append(row_index)
-        grouped_candidates.append(groups)
-
-    # Pre-compute coordinate column indices for all non-reference files once.
-    other_coord_indices: list[tuple[int, int, int]] = [
-        (
-            _header_index(item["particles_block"].headers, "_rlnCoordinateX"),
-            _header_index(item["particles_block"].headers, "_rlnCoordinateY"),
-            _header_index(item["particles_block"].headers, "_rlnCoordinateZ"),
+        matches_by_file.append(
+            _maximum_cardinality_distance_matching(
+                reference,
+                item,
+                (x_index_ref, y_index_ref, z_index_ref),
+                radius_ang,
+                cancel_event=cancel_event,
+            )
         )
-        for item in parsed[1:]
-    ]
 
+    common_reference_indices = set(reference["selected_indices"])
+    for matches in matches_by_file:
+        common_reference_indices.intersection_update(matches)
+    common_by_file[0].update(common_reference_indices)
+    for file_offset, matches in enumerate(matches_by_file, start=1):
+        common_by_file[file_offset].update(matches[index] for index in common_reference_indices)
+
+    return common_by_file
+
+
+def _maximum_cardinality_distance_matching(
+    reference: dict,
+    candidate: dict,
+    reference_coord_indices: tuple[int, int, int],
+    radius_ang: float,
+    *,
+    cancel_event=None,
+) -> dict[int, int]:
+    """Return a deterministic maximum-cardinality one-to-one distance match."""
+    radius_squared = radius_ang * radius_ang
+    candidate_coord_indices = (
+        _header_index(candidate["particles_block"].headers, "_rlnCoordinateX"),
+        _header_index(candidate["particles_block"].headers, "_rlnCoordinateY"),
+        _header_index(candidate["particles_block"].headers, "_rlnCoordinateZ"),
+    )
+    assert all(index is not None for index in candidate_coord_indices)
+    candidate_grid: dict[
+        str,
+        dict[tuple[int, int, int], list[tuple[int, tuple[float, float, float]]]],
+    ] = defaultdict(lambda: defaultdict(list))
+    for row_index in candidate["selected_indices"]:
+        row = candidate["particles_block"].rows[row_index]
+        point = (
+            float(row[candidate_coord_indices[0]]) * candidate["pixel_size"],
+            float(row[candidate_coord_indices[1]]) * candidate["pixel_size"],
+            float(row[candidate_coord_indices[2]]) * candidate["pixel_size"],
+        )
+        candidate_grid[row[candidate["identifier_index"]]][_grid_key(*point, radius_ang)].append(
+            (row_index, point)
+        )
+
+    adjacency: dict[int, list[int]] = {}
     for ref_index in reference["selected_indices"]:
         _check_cancel(cancel_event)
         ref_row = reference["particles_block"].rows[ref_index]
         identifier = ref_row[reference["identifier_index"]]
         ref_point = (
-            float(ref_row[x_index_ref]) * reference["pixel_size"],
-            float(ref_row[y_index_ref]) * reference["pixel_size"],
-            float(ref_row[z_index_ref]) * reference["pixel_size"],
+            float(ref_row[reference_coord_indices[0]]) * reference["pixel_size"],
+            float(ref_row[reference_coord_indices[1]]) * reference["pixel_size"],
+            float(ref_row[reference_coord_indices[2]]) * reference["pixel_size"],
         )
-        matched_rows: list[int] = []
-        found_in_all = True
+        eligible: list[tuple[float, int]] = []
+        center = _grid_key(*ref_point, radius_ang)
+        identifier_grid = candidate_grid.get(identifier, {})
+        for dx in range(-1, 2):
+            for dy in range(-1, 2):
+                for dz in range(-1, 2):
+                    for candidate_index, point in identifier_grid.get(
+                        (center[0] + dx, center[1] + dy, center[2] + dz),
+                        (),
+                    ):
+                        distance_squared = sum((right - left) ** 2 for left, right in zip(ref_point, point))
+                        if distance_squared <= radius_squared:
+                            eligible.append((distance_squared, candidate_index))
+        adjacency[ref_index] = [index for _distance, index in sorted(eligible)]
 
-        for file_offset, item in enumerate(parsed[1:], start=1):
-            x_index, y_index, z_index = other_coord_indices[file_offset - 1]
-            candidate_indices = grouped_candidates[file_offset - 1].get(identifier, [])
-            matched_index = None
-            for candidate_index in candidate_indices:
-                if candidate_index in used_by_file[file_offset]:
-                    continue
-                row = item["particles_block"].rows[candidate_index]
-                dx = float(row[x_index]) * item["pixel_size"] - ref_point[0]
-                dy = float(row[y_index]) * item["pixel_size"] - ref_point[1]
-                dz = float(row[z_index]) * item["pixel_size"] - ref_point[2]
-                if dx * dx + dy * dy + dz * dz < radius_squared:
-                    matched_index = candidate_index
-                    break
-            if matched_index is None:
-                found_in_all = False
-                break
-            matched_rows.append(matched_index)
+    candidate_owner: dict[int, int] = {}
 
-        if found_in_all:
-            common_by_file[0].add(ref_index)
-            used_by_file[0].add(ref_index)
-            for file_offset, matched_index in enumerate(matched_rows, start=1):
-                common_by_file[file_offset].add(matched_index)
-                used_by_file[file_offset].add(matched_index)
+    def augment(ref_index: int, visited_candidates: set[int]) -> bool:
+        for candidate_index in adjacency[ref_index]:
+            if candidate_index in visited_candidates:
+                continue
+            visited_candidates.add(candidate_index)
+            previous_ref = candidate_owner.get(candidate_index)
+            if previous_ref is None or augment(previous_ref, visited_candidates):
+                candidate_owner[candidate_index] = ref_index
+                return True
+        return False
 
-    return common_by_file
+    for ref_index in sorted(adjacency, key=lambda index: (len(adjacency[index]), index)):
+        _check_cancel(cancel_event)
+        augment(ref_index, set())
+
+    return {ref_index: candidate_index for candidate_index, ref_index in candidate_owner.items()}
 
 
 def _common_name_keys(parsed: list[dict]) -> set[tuple[str, str]]:
@@ -1357,6 +1486,14 @@ def _name_key_header(mode: str) -> str:
     if mode == "3d":
         return "_rlnImageName"
     raise StarMergeError(f"Unsupported particle STAR mode: {mode}")
+
+
+@overload
+def _header_index(headers: list[str], name: str, required: Literal[True] = True) -> int: ...
+
+
+@overload
+def _header_index(headers: list[str], name: str, required: Literal[False]) -> int | None: ...
 
 
 def _header_index(headers: list[str], name: str, required: bool = True) -> int | None:
