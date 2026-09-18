@@ -246,6 +246,7 @@ class CryoETOrganizerApp:
         self.project = ProjectData()
         self.project_path: Path | None = None
         self.tabs: dict[str, SidebarTab] = {}
+        self._tab_classes: dict[str, type[SidebarTab]] = {}
         self.nav_buttons: dict[str, ttk.Button] = {}
         self._refresh_domain_map: dict[str, tuple[str, ...]] = {}
         self.active_tab_id: str | None = None
@@ -680,8 +681,10 @@ class CryoETOrganizerApp:
         start_row = 1 if self.logo_label is not None else 0
         current_row = start_row
         separator_before = {"processing", "tomograms", "relion_projects"}
+        tab_classes = get_tab_classes()
+        self._tab_classes = {tab_cls.tab_id: tab_cls for tab_cls in tab_classes}
         bottom_tab_cls = None
-        for tab_cls in get_tab_classes():
+        for tab_cls in tab_classes:
             if tab_cls.tab_id == "file_registry":
                 bottom_tab_cls = tab_cls
                 continue
@@ -693,34 +696,25 @@ class CryoETOrganizerApp:
                     pady=(16, 10),
                 )
                 current_row += 1
-            tab = tab_cls(self, self.content)
-            self.tabs[tab.tab_id] = tab
-            tab.frame.grid(row=1, column=0, sticky="nsew")
-            tab.frame.grid_remove()
-
             button = ttk.Button(
                 self.sidebar,
-                text=tab.title,
+                text=tab_cls.title,
                 style="Sidebar.TButton",
-                command=lambda current=tab.tab_id: self._show_tab(current),
+                command=lambda current=tab_cls.tab_id: self._show_tab(current),
             )
             button.grid(row=current_row, column=0, sticky="ew", pady=4)
-            self.nav_buttons[tab.tab_id] = button
+            self.nav_buttons[tab_cls.tab_id] = button
             current_row += 1
 
         if bottom_tab_cls is not None:
-            tab = bottom_tab_cls(self, self.content)
-            self.tabs[tab.tab_id] = tab
-            tab.frame.grid(row=1, column=0, sticky="nsew")
-            tab.frame.grid_remove()
             button = ttk.Button(
                 self.sidebar,
-                text=tab.title,
+                text=bottom_tab_cls.title,
                 style="Sidebar.TButton",
-                command=lambda current=tab.tab_id: self._show_tab(current),
+                command=lambda current=bottom_tab_cls.tab_id: self._show_tab(current),
             )
             button.grid(row=999, column=0, sticky="ew", pady=4)
-            self.nav_buttons[tab.tab_id] = button
+            self.nav_buttons[bottom_tab_cls.tab_id] = button
 
         self.version_label = tk.Label(
             self.sidebar,
@@ -735,6 +729,18 @@ class CryoETOrganizerApp:
 
     def _show_tab(self, tab_id: str) -> None:
         with perf_timer(f"show tab {tab_id}"):
+            if tab_id not in self.tabs:
+                tab_cls = self._tab_classes.get(tab_id)
+                if tab_cls is None:
+                    return
+                tab = tab_cls(self, self.content)
+                self.tabs[tab_id] = tab
+                tab.frame.grid(row=1, column=0, sticky="nsew")
+                tab.frame.grid_remove()
+                try:
+                    tab.on_project_loaded(self.project)
+                except Exception:
+                    pass
             if self.active_tab_id:
                 self.tabs[self.active_tab_id].frame.grid_remove()
                 self.nav_buttons[self.active_tab_id].configure(style="Sidebar.TButton")
