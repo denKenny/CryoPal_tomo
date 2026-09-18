@@ -638,7 +638,13 @@ class CryoETOrganizerApp:
     def _logo_asset_path(self) -> Path:
         return Path(__file__).resolve().parent / "assets" / "CryoPal_tomo_logo.png"
 
-    def _splash_logo_asset_path(self) -> Path:
+    def _splash_logo_asset_path(self) -> Path | None:
+        # XQuartz is very slow at transferring large Tk photo images over an
+        # SSH-forwarded display. Keep the textual splash, but avoid sending a
+        # 1536x1024 logo before the main window is ready.
+        display = os.environ.get("DISPLAY", "").lower()
+        if display.startswith(("localhost:", "127.0.0.1:", "::1:")):
+            return None
         preferred = Path(__file__).resolve().parent / "assets" / "CryoPal_sleeping_logo.png"
         if preferred.exists():
             return preferred
