@@ -2,6 +2,12 @@
 
 All notable changes are documented here. The project follows Semantic Versioning from version 1.0 onward.
 
+## 0.2.2 (2026-09-18)
+
+### Fixed
+
+- Load secondary tabs lazily to reduce startup time over forwarded X11 connections.
+
 ## 0.2.1 (2026-09-18)
 
 ### Fixed
