@@ -3,10 +3,12 @@ from __future__ import annotations
 import hashlib
 import socket
 import threading
+import uuid
 from datetime import datetime, timezone
 from typing import Callable
 
 from cryoet_organizer import __version__
+from cryoet_organizer.job_provenance import capture_job_provenance
 from cryoet_organizer.log_window import BatchCommandOutputWindow
 from cryoet_organizer.project import JobHistoryEntry
 from cryoet_organizer.slurm import SlurmSubmissionResult, wait_for_slurm_job
@@ -104,7 +106,7 @@ def create_history_entry(
         started_at = timestamp
     elif action == "copied":
         status = "copied"
-    return JobHistoryEntry(
+    entry = JobHistoryEntry(
         timestamp=timestamp,
         action=action,
         group=group,
@@ -123,6 +125,8 @@ def create_history_entry(
         app_version=__version__,
         host=socket.gethostname(),
     )
+    capture_job_provenance(entry)
+    return entry
 
 
 def complete_history_entry(
@@ -132,6 +136,7 @@ def complete_history_entry(
     aborted: bool = False,
     failure_reason: str = "",
 ) -> None:
+    capture_job_provenance(entry)
     entry.exit_code = return_code
     entry.finished_at = history_timestamp_now()
     if aborted:
@@ -298,6 +303,12 @@ def execute_command_sequence(
     on_completed: Callable[[dict[str, object]], None] | None,
     on_finished: Callable[[int, list[str]], None],
 ) -> None:
+    run_id = uuid.uuid4().hex
+    for item in items:
+        entry = item.get("history_entry")
+        if isinstance(entry, JobHistoryEntry):
+            entry.working_directory = str(item.get("cwd", "") or entry.working_directory)
+            capture_job_provenance(entry, run_id=run_id)
     output_window = None
     if not use_slurm and items:
         output_window = BatchCommandOutputWindow(app.root, title="Command output")

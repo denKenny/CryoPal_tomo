@@ -529,6 +529,8 @@ class ProcessingTab(SidebarTab):
         if selected is None:
             return
         _index, entry = selected
+        if self._copy_assigned_custom_history(entry):
+            return
         if entry.group not in GROUPS:
             messagebox.showinfo(
                 "Copy job parameters",
@@ -1585,6 +1587,7 @@ class ProcessingTab(SidebarTab):
         self._update_command_preview()
 
     def _on_group_selected(self, _event=None) -> None:
+        self._hide_assigned_custom_job()
         jobs = self._jobs_for_current_group()
         self.job_combo.configure(
             state="readonly" if jobs else "disabled",
@@ -1624,6 +1627,8 @@ class ProcessingTab(SidebarTab):
             self.dataset_summary.config(text="")
 
     def _on_job_selected(self, _event=None) -> None:
+        if self._select_assigned_custom_job():
+            return
         selected_command = self.job_var.get()
         self.current_job = next(
             (job for job in self._jobs_for_current_group() if job.command == selected_command),
@@ -1641,6 +1646,7 @@ class ProcessingTab(SidebarTab):
             )
 
     def on_project_loaded(self, project: ProjectData) -> None:
+        custom_selection = self.job_var.get() if self._custom_integration and self.job_var.get() in self._custom_integration.jobs else ""
         project_id = id(project)
         if self._layout_project_id != project_id:
             self._layout_project_id = project_id
@@ -1673,6 +1679,10 @@ class ProcessingTab(SidebarTab):
         else:
             self._on_dataset_selected()
         self._update_command_preview()
+        self._refresh_assigned_custom_jobs()
+        if custom_selection and self.current_dataset is not None and custom_selection in self._custom_integration.jobs:
+            self.job_var.set(custom_selection)
+            self._select_assigned_custom_job()
 
     def reset_window_sizes(self) -> None:
         self.processing_pane.reset_to_defaults()

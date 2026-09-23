@@ -110,6 +110,10 @@ class ParticleAbundancePlot:
     compare_samples: bool
     conditions: list[AbundanceCondition] = field(default_factory=list)
     all_condition: AbundanceCondition | None = None
+    occupancy: list[dict[str, object]] = field(default_factory=list)
+    occupancy_warnings: list[str] = field(default_factory=list)
+    occupancy_reference: str = "None"
+    sort_by_occupancy: bool = False
 
 
 @dataclass
@@ -634,6 +638,9 @@ def particle_abundance_plot_data(
     measure: str,
     dataset_aliases: DatasetMatcherInput | None = None,
     cancel_event=None,
+    show_tomogram_occupancy: bool = False,
+    only_particle_containing_ts: bool = True,
+    dataset_tomograms: dict[str, list[str]] | None = None,
 ) -> ParticleAbundancePlot:
     if measure not in {"total", "density"}:
         raise StarMergeError("Measure must be either 'total' or 'density'.")
@@ -695,6 +702,36 @@ def particle_abundance_plot_data(
         dataset_count=sum(condition.dataset_count for condition in conditions),
     )
 
+    occupancy: list[dict[str, object]] = []
+    occupancy_warnings: list[str] = []
+    if show_tomogram_occupancy:
+        for dataset_name in sorted(counts_by_dataset, key=str.casefold):
+            _check_cancel(cancel_event)
+            known = (dataset_tomograms or {}).get(dataset_name, [])
+            canonical = {name.casefold(): name for name in known}
+            ts_counts: dict[str, int] = defaultdict(int)
+            unmatched = []
+            for identifier, count in counts_by_dataset[dataset_name].items():
+                stem = Path(identifier.replace("\\", "/")).name
+                if Path(stem).suffix.lower() in {".tomostar", ".mrc", ".mrcs", ".st", ".rec"}:
+                    stem = Path(stem).stem
+                name = canonical.get(stem.casefold(), stem)
+                if known and stem.casefold() not in canonical:
+                    unmatched.append(stem)
+                ts_counts[name] += count
+            if not only_particle_containing_ts:
+                if not known:
+                    occupancy_warnings.append(f"{dataset_name}: complete TS list unavailable; showing particle-containing TS only.")
+                elif unmatched:
+                    occupancy_warnings.append(f"{dataset_name}: {len(unmatched)} STAR TS names are absent from the project TS list; zero-count TS were not added.")
+                else:
+                    for name in known:
+                        ts_counts.setdefault(name, 0)
+            condition = dataset_to_sample.get(dataset_name, dataset_name)
+            for name in sorted(ts_counts, key=str.casefold):
+                occupancy.append({"dataset": dataset_name, "tomogram": name,
+                                  "condition": condition, "count": ts_counts[name]})
+
     return ParticleAbundancePlot(
         star_path=input_path,
         mode=mode,
@@ -702,6 +739,8 @@ def particle_abundance_plot_data(
         compare_samples=compare_samples,
         conditions=conditions,
         all_condition=all_condition,
+        occupancy=occupancy,
+        occupancy_warnings=occupancy_warnings,
     )
 
 
@@ -722,7 +761,7 @@ def _read_particle_abundance_summary(
         _PARTICLE_ABUNDANCE_SUMMARY_CACHE.move_to_end(cache_key)
         return cached
 
-    matcher = _dataset_matcher(dataset_names)
+    matcher = _dataset_matcher(dataset_names, reject_ambiguous=True)
     current_block = ""
     in_loop = False
     headers: list[str] = []
@@ -1187,13 +1226,31 @@ def _matched_dataset_name(identifier: str, dataset_names: DatasetMatcherInput) -
     return None
 
 
-def _dataset_matcher(dataset_names: DatasetMatcherInput) -> Callable[[str], str | None]:
+def _dataset_matcher(dataset_names: DatasetMatcherInput, *, reject_ambiguous: bool = False) -> Callable[[str], str | None]:
     alias_pairs = _dataset_alias_pairs(dataset_names)
     cache: dict[str, str | None] = {}
 
     def match(identifier: str) -> str | None:
         if identifier in cache:
             return cache[identifier]
+        if reject_ambiguous:
+            token, stem = _identifier_variants(identifier)
+            candidates: set[str] = set()
+            best_length = 0
+            for alias, candidate in alias_pairs:
+                if best_length and len(alias) < best_length:
+                    break
+                if _has_identifier_boundary(token, alias) or _has_identifier_boundary(stem, alias):
+                    best_length = len(alias)
+                    candidates.add(candidate)
+            if len(candidates) > 1:
+                raise StarMergeError(
+                    f"Ambiguous dataset for TS '{identifier}': {', '.join(sorted(candidates))}. "
+                    "Use dataset-qualified TS names to distinguish these datasets."
+                )
+            result = next(iter(candidates), None)
+            cache[identifier] = result
+            return result
         dataset_name = None
         for alias, candidate in alias_pairs:
             if _identifier_matches_alias(identifier, alias):

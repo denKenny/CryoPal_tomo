@@ -18,7 +18,28 @@ class SidebarTab:
     def __init__(self, app: "CryoETOrganizerApp", parent: ttk.Frame) -> None:
         self.app = app
         self.frame = ttk.Frame(parent, padding=16)
+        self._custom_integration = None
         self.build()
+        if self.tab_id in {"processing", "processing_m", "tomograms", "particles"}:
+            from cryoet_organizer.tabs.custom_integration import CustomJobIntegration
+            self._custom_integration = CustomJobIntegration(self)
+            self.refresh_domains = (*self.refresh_domains, "custom")
+
+    def _select_assigned_custom_job(self) -> bool:
+        return self._custom_integration.select() if self._custom_integration else False
+
+    def _refresh_assigned_custom_jobs(self) -> None:
+        if self._custom_integration:
+            self._custom_integration.refresh()
+            if self._custom_integration.variable.get() in self._custom_integration.jobs:
+                self._custom_integration.select()
+
+    def _hide_assigned_custom_job(self) -> None:
+        if self._custom_integration:
+            self._custom_integration.hide()
+
+    def _copy_assigned_custom_history(self, entry) -> bool:
+        return self._custom_integration.copy_history(entry) if self._custom_integration else False
 
     def build(self) -> None:
         raise NotImplementedError

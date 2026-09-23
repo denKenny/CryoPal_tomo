@@ -8,6 +8,62 @@ CryoPal does not replace the underlying processing software. Instead, it helps y
 
 This tutorial is written for end users who want to process cryo-ET datasets efficiently and reproducibly.
 
+### Processing history as a flow graph
+
+In **Global Job List**, switch between **List view** and **Flow view** above the
+filters. Flow view is read-only: queue editing, removal and execution controls
+remain in List view. It includes all histories, not only scheduled jobs.
+
+The project is at the top, datasets have adjacent multi-column lanes, and data
+dependencies proceed downward. Shared and M-population jobs have separate lanes. Dataset and Tomogram
+filters select the relevant branches; known upstream data dependencies are kept
+as context even when they originate in another dataset. **Color jobs by** uses
+Action, Processing tab, Dataset or Mode. Other list filters do not apply.
+
+- Solid arrows indicate an explicit recorded dependency or matching input/output
+  file paths from a successfully completed producer before the consumer started.
+- Dashed arrows indicate inferred legacy dependencies or chronological order,
+  not proof that a job used another job's output.
+- Dotted arrows indicate project/dataset membership.
+
+Old project files require no migration. CryoPal derives relationships from saved
+parameters, commands, TS selections and timestamps without scanning directories
+or opening processing files. New runs record versioned input/output provenance
+and run identifiers in the existing history metadata. History changes invalidate
+the graph cache, so new jobs and changed statuses are reflected on refresh.
+Copied commands, scheduled writers, ambiguous paths, unfinished outputs and
+failed overwrites are not treated as successful data producers. Filesystem
+symlinks, external edits and dependencies absent from the history cannot be
+reconstructed reliably. Custom jobs use explicit input/output roles when recorded;
+otherwise their connections remain chronological. No dependency is inferred
+solely from a matching basename or a shared output directory.
+
+Already-grouped TS history entries remain grouped. Separate entries aggregate
+only with a shared run identifier, compatible parameters and safe ordering.
+Repeated old jobs without a shared run identifier deliberately remain separate.
+Filtering a grouped run can show, for example, **1 of 105 TS**. Double-click a box
+to open the existing job details; a multi-entry run first offers an entry chooser.
+
+**Layout: Wide** (default) allows up to four jobs per dataset and level;
+**Compact** allows two. Branches fan out and merges are placed near their inputs.
+True dependency chains remain vertical. Chronological-only arrows no longer force
+every job onto another row: they can run sideways or upward, remain dashed, and
+do not indicate proven dependencies. Height is therefore not a global time axis;
+missing recorded dependencies are not proof that jobs were independent.
+
+Click a box to highlight its direct neighbours and connections; click the empty
+background or press Escape to clear the highlight. Double-click still opens the
+existing details. Highlighting and recolouring do not recalculate the layout.
+
+Both scrollbars cover the complete graph. Zoom controls and **Fit to view** help
+navigate large histories. Layout runs in a cancellable background task; rendering
+is incremental and limited to the visible area. The layout cache keeps Wide and
+Compact results separate; resizing only updates the visible area and does not
+shuffle the graph. **Refresh** explicitly discards cached layout results. Optional Graphviz
+(`dot` on PATH) improves layout; the built-in dataset-lane layout is used when
+Graphviz is unavailable, fails, exceeds eight seconds, or the graph exceeds 3,000
+nodes. No additional mandatory installation step is needed.
+
 ## 2. Who this guide is for
 
 This document is mainly intended for users who:
@@ -487,6 +543,26 @@ For each custom job, you can define:
 - description
 - base command template
 - custom parameter rows
+
+`Additional Processing tab` optionally makes the same definition available in
+WARP, M, TS jobs, or Particle jobs. WARP and M also require a job group. `None`
+keeps the job exclusively in Custom jobs. These assignments can be changed in
+`Settings > Manage custom job types` and are included in settings and custom-job
+exports. Jobs in the additional selectors carry a `[Custom]` suffix.
+
+Assigned WARP jobs use the selected dataset; assigned M jobs use the selected
+population. Select that context in the corresponding tab before running the job
+from Custom jobs as well. Assigned TS jobs run once per selected TS, even without
+a TS file-role parameter, unless the job explicitly uses an all-files input.
+`Schedule job` stores concrete commands for execution through the Global Job List.
+
+The command template can reference `{dataset_name}`, `{processing_directory}`,
+`{ts_name}`, `{input_stem}`, `{population_name}`, `{population_file}`, and
+`{population_directory}` when the corresponding context is available. These
+placeholders represent complete shell arguments; do not surround them with extra
+quotes. CryoPal quotes internally supplied context values and reports missing
+context before execution. Shell variables such as `${dataset_name}` are left
+unchanged. User-entered parameter values retain their existing formatting.
 
 Parameters can be defined with input types such as:
 

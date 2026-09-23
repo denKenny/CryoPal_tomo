@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import uuid
+from cryoet_organizer.custom_job_assignment import CustomJobAssignment
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
@@ -109,6 +111,7 @@ class CustomJobsDialog:
             justify="left",
         ).grid(row=4, column=0, columnspan=2, sticky="w", pady=(8, 0))
 
+        self.assignment = CustomJobAssignment(top)
         params_box = ttk.LabelFrame(right, text="Custom parameters", padding=12)
         params_box.grid(row=1, column=0, sticky="nsew", pady=(12, 0))
         params_box.columnconfigure(0, weight=1)
@@ -278,6 +281,8 @@ class CustomJobsDialog:
         self._render_rows()
 
     def _validation_message(self) -> str:
+        if self.assignment.error():
+            return self.assignment.error()
         widgets = [
             self._stored_input_type(str(row["widget"].get()).strip() or "text")
             for row in self.parameter_rows
@@ -327,12 +332,16 @@ class CustomJobsDialog:
             command_template=self.command_text.get("1.0", "end").strip(),
             environment_title=self.environment_var.get().strip() or "None",
             parameters=parameters,
+            job_id=self.jobs[self.current_index].job_id,
+            target_tab=self.assignment.values()[0],
+            target_group=self.assignment.values()[1],
         )
 
     def _load_selected_job(self, index: int) -> None:
         job = self.jobs[index]
         self.current_index = index
         self.name_var.set(job.name)
+        self.assignment.load(job.target_tab, job.target_group)
         available_environments = set(environment_titles(self.app.project))
         self.environment_var.set(
             job.environment_title if job.environment_title in available_environments else "None"
@@ -402,6 +411,7 @@ class CustomJobsDialog:
         if not (0 <= index < len(self.jobs)):
             return
         cloned = deepcopy(self.jobs[index])
+        cloned.job_id = uuid.uuid4().hex
         cloned.name = make_copy_name([job.name for job in self.jobs], cloned.name)
         self.jobs.append(cloned)
         self.current_index = len(self.jobs) - 1
@@ -411,6 +421,7 @@ class CustomJobsDialog:
         self._load_selected_job(self.current_index)
 
     def _clear_editor(self) -> None:
+        self.assignment.load()
         self.name_var.set("")
         self.environment_var.set("None")
         self.description_text.configure(state="normal")

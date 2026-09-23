@@ -1,10 +1,14 @@
 from __future__ import annotations
+import uuid
+from cryoet_organizer.custom_job_assignment import CustomJobAssignment
+from cryoet_organizer.custom_jobs import CUSTOM_JOB_TARGETS, custom_job_groups
 
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 from cryoet_organizer.custom_jobs import (
+    render_custom_context,
     CustomJobDefinition,
     CustomJobParameter,
     get_project_custom_jobs,
@@ -265,6 +269,7 @@ class CustomTab(SidebarTab):
             justify="left",
         ).grid(row=4, column=0, columnspan=2, sticky="w", pady=(8, 0))
 
+        self.builder_assignment = CustomJobAssignment(builder_meta)
         params_box = ttk.LabelFrame(self.builder_params_frame, text="Custom parameters", padding=12)
         params_box.grid(row=0, column=0, sticky="nsew")
         params_box.columnconfigure(0, weight=1)
@@ -347,6 +352,8 @@ class CustomTab(SidebarTab):
         abort_button = ttk.Button(actions, text="Abort", command=self.app.abort_running_commands, state="disabled")
         abort_button.grid(row=0, column=3, padx=(8, 0))
         self.app.attach_abort_button(abort_button)
+        ttk.Button(actions, text="Schedule job", command=self._schedule_commands).grid(row=0, column=4, padx=(8, 0))
+        ttk.Button(actions, text="Global Job List", command=self.app.open_global_job_list).grid(row=0, column=5, padx=(8, 0))
 
         execution_row = ttk.Frame(box)
         execution_row.grid(row=1, column=0, sticky="ew", pady=(0, 8))
@@ -637,7 +644,7 @@ class CustomTab(SidebarTab):
         self.runtime_state.clear()
         self._refresh_ts_table()
         row = 0
-        has_ts_inputs = any(parameter.widget.startswith("ts_") for parameter in job.parameters)
+        has_ts_inputs = job.target_tab == "tomograms" or any(parameter.widget.startswith("ts_") for parameter in job.parameters)
         self.runtime_pane.set_section_visible("ts_list", has_ts_inputs)
 
         for parameter in job.parameters:
@@ -722,6 +729,9 @@ class CustomTab(SidebarTab):
             variable.set(path)
 
     def _save_custom_job(self) -> None:
+        if self.builder_assignment.error():
+            self.builder_validation_var.set(self.builder_assignment.error())
+            return
         name = self.builder_name_var.get().strip()
         if not name:
             messagebox.showinfo("Save custom job type", "Please provide a job name first.")
@@ -773,11 +783,16 @@ class CustomTab(SidebarTab):
             command_template=command_template,
             environment_title=self.builder_environment_var.get().strip() or "None",
             parameters=parameters,
+            target_tab=self.builder_assignment.values()[0],
+            target_group=self.builder_assignment.values()[1],
         )
+        existing = next((job for job in get_project_custom_jobs(self.app.project) if job.name == name), None)
+        if existing is not None:
+            definition.job_id = existing.job_id
         jobs = [job for job in get_project_custom_jobs(self.app.project) if job.name != definition.name]
         jobs.append(definition)
         set_project_custom_jobs(self.app.project, jobs)
-        self.app.on_project_changed("custom")
+        self.app.on_project_changed("custom", "processing", "processing_m", "tomograms", "particles")
         self.job_type_var.set(definition.name)
         self._refresh_job_options()
         self._on_job_selection_changed()
@@ -831,9 +846,22 @@ class CustomTab(SidebarTab):
         parts.append(value)
 
     def _build_commands(self) -> tuple[list[tuple[str, str, str]], list[str]]:
+        try:
+            return self._build_context_commands()
+        except (ValueError, OSError) as exc:
+            return [], [str(exc)]
+
+    def _build_context_commands(self) -> tuple[list[tuple[str, str, str]], list[str]]:
         if self.current_job is None:
             return [], ["No custom job type selected."]
         job = self.current_job
+        host = getattr(self, "execution_host", None) or self.app.tabs.get(job.target_tab)
+        population = getattr(host, "current_population", None)
+        selected_dataset = getattr(host, "current_dataset", None)
+        if job.target_tab == "processing" and selected_dataset is None:
+            return [], ["Select a dataset in Processing: WARP first."]
+        if job.target_tab == "processing_m" and population is None:
+            return [], ["Select an M population in Processing: M first."]
         errors: list[str] = []
         commands: list[tuple[str, str, str]] = []
         ts_parameters = [item for item in job.parameters if item.widget.startswith("ts_")]
@@ -844,7 +872,7 @@ class CustomTab(SidebarTab):
             return [], ["Only one 'All files that...' parameter is currently supported per custom job type."]
 
         dataset_map = self._dataset_map()
-        if ts_parameters:
+        if ts_parameters or (job.target_tab == "tomograms" and not all_file_parameters):
             entries = self._global_ts_entries()
             if not entries:
                 return [], ["No TS present in the global TS processing list."]
@@ -857,6 +885,7 @@ class CustomTab(SidebarTab):
                     "dataset_name": entry["dataset_name"],
                     "ts_name": entry["ts_name"],
                     "input_stem": entry["ts_name"],
+                    "processing_directory": dataset.processing_folder,
                 }
                 for parameter in ts_parameters:
                     resolved: Path | None
@@ -889,11 +918,28 @@ class CustomTab(SidebarTab):
                 }
                 commands.append(("", item.stem, self._command_for_context(job, context)))
         else:
-            commands.append(("", "", self._command_for_context(job, {"dataset_name": "", "ts_name": "", "input_stem": ""})))
+            context = {"dataset_name": "", "ts_name": "", "input_stem": ""}
+            if job.target_tab == "processing":
+                context.update(dataset_name=selected_dataset.dataset_name,
+                               processing_directory=selected_dataset.processing_folder)
+            elif job.target_tab == "processing_m":
+                context.update(population_name=population.name, population_file=population.population_file,
+                               population_directory=population.directory)
+            commands.append((context["dataset_name"], "", self._command_for_context(job, context)))
         return commands, errors
 
     def _command_for_context(self, job: CustomJobDefinition, context: dict[str, str]) -> str:
-        parts = [job.command_template.strip()]
+        template = job.command_template.strip()
+        host = getattr(self, "execution_host", None) or self.app.tabs.get(job.target_tab)
+        population = getattr(host, "current_population", None)
+        dataset = getattr(host, "current_dataset", None)
+        context = dict(context)
+        if job.target_tab == "processing_m" and population is not None:
+            context.update(population_name=population.name, population_file=population.population_file,
+                           population_directory=population.directory)
+        elif job.target_tab == "processing" and dataset is not None:
+            context.update(dataset_name=dataset.dataset_name, processing_directory=dataset.processing_folder)
+        parts = [render_custom_context(template, context)]
         for parameter in job.parameters:
             state = self.runtime_state.get(parameter.key, {})
             if parameter.widget == "bool":
@@ -907,11 +953,14 @@ class CustomTab(SidebarTab):
         return " ".join(part for part in parts if part)
 
     def _update_preview(self) -> None:
+        if getattr(self, "_suspend_custom_preview", False):
+            return
         commands, errors = self._build_commands()
         lines = [command for _dataset, _ts, command in commands]
         lines.extend(f"# {error}" for error in errors)
         self.runtime_command_text.delete("1.0", "end")
         self.runtime_command_text.insert("1.0", "\n".join(lines))
+        self._generated_preview = "\n".join(lines).strip()
 
     def _record_history(
         self,
@@ -922,27 +971,48 @@ class CustomTab(SidebarTab):
         parameters: dict[str, str],
         action: str,
     ) -> JobHistoryEntry | None:
-        dataset = next((item for item in self.app.project.datasets if item.dataset_name == dataset_name), None)
-        if dataset is None:
+        job = self.current_job
+        host = getattr(self, "execution_host", None) or self.app.tabs.get(job.target_tab if job else "")
+        owner = getattr(host, "current_population", None) if job and job.target_tab == "processing_m" else None
+        if owner is None:
+            owner = next((item for item in self.app.project.datasets if item.dataset_name == dataset_name), None)
+        if owner is None:
+            owner = next(iter(self.app.project.datasets), None)
+        if owner is None:
+            owner = next(iter(self.app.project.m_populations), None)
+        if owner is None:
             return None
+        group = custom_job_groups(job.target_tab).get(job.target_group, "Tomograms" if job.target_tab == "tomograms" else "Custom jobs") if job else "Custom jobs"
         entry = create_history_entry(
             action=action,
-            group="Tomograms",
+            group=group,
             job_name=job_name,
             command=command,
-            processing_tab="Processing: Custom jobs",
+            processing_tab=CUSTOM_JOB_TARGETS.get(job.target_tab, "Processing: Custom jobs") if job and job.target_tab else "Processing: Custom jobs",
             dataset_name=dataset_name,
             execution_mode="slurm" if self.execution_mode_var.get() == "Submit to Slurm" else "local",
             slurm_profile=self.slurm_profile_var.get().strip(),
             environment_title=self.environment_var.get().strip() if self.execution_mode_var.get() == "Run locally" else "",
-            parameters={key: value for key, value in parameters.items() if value},
+            parameters=dict(parameters),
+            scheduled=action == "scheduled",
+            working_directory=getattr(owner, "directory", "") or getattr(owner, "processing_folder", ""),
         )
+        if job:
+            entry.artifacts["custom_job_id"] = job.job_id
+            entry.artifacts["custom_job_definition"] = job.to_dict()
+            entry.artifacts["processed_ts"] = self._global_ts_entries() if job.target_tab == "tomograms" else []
         entry.parameters.update(self._current_slurm_overrides())
-        dataset.job_history.append(entry)
+        owner.job_history.append(entry)
         return entry
 
     def _current_runtime_parameters(self) -> dict[str, str]:
         payload: dict[str, str] = {}
+        for parameter in self.current_job.parameters if self.current_job else []:
+            for key, variable in self.runtime_state.get(parameter.key, {}).items():
+                value = variable.get()
+                payload[f"custom:{parameter.key}:{key}"] = ("true" if value else "false") if isinstance(value, bool) else str(value)
+                if key in {"value", "directory"}:
+                    payload[parameter.key] = payload[f"custom:{parameter.key}:{key}"]
         for parameter in self.current_job.parameters if self.current_job else []:
             state = self.runtime_state.get(parameter.key, {})
             if parameter.widget == "bool":
@@ -956,6 +1026,24 @@ class CustomTab(SidebarTab):
             else:
                 payload[parameter.label or parameter.key] = "global TS selection"
         return payload
+
+    def _schedule_commands(self) -> None:
+        from cryoet_organizer.job_provenance import capture_job_provenance
+        commands, errors = self._build_commands()
+        if errors or not commands:
+            messagebox.showerror("Cannot schedule custom job", "\n".join(errors) or "No commands available.")
+            return
+        if not self.app.project.datasets and not self.app.project.m_populations:
+            messagebox.showerror("Cannot schedule custom job", "Add a dataset or M population to store job history first.")
+            return
+        run_id = uuid.uuid4().hex
+        for dataset_name, ts_name, command in commands:
+            entry = self._record_history(dataset_name, ts_name, self.current_job.name, command,
+                                         {**self._current_runtime_parameters(), "ts_name": ts_name}, "scheduled")
+            if entry is not None:
+                capture_job_provenance(entry, run_id=run_id)
+        self.app.on_project_changed("custom", "job_queue", "processing", "processing_m", "tomograms", "particles")
+        self.app.status_var.set(f"Scheduled {len(commands)} custom command(s)")
 
     def _copy_commands(self) -> None:
         preview_commands = [
@@ -972,12 +1060,15 @@ class CustomTab(SidebarTab):
 
     def _run_commands(self) -> None:
         commands, errors = self._build_commands()
+        if errors and self.current_job and self.current_job.target_tab:
+            messagebox.showerror("Cannot run commands", "\n".join(errors))
+            return
         preview_commands = [
             line.strip()
             for line in self.runtime_command_text.get("1.0", "end").splitlines()
             if line.strip() and not line.lstrip().startswith("#")
         ]
-        if preview_commands:
+        if preview_commands and self.runtime_command_text.get("1.0", "end").strip() != getattr(self, "_generated_preview", ""):
             overridden: list[tuple[str, str, str]] = []
             for index, line in enumerate(preview_commands):
                 if index < len(commands):
@@ -1046,13 +1137,13 @@ class CustomTab(SidebarTab):
                 "command": command,
                 "dataset_name": dataset_name,
                 "job_name": job_name,
-                "cwd": "",
+                "cwd": history_entry.working_directory if history_entry else "",
                 "error_label": f"{dataset_name}/{ts_name}" if dataset_name else (ts_name or job_name),
                 "ts_name": ts_name,
                 "activation_command": activation_command,
                 "history_entry": history_entry,
             })
-        self.app.on_project_changed("custom", "tomograms")
+        self.app.on_project_changed("custom", "tomograms", "processing", "processing_m", "particles", "job_queue")
         execute_command_sequence(
             self.app,
             items,
@@ -1069,7 +1160,7 @@ class CustomTab(SidebarTab):
 
     def _finish_run_commands(self, command_count: int, failures: list[str]) -> None:
         self.app.clear_abort_request()
-        self.app.on_project_changed("custom", "tomograms")
+        self.app.on_project_changed("custom", "tomograms", "processing", "processing_m", "particles", "job_queue")
         if failures:
             self.app.status_var.set("Custom job stopped: " + "; ".join(failures))
             return

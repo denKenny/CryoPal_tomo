@@ -1019,6 +1019,8 @@ class ProcessingMTab(SidebarTab):
         if entry is None:
             messagebox.showinfo("Copy job parameters", "Please select a job history entry first.")
             return
+        if self._copy_assigned_custom_history(entry):
+            return
         if entry.job_name == "create_population":
             self.create_directory_var.set(entry.parameters.get("directory", ""))
             self.create_name_var.set(entry.parameters.get("name", ""))
@@ -1892,6 +1894,7 @@ class ProcessingMTab(SidebarTab):
         self._update_command_preview()
 
     def _on_group_selected(self, _event=None) -> None:
+        self._hide_assigned_custom_job()
         jobs = self._jobs_for_current_group()
         job_names = [job.command for job in jobs]
         current_job_name = self.job_var.get()
@@ -1905,6 +1908,8 @@ class ProcessingMTab(SidebarTab):
         self._update_population_summary()
 
     def _on_job_selected(self, _event=None) -> None:
+        if self._select_assigned_custom_job():
+            return
         selected_command = self.job_var.get()
         self.current_job = next(
             (job for job in self._jobs_for_current_group() if job.command == selected_command),
@@ -1916,6 +1921,7 @@ class ProcessingMTab(SidebarTab):
         self._update_population_summary()
 
     def on_project_loaded(self, project: ProjectData) -> None:
+        custom_selection = self.job_var.get() if self._custom_integration and self.job_var.get() in self._custom_integration.jobs else ""
         project_id = id(project)
         if self._layout_project_id != project_id:
             self._layout_project_id = project_id
@@ -1930,6 +1936,10 @@ class ProcessingMTab(SidebarTab):
         self.create_environment_var.set(self._create_population_environment_default())
         self._update_create_command_preview()
         self._update_command_preview()
+        self._refresh_assigned_custom_jobs()
+        if custom_selection and self.current_population is not None and custom_selection in self._custom_integration.jobs:
+            self.job_var.set(custom_selection)
+            self._select_assigned_custom_job()
 
     def sync_to_project(self, project: ProjectData) -> None:
         self.processing_pane.write_to_project(project)

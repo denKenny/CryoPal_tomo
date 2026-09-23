@@ -23,6 +23,7 @@ from cryoet_organizer.job_queue import (
     remove_job_ref_from_project,
     reverse_timestamp_sort_key,
 )
+from cryoet_organizer.job_provenance import capture_job_provenance
 from cryoet_organizer.log_window import BatchCommandOutputWindow
 from cryoet_organizer.performance import TkDebouncer, chunked_treeview_replace
 from cryoet_organizer.project import JobHistoryEntry, ProjectData
@@ -57,7 +58,16 @@ class JobListTab(SidebarTab):
 
     def build(self) -> None:
         self.frame.columnconfigure(0, weight=1)
-        self.frame.rowconfigure(1, weight=1)
+        self.frame.rowconfigure(2, weight=1)
+        self.view_mode_var = tk.StringVar(value="List view")
+        self.tomogram_filter_var = tk.StringVar(value="All")
+        self.flow_view = None
+        self._flow_inventory = {}
+        switch = ttk.Frame(self.frame)
+        switch.grid(row=0, column=0, sticky="w", pady=(0, 8))
+        for column, label in enumerate(("List view", "Flow view")):
+            ttk.Radiobutton(switch, text=label, value=label, variable=self.view_mode_var,
+                            command=self._on_view_mode_changed).grid(row=0, column=column, padx=(0, 12))
         self.processing_filter_var = tk.StringVar(value="All")
         self.action_filter_var = tk.StringVar(value="All")
         self.dataset_filter_var = tk.StringVar(value="All")
@@ -70,7 +80,8 @@ class JobListTab(SidebarTab):
         self._refresh_table_debouncer = TkDebouncer(self.frame, self._refresh_table, delay_ms=120)
 
         filters = ttk.LabelFrame(self.frame, text="Global job filters", padding=12)
-        filters.grid(row=0, column=0, sticky="ew")
+        filters.grid(row=1, column=0, sticky="ew")
+        self.list_filters = filters
         for column in (1, 3, 5, 7):
             filters.columnconfigure(column, weight=1)
         ttk.Label(filters, text="Processing tab").grid(row=0, column=0, sticky="w", padx=(0, 6))
@@ -99,12 +110,29 @@ class JobListTab(SidebarTab):
             self.action_filter_var,
             self.dataset_filter_var,
             self.search_var,
-            self.color_by_var,
         ):
             variable.trace_add("write", lambda *_args: self._refresh_table_debouncer.schedule())
+        self.color_by_var.trace_add("write", self._on_color_changed)
+        self.tomogram_filter_var.trace_add("write", lambda *_args: self._refresh_table_debouncer.schedule())
+
+        self.flow_filters = ttk.LabelFrame(self.frame, text="Global job filters", padding=12)
+        self.flow_filters.grid(row=1, column=0, sticky="ew")
+        self.flow_filters.grid_remove()
+        self.flow_filters.columnconfigure(5, weight=1)
+        ttk.Label(self.flow_filters, text="Dataset").grid(row=0, column=0, padx=(0, 6))
+        self.flow_dataset_combo = ttk.Combobox(self.flow_filters, textvariable=self.dataset_filter_var, state="readonly", width=24)
+        self.flow_dataset_combo.grid(row=0, column=1, sticky="ew", padx=(0, 12))
+        ttk.Label(self.flow_filters, text="Tomogram").grid(row=0, column=2, padx=(0, 6))
+        self.flow_ts_combo = ttk.Combobox(self.flow_filters, textvariable=self.tomogram_filter_var, state="disabled", width=24)
+        self.flow_ts_combo.grid(row=0, column=3, sticky="ew", padx=(0, 12))
+        ttk.Label(self.flow_filters, text="Color jobs by").grid(row=0, column=4, padx=(0, 6))
+        ttk.Combobox(self.flow_filters, textvariable=self.color_by_var, state="readonly", width=20,
+                     values=("Action", "Processing tab", "Dataset", "Mode")).grid(row=0, column=5, sticky="ew")
+        ttk.Button(self.flow_filters, text="Refresh", command=lambda: self._refresh_flow(force=True)).grid(row=0, column=6, padx=(12, 0))
 
         box = ttk.LabelFrame(self.frame, text="Global jobs", padding=12)
-        box.grid(row=1, column=0, sticky="nsew", pady=(12, 0))
+        box.grid(row=2, column=0, sticky="nsew", pady=(12, 0))
+        self.list_box = box
         box.columnconfigure(0, weight=1)
         box.rowconfigure(0, weight=1)
         columns = ("processing_tab", "action", "dataset", "job_name", "timestamp", "mode")
@@ -177,10 +205,98 @@ class JobListTab(SidebarTab):
     def on_project_loaded(self, project: ProjectData) -> None:
         self.refresh_queue()
 
+    def _on_color_changed(self, *_args):
+        if self.view_mode_var.get() == "Flow view" and self.flow_view is not None:
+            self.flow_view.recolor()
+        else:
+            self._refresh_table_debouncer.schedule()
+
+    def _on_view_mode_changed(self):
+        if self.view_mode_var.get() == "Flow view":
+            if self.flow_view is None:
+                from cryoet_organizer.job_flow_view import JobFlowView
+                self.flow_view = JobFlowView(self.frame, details=self._show_flow_details, color_by=self.color_by_var.get)
+            self.list_filters.grid_remove()
+            self.list_box.grid_remove()
+            self.flow_filters.grid()
+            self.flow_view.grid(row=2, column=0, sticky="nsew", pady=(12, 0))
+        else:
+            if self.flow_view is not None:
+                self.flow_view.suspend()
+                self.flow_view.grid_remove()
+            self.flow_filters.grid_remove()
+            self.list_filters.grid()
+            self.list_box.grid()
+        self.refresh_queue()
+
+    def _refresh_flow(self, *, force=False):
+        if self.flow_view is None or self.view_mode_var.get() != "Flow view":
+            return
+        datasets = ["All", *(dataset.dataset_name for dataset in self.app.project.datasets)]
+        self.flow_dataset_combo.configure(values=datasets)
+        if self.dataset_filter_var.get() not in datasets:
+            self.dataset_filter_var.set("All")
+        self._update_flow_ts_options()
+        self.flow_view.request(self.app.project, self.dataset_filter_var.get(), self.tomogram_filter_var.get(),
+                               force=force, on_ready=self._flow_ready)
+
+    def _update_flow_ts_options(self):
+        dataset = self.dataset_filter_var.get()
+        values = ["All", *sorted(self._flow_inventory.get(dataset, ()), key=str.casefold)] if dataset != "All" else ["All"]
+        self.flow_ts_combo.configure(values=values, state="readonly" if dataset != "All" else "disabled")
+        if self.tomogram_filter_var.get() not in values:
+            self.tomogram_filter_var.set("All")
+
+    def _flow_ready(self, graph):
+        self._flow_inventory = {}
+        for node in graph.nodes.values():
+            for dataset, ts_name in node.ts:
+                self._flow_inventory.setdefault(dataset, set()).add(ts_name)
+        for dataset in self.app.project.datasets:
+            self._flow_inventory.setdefault(dataset.dataset_name, set()).update(
+                thumb.ts_name for thumb in dataset.thumbnails if thumb.ts_name)
+        self._update_flow_ts_options()
+
+    def _show_flow_details(self, entry_ids):
+        refs = {ref.entry_id: ref for ref in iter_job_history_refs(self.app.project)}
+        available = [refs[key] for key in entry_ids if key in refs]
+        if not available:
+            return
+        if len(available) == 1:
+            self._show_ref_details(available[0])
+            return
+        dialog = tk.Toplevel(self.frame)
+        dialog.title("Processing run entries")
+        dialog.geometry("850x400")
+        dialog.transient(self.app.root)
+        dialog.columnconfigure(0, weight=1)
+        dialog.rowconfigure(0, weight=1)
+        table = ttk.Treeview(dialog, columns=("job", "dataset", "ts", "time"), show="headings", selectmode="browse")
+        for key, label in (("job", "Job"), ("dataset", "Dataset"), ("ts", "TS"), ("time", "Timestamp")):
+            table.heading(key, text=label)
+            table.column(key, width=200, stretch=False)
+        table.grid(row=0, column=0, sticky="nsew")
+        for ref in available:
+            table.insert("", "end", iid=ref.entry_id, values=(ref.entry.job_name, ref_dataset_name(ref),
+                         ref.entry.parameters.get("ts_name", ""), display_ref_timestamp(ref)))
+        vertical = ttk.Scrollbar(dialog, orient="vertical", command=table.yview)
+        vertical.grid(row=0, column=1, sticky="ns")
+        horizontal = ttk.Scrollbar(dialog, orient="horizontal", command=table.xview)
+        horizontal.grid(row=1, column=0, sticky="ew")
+        table.configure(yscrollcommand=vertical.set, xscrollcommand=horizontal.set)
+        def show(_event=None):
+            if table.selection():
+                self._show_ref_details(refs[table.selection()[0]])
+        table.bind("<Double-1>", show)
+        ttk.Button(dialog, text="Show selected job details", command=show).grid(row=2, column=0, sticky="e", pady=8)
+
     def on_tab_shown(self) -> None:
         self.refresh_queue()
 
     def refresh_queue(self) -> None:
+        if self.view_mode_var.get() == "Flow view":
+            self._refresh_table()
+            return
         scheduled_refs = iter_scheduled_job_refs(self.app.project)
         if any("queue_order" not in ref.entry.artifacts for ref in scheduled_refs):
             assign_queue_order(scheduled_refs)
@@ -189,6 +305,8 @@ class JobListTab(SidebarTab):
         self._refresh_table()
 
     def _refresh_filter_options(self, refs: list[ScheduledJobRef]) -> None:
+        if self.view_mode_var.get() == "Flow view":
+            return
         processing_values = ["All"] + sorted({ref.entry.processing_tab or "-" for ref in refs})
         action_values = ["All"] + sorted({ref.entry.action or "-" for ref in refs})
         dataset_values = ["All"] + sorted({ref_dataset_name(ref) or "-" for ref in refs})
@@ -262,6 +380,9 @@ class JobListTab(SidebarTab):
 
     def _refresh_table(self) -> None:
         self._table_generation += 1
+        if self.view_mode_var.get() == "Flow view":
+            self._refresh_flow()
+            return
         generation = self._table_generation
         self.refs_by_id = {}
         rows: list[tuple[str, tuple[object, ...], tuple[str, ...]]] = []
@@ -349,6 +470,9 @@ class JobListTab(SidebarTab):
         if ref is None:
             messagebox.showinfo("Job details", "Please select a job first.")
             return
+        self._show_ref_details(ref)
+
+    def _show_ref_details(self, ref):
         if self._show_origin_history_details(ref):
             return
         sections = [
@@ -705,7 +829,7 @@ class JobListTab(SidebarTab):
         return self._command_text_for_items(self._resolved_command_items_for_ref(ref))
 
     def _resolved_command_items_for_ref(self, ref: ScheduledJobRef) -> list[tuple[str | None, str, str]]:
-        if ref.entry.processing_tab == "Processing: TS jobs" and ref.owner_kind == "dataset":
+        if ref.entry.processing_tab == "Processing: TS jobs" and ref.owner_kind == "dataset" and not ref.entry.artifacts.get("custom_job_id"):
             tomogram_tab = self.app.tabs.get("tomograms")
             resolver = getattr(tomogram_tab, "_resolved_scheduled_entry_commands", None)
             if callable(resolver):
@@ -725,6 +849,16 @@ class JobListTab(SidebarTab):
                     if items:
                         return items
         command = ref.entry.command.strip()
+        if ref.entry.artifacts.get("workflow_catalog_namespace") == "Custom" and not ref.entry.artifacts.get("custom_job_definition"):
+            from cryoet_organizer.custom_jobs import render_custom_context
+            context = {"dataset_name": ref.owner_name if ref.owner_kind == "dataset" else "",
+                       "ts_name": ref.entry.parameters.get("ts_name", ""),
+                       "input_stem": ref.entry.parameters.get("ts_name", ""),
+                       "processing_directory": ref.cwd if ref.owner_kind == "dataset" else "",
+                       "population_name": ref.owner_name if ref.owner_kind == "m_population" else "",
+                       "population_directory": ref.cwd if ref.owner_kind == "m_population" else "",
+                       "population_file": getattr(ref.owner, "population_file", "")}
+            command = render_custom_context(command, context)
         if not command or command == "Resolved at runtime":
             raise ValueError("No concrete command is stored for this scheduled job.")
         return [(ref_cwd(ref), ref_dataset_name(ref), command)]
@@ -818,6 +952,7 @@ class JobListTab(SidebarTab):
         entry.action = "ran"
         if command_text:
             entry.command = command_text
+        capture_job_provenance(entry)
         if isinstance(entry.artifacts, dict):
             entry.artifacts.pop("queue_order", None)
         self.refresh_queue()
@@ -839,6 +974,7 @@ class JobListTab(SidebarTab):
         entry.slurm_profile = profile_name
         entry.slurm_job_id = result.job_id
         entry.slurm_script_path = result.script_path
+        capture_job_provenance(entry)
         if isinstance(entry.artifacts, dict):
             entry.artifacts.pop("queue_order", None)
         self.refresh_queue()

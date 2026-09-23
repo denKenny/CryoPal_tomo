@@ -7,7 +7,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from cryoet_organizer.custom_jobs import CustomJobDefinition, get_project_custom_jobs
+from cryoet_organizer.custom_jobs import CustomJobDefinition, get_project_custom_jobs, CUSTOM_JOB_TARGETS, custom_job_groups, custom_job_assignment_error
 from cryoet_organizer.executables import (
     CRYOLITHE_EXECUTABLE,
     MEMBRAIN_EXECUTABLE,
@@ -111,6 +111,8 @@ def workflow_job_from_catalog(project: ProjectData, catalog_job: WorkflowCatalog
             "workflow_catalog_job_key": catalog_job.job_key,
         },
     }
+    if catalog_job.namespace == "Custom":
+        entry["artifacts"]["custom_job_id"] = catalog_job.catalog_id.removeprefix("custom::")
     return {
         "workflow_job_id": uuid.uuid4().hex,
         "owner_kind": catalog_job.owner_kind,
@@ -165,6 +167,12 @@ def _catalog_job_for_workflow_job(
     group = artifacts.get("workflow_catalog_group") or str(entry.get("group", ""))
     job_key = artifacts.get("workflow_catalog_job_key") or str(entry.get("job_name", ""))
     for catalog_job in catalog_jobs if catalog_jobs is not None else build_workflow_job_catalog(project):
+        if catalog_job.namespace == "Custom" and (
+            catalog_job.catalog_id == artifacts.get("workflow_catalog_id")
+            or catalog_job.catalog_id == "custom::" + str(artifacts.get("custom_job_id", ""))
+            or (namespace == "Custom" and catalog_job.job_key == job_key)
+        ):
+            return catalog_job
         if catalog_job.namespace == namespace and catalog_job.group == group and catalog_job.job_key == job_key:
             return catalog_job
     return None
@@ -221,7 +229,8 @@ def _catalog_job_from_default(project: ProjectData, definition: JobDefaultDefini
 
 
 def _catalog_job_from_custom(project: ProjectData, job: CustomJobDefinition) -> WorkflowCatalogJob:
-    owner_kind, owner_name = default_owner_for_processing_tab(project, "Processing: Custom jobs")
+    tab = CUSTOM_JOB_TARGETS.get(job.target_tab, "Processing: Custom jobs") if job.target_tab and not custom_job_assignment_error(job.target_tab, job.target_group) else "Processing: Custom jobs"
+    owner_kind, owner_name = default_owner_for_processing_tab(project, tab)
     fields = tuple(
         [JobDefaultField("execution_environment", "Default local environment", "environment", job.environment_title or "None")]
         + [
@@ -236,12 +245,12 @@ def _catalog_job_from_custom(project: ProjectData, job: CustomJobDefinition) -> 
         ]
     )
     return WorkflowCatalogJob(
-        catalog_id=f"custom::{job.name}",
+        catalog_id=f"custom::{job.job_id}",
         namespace="Custom",
-        group="Custom jobs",
+        group=custom_job_groups(job.target_tab).get(job.target_group, "Tomograms" if job.target_tab == "tomograms" else "Custom jobs"),
         job_key=job.name,
         title=job.name,
-        processing_tab="Processing: Custom jobs",
+        processing_tab=tab,
         owner_kind=owner_kind,
         owner_name=owner_name,
         fields=fields,

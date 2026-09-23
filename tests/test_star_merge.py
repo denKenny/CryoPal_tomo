@@ -79,6 +79,61 @@ def _write_coordinate_star(path: Path, coordinates: list[float]) -> None:
 
 
 class StarMergeTests(unittest.TestCase):
+    def test_abundance_rejects_ambiguous_dataset_instead_of_mixing_counts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "particles.star"
+            _write_abundance_star(path, ["TS_1.tomostar"])
+            with self.assertRaisesRegex(StarMergeError, "Ambiguous dataset"):
+                particle_abundance_plot_data(path, {"A": "Sample", "B": "Sample"}, False, "total",
+                                             dataset_aliases={"A": ["TS_1"], "B": ["TS_1"]})
+
+    def test_occupancy_zero_counts_and_conditions_preserve_abundance(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "particles.star"
+            _write_abundance_star(path, ["a/Position_18.tomostar", "Position_18.tomostar",
+                                         "Position_18_2.tomostar", "Other.tomostar"])
+            options = dict(dataset_to_sample={"A": "Control", "B": "Treatment", "Unused": "Control"},
+                           compare_samples=True, measure="density",
+                           dataset_aliases={"A": ["Position_18", "Position_18_2"], "B": ["Other"]},
+                           dataset_tomograms={"A": ["Position_18", "Position_18_2", "Empty"],
+                                              "B": ["Other", "Empty"], "Unused": ["Unrelated"]})
+            original = particle_abundance_plot_data(path, **options)
+            plot = particle_abundance_plot_data(path, **options, show_tomogram_occupancy=True,
+                                                only_particle_containing_ts=False)
+            positive = particle_abundance_plot_data(path, **options, show_tomogram_occupancy=True)
+        counts = {(row["dataset"], row["tomogram"]): row["count"] for row in plot.occupancy}
+        self.assertEqual(counts, {("A", "Position_18"): 2, ("A", "Position_18_2"): 1,
+                                  ("A", "Empty"): 0, ("B", "Other"): 1, ("B", "Empty"): 0})
+        self.assertEqual({row["condition"] for row in plot.occupancy}, {"Control", "Treatment"})
+        self.assertEqual(len(positive.occupancy), 3)
+        self.assertEqual(original.conditions, plot.conditions)
+        self.assertEqual(original.all_condition, plot.all_condition)
+        self.assertFalse(plot.occupancy_warnings)
+
+    def test_occupancy_missing_or_mismatched_inventory_warns_without_false_zeros(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "particles.star"
+            _write_abundance_star(path, ["TS_1.tomostar"])
+            for inventory in ({}, {"A": ["TS_10"]}):
+                plot = particle_abundance_plot_data(
+                    path, {"A": "Sample"}, False, "total", dataset_aliases={"A": ["TS_1"]},
+                    show_tomogram_occupancy=True, only_particle_containing_ts=False,
+                    dataset_tomograms=inventory)
+                self.assertEqual([row["count"] for row in plot.occupancy], [1])
+                self.assertTrue(plot.occupancy_warnings)
+
+    def test_occupancy_reads_relion_micrograph_names(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "particles.star"
+            path.write_text("data_particles\nloop_\n_rlnMicrographName #1\n"
+                            "folder/TS_1.tomostar\nfolder/TS_1.tomostar\n", encoding="utf-8")
+            plot = particle_abundance_plot_data(
+                path, {"Dataset": "Sample"}, False, "total", dataset_aliases={"Dataset": ["TS_1"]},
+                show_tomogram_occupancy=True, only_particle_containing_ts=False,
+                dataset_tomograms={"Dataset": ["TS_1", "TS_2"]})
+        self.assertEqual(plot.mode, "3d")
+        self.assertEqual([row["count"] for row in plot.occupancy], [2, 0])
+
     def test_classification_convergence_uses_matching_particles_and_cache(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             base = Path(tmpdir)

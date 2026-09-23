@@ -180,6 +180,11 @@ PARTICLE_JOBS: tuple[CatalogJob, ...] = (
         job_key="plot_particle_abundance",
         title="Plot particle abundance",
         fields=(
+            CatalogField("show_tomogram_occupancy", "Show tomogram occupancy", widget="bool"),
+            CatalogField("only_particle_containing_ts", "Show only particle containing TS", widget="bool", default_value="true"),
+            CatalogField("sort_by_occupancy", "Sort by occupancy", widget="bool", default_value="false"),
+            CatalogField("occupancy_reference", "Tomogram occupancy reference", widget="choice",
+                         default_value="None", options=("Plot median value", "Plot mean value", "None")),
             CatalogField(
                 "compare_samples",
                 "Compare Samples",

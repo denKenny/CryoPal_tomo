@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import re
+import shlex
+import uuid
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -9,6 +12,22 @@ from cryoet_organizer.project import ProjectData
 
 CUSTOM_JOBS_METADATA_KEY = "custom_job_types"
 CUSTOM_JOBS_SUFFIX = ".cryopal.custom_jobs.json"
+
+
+def render_custom_context(template: str, context: dict[str, str]) -> str:
+    """Insert application-owned context as shell arguments; leave user flags untouched."""
+    keys = {"dataset_name", "ts_name", "input_stem", "processing_directory",
+            "population_name", "population_file", "population_directory", *context}
+    pattern = r"(?<![$\\])\{(" + "|".join(re.escape(key) for key in sorted(keys)) + r")\}"
+
+    def replace(match):
+        key = match.group(1)
+        value = context.get(key, "")
+        if not value:
+            raise ValueError(f"Missing execution context for {{{key}}}.")
+        return shlex.quote(value)
+
+    return re.sub(pattern, replace, template)
 
 
 @dataclass
@@ -39,6 +58,9 @@ class CustomJobDefinition:
     command_template: str = ""
     environment_title: str = "None"
     parameters: list[CustomJobParameter] = field(default_factory=list)
+    job_id: str = field(default_factory=lambda: uuid.uuid4().hex)
+    target_tab: str = ""
+    target_group: str = ""
 
     @classmethod
     def from_dict(cls, payload: dict) -> "CustomJobDefinition":
@@ -48,6 +70,9 @@ class CustomJobDefinition:
             command_template=str(payload.get("command_template", "")),
             environment_title=str(payload.get("environment_title", "None") or "None"),
             parameters=[CustomJobParameter.from_dict(item) for item in payload.get("parameters", [])],
+            job_id=str(payload.get("job_id") or uuid.uuid5(uuid.NAMESPACE_URL, "cryopal:custom:" + str(payload.get("name", ""))).hex),
+            target_tab=str(payload.get("target_tab", "")),
+            target_group=str(payload.get("target_group", "")),
         )
 
     def to_dict(self) -> dict:
@@ -62,6 +87,11 @@ def get_project_custom_jobs(project: ProjectData) -> list[CustomJobDefinition]:
 
 
 def set_project_custom_jobs(project: ProjectData, jobs: list[CustomJobDefinition]) -> None:
+    seen = set()
+    for job in jobs:
+        if job.job_id in seen:
+            job.job_id = uuid.uuid4().hex
+        seen.add(job.job_id)
     project.state.custom_job_types = [job.to_dict() for job in jobs]
 
 
@@ -107,7 +137,39 @@ def merge_custom_jobs(
                 command_template=job.command_template,
                 environment_title=job.environment_title,
                 parameters=list(job.parameters),
+                target_tab=job.target_tab,
+                target_group=job.target_group,
             )
         merged.append(candidate)
         existing_names.add(candidate.name.casefold())
     return merged
+
+
+CUSTOM_JOB_TARGETS = {
+    "": "None", "processing": "Processing: WARP", "processing_m": "Processing: M",
+    "tomograms": "Processing: TS jobs", "particles": "Processing: Particle jobs",
+}
+
+
+def custom_job_groups(target_tab: str) -> dict[str, str]:
+    from cryoet_organizer.warptools_catalog import GROUPS
+    from cryoet_organizer.mtools_catalog import M_GROUPS
+    labels = GROUPS if target_tab == "processing" else M_GROUPS if target_tab == "processing_m" else ()
+    return {label.lower().replace(" ", "_"): label for label in labels}
+
+
+def custom_job_assignment_error(target_tab: str, target_group: str) -> str:
+    if target_tab not in CUSTOM_JOB_TARGETS:
+        return "Unknown Processing tab. Choose a supported tab or None."
+    groups = custom_job_groups(target_tab)
+    if groups and target_group not in groups:
+        return "Please select a valid job group for the chosen Processing tab."
+    if not groups and target_group:
+        return "This Processing tab does not have job groups."
+    return ""
+
+
+def assigned_custom_jobs(project: ProjectData, target_tab: str, group: str = "") -> list[CustomJobDefinition]:
+    return [job for job in get_project_custom_jobs(project)
+            if job.target_tab == target_tab and not custom_job_assignment_error(job.target_tab, job.target_group)
+            and custom_job_groups(target_tab).get(job.target_group, "") == group]

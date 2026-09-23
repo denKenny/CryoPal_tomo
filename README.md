@@ -39,6 +39,22 @@ cryopal-tomo
 python3 CryoPal_tomo.py
 ```
 
+### Optional processing-flow layout
+
+`Global Job List > Flow view` works with the existing installation. It includes
+a built-in dataset-lane layout, zoom, and horizontal/vertical scrolling. For
+Graphviz layout of smaller graphs, optionally install the external `dot` program:
+
+```bash
+conda install -c conda-forge graphviz
+```
+
+No Python Graphviz wrapper is required. If `dot` is unavailable, fails, takes
+too long, or the graph is very large, CryoPal uses the built-in layout instead.
+NetworkX, when already installed, provides an additional DAG validation check;
+it is not required. See the Markdown documentation for dependency evidence and
+limitations when displaying older processing histories.
+
 ### Optional legacy launcher
 
 If you want to start it more conveniently from anywhere, add the repository directory to your `PATH`. For example, in `~/.bashrc`:

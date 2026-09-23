@@ -142,6 +142,10 @@ def schedule_workflow(project: ProjectData, workflow: dict[str, Any]) -> list[Jo
             entry.artifacts.pop("queue_order", None)
         else:
             entry.artifacts = {}
+        # A scheduled workflow is a fresh run, not the historical run it was copied from.
+        entry.artifacts.pop("provenance", None)
+        from cryoet_organizer.job_provenance import capture_job_provenance
+        capture_job_provenance(entry)
         entry.artifacts["queue_order"] = next_order
         next_order += 1
         planned.append((owner, entry))

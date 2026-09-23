@@ -1,6 +1,7 @@
 from __future__ import annotations
 import re
 import shlex
+import statistics
 import subprocess
 import threading
 import tkinter as tk
@@ -1008,6 +1009,10 @@ class ParticlesTab(SidebarTab):
         self.abundance_compare_samples_var = tk.BooleanVar(value=False)
         self.abundance_measure_var = tk.StringVar(value="Plot total particle numbers")
         self.abundance_rescale_var = tk.BooleanVar(value=False)
+        self.abundance_occupancy_var = tk.BooleanVar(value=False)
+        self.abundance_reference_var = tk.StringVar(value="None")
+        self.abundance_sort_var = tk.BooleanVar(value=False)
+        self.abundance_only_particles_var = tk.BooleanVar(value=True)
         self.abundance_mode_var = tk.StringVar(value="-")
         self.abundance_pixel_size_var = tk.StringVar(value="-")
 
@@ -1041,16 +1046,39 @@ class ParticlesTab(SidebarTab):
         self.abundance_measure_combo.grid(row=3, column=1, sticky="ew", pady=(0, 8))
         self.abundance_measure_combo.bind("<<ComboboxSelected>>", self._mark_abundance_dirty)
         ttk.Checkbutton(
+            abundance_parameters, text="Show tomogram occupancy",
+            variable=self.abundance_occupancy_var, command=self._on_abundance_occupancy_changed,
+        ).grid(row=4, column=0, sticky="w", pady=(0, 8))
+        occupancy_options = ttk.Frame(abundance_parameters)
+        occupancy_options.grid(row=4, column=1, sticky="w", pady=(0, 8))
+        self.abundance_only_particles_check = ttk.Checkbutton(
+            occupancy_options, text="Show only particle containing TS",
+            variable=self.abundance_only_particles_var, command=self._mark_abundance_dirty,
+            state="disabled",
+        )
+        self.abundance_only_particles_check.grid(row=0, column=0, sticky="w")
+        self.abundance_sort_check = ttk.Checkbutton(
+            occupancy_options, text="Sort by occupancy", variable=self.abundance_sort_var,
+            command=self._mark_abundance_dirty, state="disabled",
+        )
+        self.abundance_sort_check.grid(row=0, column=1, sticky="w", padx=(12, 0))
+        self.abundance_reference_combo = ttk.Combobox(
+            occupancy_options, textvariable=self.abundance_reference_var, state="disabled",
+            values=("Plot median value", "Plot mean value", "None"), width=20,
+        )
+        self.abundance_reference_combo.grid(row=0, column=2, sticky="w", padx=(12, 0))
+        self.abundance_reference_combo.bind("<<ComboboxSelected>>", self._mark_abundance_dirty)
+        ttk.Checkbutton(
             abundance_parameters,
             text="Rescale plot to window-size",
             variable=self.abundance_rescale_var,
             command=self._on_abundance_rescale_changed,
-        ).grid(row=4, column=0, columnspan=2, sticky="w", pady=(0, 8))
+        ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(0, 8))
         ttk.Button(
             abundance_parameters,
             text="Render plot",
             command=self._render_abundance_plots,
-        ).grid(row=5, column=0, sticky="w", pady=(6, 0))
+        ).grid(row=6, column=0, sticky="w", pady=(6, 0))
 
         abundance_plot_box = ttk.LabelFrame(self.abundance_frame, text="Particle abundance plots", padding=12)
         abundance_plot_box.grid(row=2, column=0, sticky="nsew", pady=(12, 0))
@@ -1696,6 +1724,24 @@ class ParticlesTab(SidebarTab):
             in {"1", "true", "yes", "on"}
         )
 
+        for key, variable, fallback in (
+            ("show_tomogram_occupancy", self.abundance_occupancy_var, "false"),
+            ("only_particle_containing_ts", self.abundance_only_particles_var, "true"),
+            ("sort_by_occupancy", self.abundance_sort_var, "false"),
+        ):
+            variable.set(resolve_job_default(
+                self.app.project, "Particles", "Plot particle abundance",
+                "plot_particle_abundance", key, fallback,
+            ).lower() in {"1", "true", "yes", "on"})
+        self.abundance_only_particles_check.configure(
+            state="normal" if self.abundance_occupancy_var.get() else "disabled")
+        self.abundance_reference_var.set(resolve_job_default(
+            self.app.project, "Particles", "Plot particle abundance",
+            "plot_particle_abundance", "occupancy_reference", "None"))
+        self.abundance_sort_check.configure(
+            state="normal" if self.abundance_occupancy_var.get() else "disabled")
+        self.abundance_reference_combo.configure(
+            state="readonly" if self.abundance_occupancy_var.get() else "disabled")
         self.abundance_compare_samples_var.set(
             resolve_job_default(
                 self.app.project,
@@ -1901,6 +1947,8 @@ class ParticlesTab(SidebarTab):
         self.history_frame.grid_remove()
 
     def _on_job_type_changed(self, _event=None) -> None:
+        if self._select_assigned_custom_job():
+            return
         self._scroll_job_view_to_top()
         job_key = self._selected_job_key()
         self._hide_all_job_views()
@@ -3131,6 +3179,15 @@ class ParticlesTab(SidebarTab):
             "Plot settings changed. Click 'Render plot' to update the particle abundance plots."
         )
 
+    def _on_abundance_occupancy_changed(self) -> None:
+        self.abundance_sort_check.configure(
+            state="normal" if self.abundance_occupancy_var.get() else "disabled")
+        self.abundance_only_particles_check.configure(
+            state="normal" if self.abundance_occupancy_var.get() else "disabled")
+        self.abundance_reference_combo.configure(
+            state="readonly" if self.abundance_occupancy_var.get() else "disabled")
+        self._mark_abundance_dirty()
+
     def _reset_abundance_plot_display(self, message: str) -> None:
         for child in self.abundance_plot_container.winfo_children():
             child.destroy()
@@ -3304,6 +3361,61 @@ class ParticlesTab(SidebarTab):
                 width=slot_width - 12,
                 fill="#4f5d6b",
             )
+
+        self._draw_occupancy_plots(parent, plot, rescale_to_window, available_width)
+
+    def _draw_occupancy_plots(self, parent, plot, rescale_to_window, available_width) -> None:
+        if not plot.occupancy:
+            return
+        for warning in plot.occupancy_warnings:
+            ttk.Label(parent, text=warning, wraplength=max(320, available_width or 880)).grid(sticky="w")
+        groups = [("All", plot.occupancy)]
+        if plot.compare_samples:
+            by_condition = {}
+            for item in plot.occupancy:
+                by_condition.setdefault(str(item["condition"]), []).append(item)
+            groups.extend((label, by_condition[label]) for label in sorted(by_condition, key=str.casefold))
+        for label, items in groups:
+            if plot.sort_by_occupancy:
+                items = sorted(items, key=lambda item: -int(item["count"]))
+            counts = [int(item["count"]) for item in items]
+            reference = None
+            heading = f"Tomogram occupancy | {label} | TS={len(items)}"
+            if plot.occupancy_reference in {"Plot mean value", "Plot median value"}:
+                reference_name = "mean" if plot.occupancy_reference == "Plot mean value" else "median"
+                reference = statistics.mean(counts) if reference_name == "mean" else statistics.median(counts)
+                above = sum(value > reference for value in counts)
+                below = sum(value < reference for value in counts)
+                heading += f" | {reference_name}={reference:.2f} | {above} TS> {reference_name}, {below} TS< {reference_name}"
+            ttk.Label(parent, text=heading,
+                      style="Heading.TLabel").grid(sticky="w", pady=(10, 6))
+            width = max(320, available_width or 880) if rescale_to_window else max(880, 12 * len(items) + 100)
+            canvas = tk.Canvas(parent, width=width, height=330, highlightthickness=0)
+            canvas.grid(sticky="ew" if rescale_to_window else "w", pady=(0, 10))
+            left, right, top, bottom = 75, width - 20, 25, 270
+            high = max(1, max(int(item["count"]) for item in items))
+            canvas.create_line(left, top, left, bottom, right, bottom, fill="#2f3b46")
+            canvas.create_text(16, (top + bottom) / 2, text="Particle number", angle=90)
+            canvas.create_text((left + right) / 2, 310, text="Tomograms")
+            for value in sorted({round(high * step / 5) for step in range(6)}):
+                y = bottom - value / high * (bottom - top)
+                canvas.create_line(left - 4, y, left, y)
+                canvas.create_text(left - 8, y, text=str(value), anchor="e")
+            slot = (right - left) / len(items)
+            previous_dataset = None
+            for index, item in enumerate(items):
+                x = left + index * slot
+                center = x + slot / 2
+                y = bottom - int(item["count"]) / high * (bottom - top)
+                canvas.create_rectangle(x + slot * .1, y, x + slot * .9, bottom,
+                                        fill="#4682a9", outline="")
+                canvas.create_line(center, bottom, center, bottom + 4)
+                if not plot.sort_by_occupancy and item["dataset"] != previous_dataset:
+                    canvas.create_line(x, top, x, bottom + 12, fill="#7b8790", dash=(3, 3), width=2)
+                    previous_dataset = item["dataset"]
+            if reference is not None:
+                y = bottom - reference / high * (bottom - top)
+                canvas.create_line(left, y, right, y, fill="#b33b32", dash=(6, 4), width=2)
 
     def _convergence_iteration_files(self, directory: str | Path) -> list[tuple[int, Path]]:
         base = Path(directory)
@@ -3556,6 +3668,10 @@ class ParticlesTab(SidebarTab):
             "compare_samples": plot.compare_samples,
             "conditions": [serialize_condition(condition) for condition in plot.conditions],
             "all_condition": serialize_condition(plot.all_condition),
+            "occupancy": plot.occupancy,
+            "occupancy_warnings": plot.occupancy_warnings,
+            "occupancy_reference": plot.occupancy_reference,
+            "sort_by_occupancy": plot.sort_by_occupancy,
         }
 
     def _deserialize_abundance_plot(self, payload: dict[str, object]) -> ParticleAbundancePlot:
@@ -3576,6 +3692,10 @@ class ParticlesTab(SidebarTab):
             compare_samples=bool(payload.get("compare_samples", False)),
             conditions=conditions,
             all_condition=all_condition,
+            occupancy=list(payload.get("occupancy", [])),
+            occupancy_warnings=list(payload.get("occupancy_warnings", [])),
+            occupancy_reference=str(payload.get("occupancy_reference", "None")),
+            sort_by_occupancy=bool(payload.get("sort_by_occupancy", False)),
         )
 
     def _serialize_convergence_plot(self, plot: ParticleClassificationConvergencePlot) -> dict[str, object]:
@@ -3633,7 +3753,7 @@ class ParticlesTab(SidebarTab):
             parameters=parameters,
         )
         if artifacts:
-            entry.artifacts = artifacts
+            entry.artifacts.update(artifacts)
         datasets[0].job_history.append(entry)
         self.app._modified = True
         self.app._update_title()
@@ -3646,6 +3766,11 @@ class ParticlesTab(SidebarTab):
 
         dataset_to_sample = self._abundance_dataset_to_sample()
         compare_samples = self.abundance_compare_samples_var.get()
+        show_occupancy = self.abundance_occupancy_var.get()
+        occupancy_reference = self.abundance_reference_var.get()
+        sort_by_occupancy = self.abundance_sort_var.get()
+        only_particles = self.abundance_only_particles_var.get()
+        datasets = list(self.app.project.datasets)
         measure = self._abundance_measure_key()
         star_paths = list(self.abundance_star_paths)
         cancel_event = threading.Event()
@@ -3657,6 +3782,19 @@ class ParticlesTab(SidebarTab):
         def worker() -> None:
             plots: list[ParticleAbundancePlot] = []
             errors: list[str] = []
+            dataset_tomograms = {}
+            dataset_aliases = {}
+            for dataset in datasets:
+                if cancel_event.is_set():
+                    break
+                try:
+                    names = dataset_ts_names(dataset)
+                except OSError as exc:
+                    names = []
+                    errors.append(f"{dataset.dataset_name}: could not read TS list: {exc}")
+                dataset_tomograms[dataset.dataset_name] = names
+                aliases = set(names) | {thumb.ts_name for thumb in dataset.thumbnails if thumb.ts_name}
+                dataset_aliases[dataset.dataset_name] = [dataset.dataset_name, *aliases]
             for path in star_paths:
                 try:
                     plots.append(
@@ -3665,10 +3803,15 @@ class ParticlesTab(SidebarTab):
                             dataset_to_sample=dataset_to_sample,
                             compare_samples=compare_samples,
                             measure=measure,
-                            dataset_aliases=self._dataset_aliases(),
+                            dataset_aliases=dataset_aliases,
                             cancel_event=cancel_event,
+                            show_tomogram_occupancy=show_occupancy,
+                            only_particle_containing_ts=only_particles,
+                            dataset_tomograms=dataset_tomograms,
                         )
                     )
+                    plots[-1].occupancy_reference = occupancy_reference
+                    plots[-1].sort_by_occupancy = sort_by_occupancy
                 except OperationAborted:
                     self.app.root.after(
                         0,
@@ -3711,6 +3854,10 @@ class ParticlesTab(SidebarTab):
                     parameters={
                         "input_stars": ", ".join(star_paths),
                         "compare_samples": "true" if compare_samples else "false",
+                        "show_tomogram_occupancy": "true" if show_occupancy else "false",
+                        "occupancy_reference": occupancy_reference,
+                        "sort_by_occupancy": "true" if sort_by_occupancy else "false",
+                        "only_particle_containing_ts": "true" if only_particles else "false",
                         "plot_mode": self.abundance_measure_var.get(),
                         "datasets": ", ".join(self._dataset_options()),
                     },
@@ -4633,6 +4780,17 @@ class ParticlesTab(SidebarTab):
             self._on_extraction_mask_mode_changed()
         elif job_key == "plot_particle_abundance":
             self.abundance_star_paths = self._history_list_parameter(params, "input_stars")
+            self.abundance_occupancy_var.set(self._bool_parameter(params, "show_tomogram_occupancy"))
+            self.abundance_reference_var.set(params.get("occupancy_reference", "None"))
+            self.abundance_sort_var.set(self._bool_parameter(params, "sort_by_occupancy"))
+            self.abundance_sort_check.configure(
+                state="normal" if self.abundance_occupancy_var.get() else "disabled")
+            self.abundance_reference_combo.configure(
+                state="readonly" if self.abundance_occupancy_var.get() else "disabled")
+            self.abundance_only_particles_var.set(
+                str(params.get("only_particle_containing_ts", "true")).lower() in {"1", "true", "yes", "on"})
+            self.abundance_only_particles_check.configure(
+                state="normal" if self.abundance_occupancy_var.get() else "disabled")
             self.abundance_compare_samples_var.set(self._bool_parameter(params, "compare_samples"))
             self.abundance_measure_var.set(params.get("plot_mode", "Plot total particle numbers"))
             self.abundance_rescale_var.set(bool(entry.artifacts.get("rescale_to_window", False)))
@@ -4650,6 +4808,8 @@ class ParticlesTab(SidebarTab):
         entry = self._selected_history_entry()
         if entry is None:
             messagebox.showinfo("Copy job parameters", "Please select a particle job history entry first.")
+            return
+        if self._copy_assigned_custom_history(entry):
             return
         if not self._apply_particle_history_parameters(entry):
             messagebox.showinfo(
@@ -4683,6 +4843,7 @@ class ParticlesTab(SidebarTab):
         self.app.on_project_changed("particles")
 
     def on_project_loaded(self, project: ProjectData) -> None:
+        self._refresh_assigned_custom_jobs()
         project_id = id(project)
         if self.bound_project_id != project_id:
             self.bound_project_id = project_id

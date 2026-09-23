@@ -1890,6 +1890,8 @@ class TomogramsTab(SidebarTab):
         self._clear_preview_dirty()
 
     def _on_job_type_changed(self, _event=None) -> None:
+        if self._select_assigned_custom_job():
+            return
         self._scroll_job_view_to_top()
         job_key = self._selected_job_key()
         if job_key == "cryolithe_denoising":
@@ -2997,7 +2999,7 @@ class TomogramsTab(SidebarTab):
             parameters=parameters,
             working_directory=anchor_dataset.processing_folder,
         )
-        entry.artifacts = {"processed_ts": processed_ts}
+        entry.artifacts["processed_ts"] = processed_ts
         if self.execution_mode_var.get() == "Run locally" and self.environment_var.get().strip():
             entry.parameters["execution_environment"] = self.environment_var.get().strip()
         entry.parameters.update(self._current_slurm_overrides())
@@ -3725,6 +3727,8 @@ class TomogramsTab(SidebarTab):
             messagebox.showinfo("Copy job parameters", "Please select a job history entry first.")
             return
         _dataset, entry = selected
+        if self._copy_assigned_custom_history(entry):
+            return
         if entry.job_name not in self.job_catalog:
             messagebox.showinfo(
                 "Copy job parameters",
@@ -4793,6 +4797,7 @@ class TomogramsTab(SidebarTab):
             on_queue_finished()
 
     def on_project_loaded(self, project: ProjectData) -> None:
+        self._refresh_assigned_custom_jobs()
         project_id = id(project)
         if self.bound_project_id != project_id:
             self.bound_project_id = project_id
